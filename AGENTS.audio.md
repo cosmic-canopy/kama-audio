@@ -34,6 +34,13 @@ Areas 1 and 2 are decided (§ Decided, 1 to 11),** and area 2's rows are in [ROA
   - KAUD-1 and KAUD-2 still reproduce;
   - KAUD-3 was found then (a `@noheap` verdict that changes with the manifest's path). Until kama fixes it, check a
     program by its absolute path.
+- **kama 0.9.943 (`590aa28a`) has two fixes this package wants:**
+  - KR-386 (0.9.942) is KAUD-1, `emSettings` reaching a `csources` file;
+  - KR-387 (0.9.943) lets a page under `kama run --headless` make sound, which may replace `.scratch/browsers.sh`
+    for the package's browser legs.
+
+  kyoten's next Windows session asks the owner whether to bump the pin to it. When the pin moves, rebuild the Mac's,
+  re-run KAUD-1's repro and retire it if it passes, and try the probes under `kama run --headless`.
 - **Read first:** § Decided, then [RESEARCH.md](RESEARCH.md) § 4 (the native engines and devices) and § 6 (what area 2
   measured, which is area 3's input).
 - **Then:** plan area 3's probes, run them, and ask the area in full.

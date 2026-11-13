@@ -8,7 +8,7 @@ decisions are the owner's and go in AGENTS.audio.md with their reasons.
 
 | Source | Version, as of 2026-11-13 |
 |---|---|
-| kama | 0.9.938+g94365be5, kyoten's pin, built from a clean clone on this Mac |
+| kama | 0.9.938+g94365be5, kyoten's pin, built from a clean clone on this Mac (§ 7 on 0.9.943+g590aa28a) |
 | Chrome for Testing | 157.0.8103.50, pinned in `~/browsers`, headless and muted |
 | Firefox | 160.0, pinned in `~/browsers`, headless, autoplay blocked |
 | Safari | 27.2, the system's. Not measured yet: it has no headless mode, so a run waits for the owner |
@@ -438,3 +438,170 @@ The worst quantum's allocation time, in µs (99th percentile in brackets):
   - a `DynamicArray` allocated.
 
   So the route for a page that cannot be isolated is two builds of one program: the page's, and the worklet's.
+
+## 7. Area 3, measured
+
+Probes for area 3 ([AGENTS.audio.md](AGENTS.audio.md) § The design pass, 3), run 2026-11-13 on the Mac (Apple M4,
+4 performance and 6 efficiency cores) **on kama 0.9.943** (`590aa28a`, kyoten's pin from that day), emsdk 7.0.0 and the
+pinned browsers, headless. Nothing was audible: every device and worklet got zeros, and no input device was opened
+(the microphone rows use the browsers' fake devices). Each probe re-runs with its `run.sh` and writes `results/`.
+**KAUD-1 is fixed on 0.9.943** (its repro, `aud-probe-kama/aw_tls_nofix/`, now builds); KAUD-3 still reproduces.
+
+### 7.1 One program on both web routes (`.scratch/aud-probe-routes/`)
+
+**The setup:**
+- **The code.** A library (`lib/`, standing in for this package) holds the engine (stamped commands, slots, a render
+  that splits each block at a command's frame), its web seam in C and JS, and the defaults `AUDIO_WORKLET` and
+  `WASM_WORKERS` in its `emSettings`. A program (`app/`) holds its own processor (a sawtooth, a one-pole lowpass, a gain
+  changed by a command mid-block, and a tremolo through libm's `sin`) and a factory that builds it from its options.
+- **The builds.** One source tree, four `kama build`s, each one of the program's `select.TARGET`s:
+  - natively;
+  - `WEB_SHARED`: one build whose memory is shared. The processor is built on the program's side and handed over; the
+    engine runs in emscripten's Wasm Audio Worklet; commands go through the ring;
+  - `WEB_PAGE` and `WEB_WORKLET`: the pair for a page that cannot be isolated. The page's build only sends commands, as
+    one transferred `ArrayBuffer` per flush. The worklet's build is the same program with `ENVIRONMENT=worklet`, and it
+    builds the processor itself from the create command's options (Web Audio's `registerProcessor` and
+    `processorOptions` model).
+- **The loader.** One page picks a build at load by `crossOriginIsolated`; the server isolates the page or not.
+- **The check.** Each route hashes its processor's first 96,000 samples (2 s), which start 40 quanta ahead of "now".
+
+**Results** (`results/`):
+
+| | the hash | late commands |
+|---|---|---|
+| `WEB_SHARED`, Chrome 157 and Firefox 160 | `3166511926/1473068030` | 0 |
+| `WEB_PAGE` + `WEB_WORKLET`, Chrome and Firefox | `3166511926/1473068030` | 0 |
+| native, `reproducible-float`, release and debug | `3166511926/1473068030` | 0 |
+| native, release | `1521166993/2633355939` (3 `fmadd`s in its code) | 0 |
+| native, debug | `4005530778/2242939657` | 0 |
+
+- **Both routes make the same samples in both browsers,** and so does native, but **only with `reproducible-float`.**
+  Without it, native release (fused multiply-adds, Apple's `sinf`) and native debug each differ from the web and from
+  each other. A dependency may set `reproducible-float`, and it then holds for the whole program.
+- **A processor built on the program's side and one built from its options in the worklet's instance are the same.**
+- **A library's C seam can pick its route when it compiles.** 0.9.942's KR-386 hands `WASM_WORKERS` to every C source,
+  so the shared build's seam saw `__EMSCRIPTEN_WASM_WORKERS__` and `__EMSCRIPTEN_SHARED_MEMORY__`, and the others saw
+  neither. The library's `emSettings` set the shared route as the default; the program's targets set both to 0 for the
+  pair (the project wins a scalar).
+- **The sizes:**
+  - the shared build: 56,192 B of wasm and 31,573 B of JS;
+  - the page's build: 44,242 B and 19,713 B;
+  - the worklet's instance: one 25,546 B file (`SINGLE_FILE`).
+- **What the program had to write, because kama gives a library no way to:**
+  - three targets: the worklet's with 8 emscripten settings, including an `EXPORTED_FUNCTIONS` list of mangled names
+    (`_routesapp_rw_*`);
+  - a `main` for each target, gated by the program's own target names;
+  - the worklet's entry points as `expose fn`s;
+  - the loader page, and the processor script that imports the worklet's build;
+  - four `kama build` runs, each with its own `-o`. `kama run` serves one artifact, and a `SINGLE_FILE` build is served
+    unisolated.
+- **Why a library cannot carry it** (`flags/`):
+  - no flag says "this build's memory is shared" (kama's KR-327 is open);
+  - one `kama build` makes one artifact;
+  - a flag or a `select` group a library declares cannot be set by its consumer
+    (*"--define references undeclared flag"*, *"--select names no such group"*);
+  - **a library that gates code on its own declared flag passes its own check, but every consumer's build fails**,
+    with an error that names no file (`:3:0: error: … undeclared flag`). It builds only when the consumer declares the
+    same flag.
+
+### 7.2 What each browser gives a running context (`.scratch/aud-probe-context/`)
+
+| | Chrome 157 | Firefox 160 |
+|---|---|---|
+| `latencyHint` → `baseLatency` / `outputLatency`, ms | `interactive` and 0.005: 5.3 / 17; `balanced`: 10 / 23; `playback` and 0.02: 21.3 / 33; 0.1: 170.7 / 182 | 0 / 11.4 for every hint: **ignored** |
+| `sampleRate` asked (22,050 to 192,000) | honoured; the default is 48,000 | honoured; the default is 48,000 |
+| `renderSizeHint` 64, 256, 512 | honoured: `renderQuantumSize` and the block a JS worklet's `process()` gets; `"hardware"` gave 128 | **ignored**: always 128, no `renderQuantumSize` |
+| emscripten's Wasm Audio Worklet with a hint | `samplesPerChannel` 64, 256, 512 as asked | 128 |
+| `getOutputTimestamp()` over 20 s | drift −6.1 ppm; the mapping's residual 1.4 µs median, 4.9 µs worst | drift −1.4 ppm; residual 1.4 ms median, 2.9 ms worst |
+| `playbackStats` | `underrunEvents`, `underrunDuration`, `totalDuration`, `averageLatency` (18.0 ms), `minimumLatency`, `maximumLatency` | none |
+| `onerror`, `setSinkId` | yes | no |
+| `mediaDevices.selectAudioOutput` | no | yes |
+| `navigator.audioSession` | no | no |
+
+- **The microphone path** (the fake devices, `getUserMedia` → `MediaStreamAudioSourceNode` → an `AudioWorkletNode`'s
+  input):
+  - The input reached the worklet as planar channels of 128 frames in both browsers.
+  - Chrome turns echo cancellation, noise suppression and gain control **on by default**. Each turns off by constraint,
+    and its echo cancellation also offers `"remote-only"` and `"all"`.
+  - Firefox's fake device offers none of them, so a real microphone's answer waits for the owner's hardware.
+- **Starting with no autoplay switch** (Chrome, a trusted click through `@kama/window`'s driver; one case a page):
+  - With no gesture, a context made at load is `suspended`, and `resume()` stays pending.
+  - After one click, `resume()` starts it from the click's handler. It also starts it 1 s later from a timer, from a
+    Worker's message 1 s later (a program whose `main` is in a worker), and 6.5 s later, after the transient
+    activation has expired.
+  - A context made after the click starts `running`.
+  - So Chrome holds the gesture for the page (sticky activation). Safari's rule is not measured: it has no headless
+    mode, so it waits for the owner.
+
+### 7.3 miniaudio's device layer from kama, on CoreAudio (`.scratch/aud-probe-device/`)
+
+**The setup:** miniaudio 0.11.25 (FFD's copy) with only its device layer, `MA_NO_RUNTIME_LINKING` and the four frameworks
+linked through gated `ldflags`. A kama render (`@foreignEntry @noheap @noparks`, `@onPanic(recover: 1)`) writes zeros
+and forces one bounds panic. The Mac's default output ran at 48 kHz, 15 s a case, while a second process read the
+device's buffer size every 500 ms.
+
+| asked | the callback's frames, every call | gap between calls, µs: median / 99.9th / worst |
+|---|---|---|
+| 128, miniaudio's fixed-size callback | 128 | 2,667 / 2,688 / 2,702 |
+| 64 | 64 | 1,333 / 1,360 / 1,372 |
+| 32 | 32 | 667 / 693 / 705 |
+| 256 | 256 | 5,333 / 5,354 / 5,357 |
+| 128, the raw callback | 128 | 2,667 / 2,688 / 2,689 |
+| 128, the null device | 128 | 2 / 15,058 / 15,132 |
+
+- **CoreAudio gave the period asked for, from 32 to 256 frames,** so on this Mac a 128-frame engine needs no FIFO.
+- **The latency:** at 128 frames CoreAudio reports 60 frames of device latency, a safety offset of 48, a stream latency
+  of 183 and the 128 buffer: 419 frames, 8.7 ms.
+- **The callback's thread is real-time** (`SCHED_FIFO` 63, with a time constraint of one block) and **already a member
+  of the device's workgroup**: `os_workgroup_join` from it returned `EALREADY`.
+- **Another process kept seeing a 512-frame buffer** in every reading, so a program's period does not change other
+  programs'.
+- **The kama render's panic was recovered every time** and the stream kept running. But the recovered panic's message
+  is written from the audio thread: output on the real-time path, on that rare path.
+- **The null device runs in bursts,** a batch of callbacks every 15 ms on a normal-priority thread. It suits a smoke
+  test of the seam, never timing; a test renders offline.
+- **The cost:** the seam compiles in 1.2 s and adds 121 KB to a stripped program (155,392 B against 33,824 B).
+- **What miniaudio does not do** (read in its source, § 4 and the session's survey): Audio Workgroups or MMCSS for
+  threads of its own, and device added or removed events.
+
+### 7.4 The render across cores (`.scratch/aud-probe-parallel/`)
+
+**The work:** 1,024 voices, each a chain of 8 biquads over noise, about half of one core's 2.67 ms quantum. Each voice
+writes its own row, and the rows are summed in voice order. The device gets zeros. 15 s a case. "Busy" means one
+spinning thread per core (10 natively, 8 Wasm Workers on the web).
+
+**Natively, in CoreAudio's callback** (compute per quantum in µs, and CoreAudio's overload notifications):
+
+| threads | workers | wake | idle: median / worst / overloads | busy: median / worst / overloads |
+|---|---|---|---|---|
+| 1 | none | | 1,283 / 1,445 / 0 | 1,098 / 1,187 / 0 |
+| 4 | plain threads | semaphore | 1,735 / 6,001 / 1 | 1,342 / 9,689 / 417 |
+| 4 | real-time | semaphore | 1,732 / 1,903 / 0 | 337 / 356 / 0 |
+| 4 | real-time, **joined to the device's workgroup** | semaphore | **438 / 501 / 0** | **336 / 351 / 0** |
+| 4 | real-time, joined | spinning | 1,710 / 5,825 / 9 | collapsed: 339 quanta in 15 s |
+| 2 | real-time, joined | semaphore | | 590 / 623 / 0 |
+| 8 | real-time, joined | semaphore | | 466 / 508 / 0 |
+| 8 | plain threads | semaphore | | 1,186 / 16,801 / 550 |
+
+- **A parallel render works natively only with real-time workers joined to the device's workgroup and woken by a
+  semaphore.** Then 4 workers ran a quantum 3 to 4 times faster than one thread, idle or loaded, with no overload.
+- **Plain threads were slower than one thread** (the scheduler put them on efficiency cores at low clocks) and
+  overloaded the device under load.
+- **Real-time without the workgroup** was fast only when the machine was loaded.
+- **Spinning workers failed.**
+- **More workers than performance cores (8 on the M4's 4) were slower than 4.**
+- **The sum's bits equalled the serial render's in every case that ran 2,000 quanta.**
+
+**On the web, in the AudioWorklet with Wasm Workers on an isolated page** (compute per quantum in µs; underruns from
+`playbackStats`, which Firefox lacks):
+
+| | 1 thread, idle | 1 thread, busy | 4 threads, idle | 4 threads, busy |
+|---|---|---|---|---|
+| Chrome | 1,295 median, 0 underruns | 1,335, 0 underruns | 2,025, 0 underruns | **2,985 underruns, 15.9 s of 16 s** |
+| Firefox | 1,360, 2 over the deadline | 1,380, 44 over | 2,020, 193 over | **2,013 over; 2,251 quanta rendered of 6,000** |
+
+- **On the web, splitting a quantum across Wasm Workers is slower than one thread, and collapses under load.** A worker
+  is not a real-time thread and cannot join one. A worker woke 20 µs after its notify at the median when idle, and
+  360 to 465 µs at the median under load, up to 1 ms and more.
+- **One worklet thread held up under the same load:** no underrun in Chrome.
+- **The sums matched one thread's in both browsers.**

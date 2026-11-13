@@ -25,36 +25,42 @@ It is the audio half of kyoten's rule that each engine module is built on a gene
 
 **Seeded on 2026-11-13 with `kama seed` on kama 0.9.938+g94365be5 (kyoten's pin). Nothing is built.** A design pass
 comes before any code, as `@kama/graphics`' did. **Its research is done and measured (2026-11-13, [RESEARCH.md](RESEARCH.md)).
-Areas 1 and 2 are decided (§ Decided, 1 to 11),** and area 2's rows are in [ROADMAP.md](ROADMAP.md).
+Areas 1 to 3 are decided (§ Decided, 1 to 19),** and their rows are in [ROADMAP.md](ROADMAP.md).
 
-**The next session starts area 3, the two legs.** It begins in plan mode, as area 2's did.
-- **The Mac's pin is kyoten's 0.9.940 (`1873bcda`),** rebuilt from a clean clone on 2026-11-13. On it:
-  - the ring probe passed again: 10⁷ commands with none bad, natively and on wasm;
-  - its `contract/` checks gave the same verdicts;
-  - KAUD-1 and KAUD-2 still reproduce;
-  - KAUD-3 was found then (a `@noheap` verdict that changes with the manifest's path). Until kama fixes it, check a
-    program by its absolute path.
-- **kama 0.9.943 (`590aa28a`) has two fixes this package wants:**
-  - KR-386 (0.9.942) is KAUD-1, `emSettings` reaching a `csources` file;
-  - KR-387 (0.9.943) lets a page under `kama run --headless` make sound, which may replace `.scratch/browsers.sh`
-    for the package's browser legs.
-
-  kyoten's next Windows session asks the owner whether to bump the pin to it. When the pin moves, rebuild the Mac's,
-  re-run KAUD-1's repro and retire it if it passes, and try the probes under `kama run --headless`.
-- **Read first:** § Decided, then [RESEARCH.md](RESEARCH.md) § 4 (the native engines and devices) and § 6 (what area 2
-  measured, which is area 3's input).
-- **Then:** plan area 3's probes, run them, and ask the area in full.
+**The next session starts area 4, the ladders** (spatial sound, decoding, resampling, streaming). It begins in plan
+mode, as areas 2 and 3 did.
+- **The Mac's pin is kyoten's 0.9.943 (`590aa28a`),** taken from the Mac on 2026-11-13 (kyoten `01c1eae`, every suite
+  with 0.9.940's results). It is built from a clean clone of `../cstar`, kama's working clone on this Mac until the
+  owner renames it `kama`. On it:
+  - KAUD-1 is fixed and retired;
+  - KAUD-2 to KAUD-5 reproduce. Until kama fixes KAUD-3, check a program by its absolute path.
+- **Read first:** § Decided, then [RESEARCH.md](RESEARCH.md):
+  - § 3 (the state of the art's spatial and decoding rows);
+  - § 4 (Steam Audio, the decoders and the resamplers);
+  - § 7 (what area 3 measured).
+- **Then:** plan area 4's probes, run them, and ask the area in full.
 - **The Mac's toolchain** (emsdk's Python, Homebrew's paths, the pinned browsers) is in kyoten's `AGENTS.kyoten.md`
   § Build, *On macOS*.
 - **The probes' harness** is in `.scratch/`, which is git-ignored:
   - `env.sh` sets the toolchain;
-  - `browsers.sh` runs a page headless and muted, with the autoplay switches that let a realtime context start;
-  - `serve.mjs` serves a page, isolated or not, and collects its printed rows.
+  - `browsers.sh` runs a page headless and muted, with the autoplay switches that let a realtime context start.
+    `CHROME_EXTRA`, `FF_EXTRA_PREFS` and `RUN_PATH` add flags, prefs and a query;
+  - `serve.mjs` serves a page, isolated or not, and collects its printed rows;
+  - a trusted click comes from `@kama/window`'s `tools/webtest.mjs`, as `aud-probe-context/act/` uses it;
+  - KR-387 (0.9.943) lets `kama run --headless` start sound. But `kama run` serves one artifact, so the two-build web
+    route still needs this harness (KAUD-5).
 
-Waiting, and not area 3's:
-- Safari's measurements, which take the owner's focus, so ask first;
-- a long convolution reverb's cost as a built-in node against the worklet (area 4);
-- KAUD-1 and KAUD-2 upstream.
+Waiting, and not area 4's:
+- Safari's measurements, which take the owner's focus, so ask first:
+  - its gesture rule (decision 16);
+  - isolation with `require-corp`;
+  - its Web Audio 1.1 rows.
+- A real microphone, on the owner's hardware with the owner's OK (macOS asks permission): its round trip, duplex, and
+  each OS's echo cancellation (decision 18).
+- WASAPI's exclusive and `IAudioClient3` modes, and MMCSS for render workers (decisions 17 and 19), on the Windows box.
+- What `reproducible-float` costs the DSP (decision 14), once there is DSP.
+- A long convolution reverb's cost as a built-in node against the worklet (area 4).
+- KAUD-2 to KAUD-5 upstream.
 
 **It is designed and built on the Mac Mini, in parallel with kyoten's graphics track on Windows** (the owner,
 2026-11-13: "the mac kyoten clone can then design it and develop it in parallel to what we are doing here for
@@ -104,17 +110,17 @@ The areas, each asked in full in turn (area 1 first):
    - **The way back:** a ring of events and snapshots of levels.
    - **The upper tier** runs in `update()` on the program's thread.
    - **A program's own DSP** implements `AudioWorkletProcessor`, in the same quantum on both legs.
-3. **The two legs.** On the web: shared memory when the page is isolated, and emscripten's worklet without shared
-   memory when it cannot be (§ Decided, 7: a second build of the program, which kama builds with no gap, RESEARCH.md
-   § 6.4); Web Audio 1.1's features used where present and reported, never required; Safari's
-   quirks (the audio session, gestures). Natively: miniaudio's device layer only (low-latency modes, duplex, a null
-   device for tests, a custom backend for consoles), and the render graph across cores natively where the web has one
-   thread.
-   **Area 2's probes found for it** (RESEARCH.md § 6):
-   - A program that spawns runs `main` in a worker. A JS library function with `__proxy: 'sync'` starts the context on
-     the page's thread, and the worker then drives the ring directly.
-   - Firefox has no `playbackStats`, so underruns there cannot be counted.
-   - Headless runs need the autoplay switches, and a page that draws each frame.
+3. **The two legs.** **Decided (§ Decided, 12 to 19)**, after four probes measured on both legs (RESEARCH.md § 7):
+   - **The web's routes:** both, the loader picking one by `crossOriginIsolated`.
+   - **A program's processor:** registered by name, and built from plain-data options on whichever side runs the
+     engine.
+   - **Floats:** the program chooses `reproducible-float`.
+   - **The block:** the engine's own, declared, the same on every leg. Web Audio 1.1's features are reported, never
+     required.
+   - **Starting:** the package unlocks the context on the first gesture.
+   - **Natively:** miniaudio's device layer, with small seams of our own for what it lacks.
+   - **Input:** Web Audio's model on both legs.
+   - **Cores:** declared render workers natively, one thread on the web.
 4. **The ladders:** spatial sound (HRTF from SOFA data in kama on both legs, Steam Audio natively for occlusion and
    rooms, equal-power panning), decoding (WebCodecs where it works, kama-built decoders where it does not, the OS's
    AAC natively), resampling quality, and streaming.
@@ -319,6 +325,138 @@ Those questions stay in kyoten's `audio.md`.
       `@noheap`. Its walk follows a call through a contract value, even an `Owned<Processor>` held in a field, into
       every implementation, and refuses an allocation or a wait in any of them. A device-sized block would put k-rate
       parameters on different frames on each leg.
+    - **Amended the same day:** decision 13 adds how a processor is made (and its lifetime on a page that cannot be
+      isolated), and decision 15 makes "one block size" the engine's declared block.
+
+12. **Decided on 2026-11-13: both web routes, the loader picking one** (area 3, the web). The owner took the
+    recommendation.
+    - **The shared route is the default.** On an isolated page:
+      - one build of the program, its memory shared;
+      - the `AudioContext` on the page's thread, and the engine as the processor of one `AudioWorkletNode` through
+        emscripten's Wasm Audio Worklet;
+      - commands through the ring (decision 7).
+    - **A program that may land on a page that cannot be isolated also ships the pair:**
+      - the program's build, its memory not shared, which only sends commands, one transferred `ArrayBuffer` a flush;
+      - a second build of the same program for the worklet (`ENVIRONMENT=worklet`), which is the engine.
+    - **The loader picks one at start by `crossOriginIsolated`,** as kyoten's `web-and-native.md` (§ Decided, item 5)
+      already does for a threaded game and its single-threaded build.
+    - **Until kama can build the second artifact (KAUD-5),** the package ships what a program copies:
+      - the targets;
+      - the worklet's entry points;
+      - the loader page.
+
+      The package's C seam picks its route when it compiles, by `__EMSCRIPTEN_WASM_WORKERS__`.
+    - **Why** (RESEARCH.md § 7.1):
+      - One source tree built both routes, and both made the same samples in Chrome and Firefox.
+      - Shared memory alone would leave a page that cannot send the headers (an embed, some hosts) with no engine.
+      - The unshared route alone would give up the ring's next-quantum delivery, a worker `main` driving audio, and
+        the shared heap.
+13. **Decided on 2026-11-13: a program's processor is registered by name and built from plain-data options** (area 3,
+    a program's own DSP). The owner, asked whether this was the production answer and whether it changed decision 11:
+    "I assume option 1 is the production answer?" Told it does, in part, the owner said to record it.
+    - **Web Audio's model, on both routes.**
+      - The program registers each processor type under a name, with a factory, as `registerProcessor` does.
+      - A node is created with options that are plain data, as `processorOptions`.
+      - The same program code works on either route.
+    - **On an isolated page, decision 11 holds in full:** the program's side runs the factory, hands the processor over
+      with the create command, and drops it when it comes back.
+    - **On a page that cannot be isolated,** the worklet's own instance runs the same factory between quanta, from the
+      create command's bytes, and drops the processor itself. Decision 5 already lets that instance allocate there.
+    - **Why** (RESEARCH.md § 7.1): a processor built inside the worklet's instance from its options made the same
+      samples as one built on the program's side. The other answers were to serialize a built processor whole, which
+      kama has no general way to do, or to have no program DSP on such a page.
+14. **Decided on 2026-11-13: the program chooses `reproducible-float`** (area 3, identical samples). The recommendation
+    was that the package set it. The owner: "Is there a reason you didn't recommend option 2? It seems like the program
+    that consumes the package should be able to decide? Kyoten will prefer reproducible... but some applications will
+    not I assume." Re-examined, the owner was right, and the owner took the revised answer.
+    - **The package sets no float mode.** `reproducible-float` is program-wide: no FMA contraction anywhere, and musl's
+      math compiled in. A library setting it would impose it on every program.
+    - **What it buys:** the same samples between builds, native against web and debug against release. A bounce
+      already equals its own playback within one build, with or without it: the same code, block and bits.
+    - **The package's own tests program sets it,** so its tests that compare legs hold. Its docs say what it buys.
+      kyoten keeps it on.
+    - **Why** (RESEARCH.md § 7.1): with it, native debug and release made the web's hash; without it, native release
+      (fused multiply-adds, Apple's `sinf`) and native debug each made another.
+15. **Decided on 2026-11-13: the engine renders in its own declared block; Web Audio 1.1's features are reported, never
+    required** (area 3, the platforms' differences). The owner first asked what the problem was. Told that the block
+    decides when a k-rate parameter changes, so a block that followed the browser would make a program sound different in
+    Chrome and Firefox, the owner said: "it sounds like option 1 is the flexible and best production answer?", and
+    confirmed it.
+    - **The engine's block is the program's setting,** 128 frames by default, and the same on every leg. So a program's
+      samples never depend on the browser or the device.
+    - **The platform's callback size is only a request:** `renderSizeHint` on the web, the period natively. When the
+      callback is a multiple of the block, the engine runs several blocks a call; otherwise a FIFO bridges them. On the
+      Mac at 128, CoreAudio gave the period asked, so no FIFO was needed.
+    - **Each Web Audio 1.1 feature is used where present and reported on the context, never required:**
+      - `setSinkId`, and Firefox's `selectAudioOutput`;
+      - `renderSizeHint`;
+      - `onerror`;
+      - `playbackStats`. Underruns are counted where the platform or the engine can count them (Chrome, natively),
+        and reported as unknown elsewhere.
+    - **Why** (RESEARCH.md § 7.2, § 7.3):
+      - Chrome honours `renderSizeHint` from 64 to 512 and hands the worklet that block. Firefox always gives 128.
+      - `latencyHint` moves Chrome's output latency from 17 to 33 ms; Firefox ignores it.
+      - CoreAudio gave every period asked from 32 to 256 frames.
+16. **Decided on 2026-11-13: the package unlocks the context on the first gesture** (area 3, starting). The owner took
+    the recommendation.
+    - **The unlock:** the package's page-side JS adds a one-shot listener for the first `pointerdown`, `keydown` or
+      `touchend`, which calls `resume()` inside the handler. Every browser accepts that, Safari included.
+    - **The program sees the context's state** (`suspended`, `running`, `interrupted`, `closed`) in `update()`, and may
+      call `resume()` itself.
+    - **iOS's audio session type** (whether the silent switch mutes it) is an option of the context.
+    - **Why** (RESEARCH.md § 7.2):
+      - In Chrome, with no gesture, `resume()` stays pending. After one click it works from anywhere, a worker's
+        message and 6.5 s later included.
+      - Safari is said to want `resume()` inside the handler (not yet measured), and the listener meets that.
+17. **Decided on 2026-11-13: miniaudio's device layer natively, with small seams of our own** (area 3, the native
+    device). The owner: "it sounds like option 1... we may eventually want to write our own in kama in the future."
+    - **The vendoring:** miniaudio's sources (public domain or MIT-0), its device layer only (`MA_NO_DECODING`,
+      `MA_NO_ENCODING`, `MA_NO_GENERATION`, `MA_NO_RESOURCE_MANAGER`, `MA_NO_ENGINE`, `MA_NO_NODE_GRAPH`). On Apple,
+      `MA_NO_RUNTIME_LINKING`, with the frameworks linked directly, for notarization. Nothing reaches the web build.
+    - **What miniaudio lacks, in small C seams of our own:**
+      - render workers joined to the device's workgroup (decision 19);
+      - device added and removed events, from CoreAudio's listeners, `IMMNotificationClient` and PipeWire.
+    - **Consoles:** a console's private package implements miniaudio's custom-backend vtable.
+    - **Tests:** a test renders offline. The null device is a smoke test of the seam only.
+    - **The device seam is the package's own,** so kama-native backends can replace miniaudio later, as the owner
+      foresees.
+    - **Why** (RESEARCH.md § 4, § 7.3):
+      - On CoreAudio it gave the period asked from 32 to 256 frames, with 8.7 ms of output latency at 128.
+      - Its callback thread is real-time and already in the device's workgroup.
+      - It compiles in 1.2 s and adds 121 KB, and a kama `@noheap @noparks` render recovered a forced panic in it.
+      - The alternatives:
+        - SDL 3 has shared-mode WASAPI only and no promised callback size, and `@kama/window`'s SDL is Windows-only
+          with audio off;
+        - writing each OS's backend now is much more code, with no console seam for free.
+18. **Decided on 2026-11-13: input is Web Audio's model on both legs** (area 3, input). The owner took the
+    recommendation.
+    - **An input is a source node feeding the engine.**
+    - **On the web:** `getUserMedia`'s stream, then a `MediaStreamAudioSourceNode`, then the engine's worklet input. The
+      browser's processing (echo cancellation, noise suppression, gain control) is set by constraints.
+    - **Natively:** a miniaudio capture or duplex device feeds the same node. Echo cancellation comes from the OS's voice
+      processing where it has one (Apple's VoiceProcessingIO, Windows' communications capture, Android's
+      `VOICE_COMMUNICATION`), measured with the voice-chat example.
+    - **A real microphone waits for the owner's hardware and OK.**
+    - **Why** (RESEARCH.md § 7.2): in both browsers a stream reached the worklet's input as planar 128-frame channels.
+      Chrome turns its processing on by default, and each part turns off.
+19. **Decided on 2026-11-13: declared render workers natively, one thread on the web** (area 3, cores). The owner: "I
+    assume option 1 is the production grade... most flexible and most performant option?" Told it is (one thread is
+    still cheaper for a small mix, which is why the default is 0), the owner's answer stood.
+    - **The setting:** natively the render may use a declared number of render workers, an option of the context. 0,
+      the default, means the device's own thread.
+    - **The workers:** the package starts them as real-time threads joined to the device's workgroup (`os_workgroup`
+      on Apple; MMCSS "Pro Audio" on Windows; `SCHED_FIFO` through rtkit on Linux). They are woken by a semaphore,
+      never by spinning.
+    - **The sum:** rows are summed in a fixed order, so the samples equal the one-thread render's.
+    - **The exception to decision 10:** the library starts no thread except these. Only the audio side can make a
+      thread that joins the device's workgroup.
+    - **On the web the render stays on the worklet's one thread.**
+    - **Why** (RESEARCH.md § 7.4):
+      - 4 real-time workers joined to the workgroup ran a quantum in 0.34 to 0.44 ms against one thread's 1.1 to
+        1.3 ms, with no overload idle or under full load, and the same bits.
+      - Plain threads were slower than one thread and overloaded the device under load, and spinning workers failed.
+      - On the web, Wasm Workers made a quantum slower (2.0 against 1.3 ms) and collapsed under load: 2,985 underruns
+        in 16 s in Chrome.
 
 ## Where the truth is
 

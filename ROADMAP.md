@@ -6,14 +6,14 @@
 > **`AUD-<n>` is a permanent id, not a position.** It is assigned once, from the counter below, which the same edit
 > bumps. It is never reused or renumbered, and a shipped row's id retires with it.
 
-**Next id: AUD-7**
+**Next id: AUD-15**
 
 ## NOW: the design pass
 
-Areas 3 to 5 of [AGENTS.audio.md](AGENTS.audio.md#the-design-pass-what-is-open). Nothing is built before the
+Areas 4 and 5 of [AGENTS.audio.md](AGENTS.audio.md#the-design-pass-what-is-open). Nothing is built before the
 decisions it depends on are recorded. Area 5 puts the rows below in order, by example.
 
-## LATER: what area 2 decided, unordered until area 5
+## LATER: what areas 2 and 3 decided, unordered until area 5
 
 | id | item | why |
 |---|---|---|
@@ -23,3 +23,11 @@ decisions it depends on are recorded. Area 5 puts the rows below in order, by ex
 | AUD-4 | **The context's options and its memory**: every capacity declared, an injected `Allocator` (the global heap by default), everything the audio side uses allocated and freed on the program's side, and a declared answer at every limit | [decisions 5, 6](AGENTS.audio.md#decided) |
 | AUD-5 | **`update()`**: the upper tier's home on the program's thread. It polls the way back and turns the upper tier's decisions into stamped lower-tier commands | [decision 10](AGENTS.audio.md#decided) |
 | AUD-6 | **`AudioWorkletProcessor` as a contract**: a `@noheap` `process`, a render callback typed `@noheap @noparks`, processors built and dropped on the program's side, and the web's quantum natively behind a FIFO | [decision 11](AGENTS.audio.md#decided) |
+| AUD-7 | **The web's two routes**: the shared build (the Wasm Audio Worklet and the ring) and the pair (the program's build and the worklet's instance, one transferred `ArrayBuffer` a flush), a loader that picks by `crossOriginIsolated`, and the template a program copies until kama can build the second artifact (KAUD-5) | [decision 12](AGENTS.audio.md#decided) |
+| AUD-8 | **Processors registered by name**: a factory per type over plain-data options, run on the program's side with shared memory and in the worklet's instance without | [decision 13](AGENTS.audio.md#decided) |
+| AUD-9 | **The engine's declared block**: a callback-size request per platform (`renderSizeHint`, the device's period), several blocks a call or a FIFO between them, and Web Audio 1.1's features reported on the context | [decision 15](AGENTS.audio.md#decided) |
+| AUD-10 | **Starting**: the page-side unlock on the first gesture, the context's states in `update()`, and iOS's audio session as an option | [decision 16](AGENTS.audio.md#decided) |
+| AUD-11 | **The native device layer**: miniaudio vendored (its device layer only, frameworks linked on Apple), device added and removed events from each OS, the custom-backend seam for a console's package, offline rendering for tests | [decision 17](AGENTS.audio.md#decided) |
+| AUD-12 | **Input**: a media-stream source node on the web, a capture or duplex device natively, echo cancellation from the OS's voice processing where it has one | [decision 18](AGENTS.audio.md#decided) |
+| AUD-13 | **Render workers natively**: a declared count, real-time threads joined to the device's workgroup (MMCSS, rtkit elsewhere), woken by a semaphore, summed in a fixed order | [decision 19](AGENTS.audio.md#decided) |
+| AUD-14 | **`reproducible-float` is the program's**: the package's tests program sets it, and its docs say what it buys (the same samples between builds) | [decision 14](AGENTS.audio.md#decided) |

@@ -282,3 +282,159 @@ probes are in `.scratch/aud-probe-kama/`.
   offline in any case).
 - **Vendoring:** a C library is sources under `third_party/` gated per target (`"compileFor": ["!ARCH_WASM32"]`), as
   `@kama/window` vendors SDL 3; a package never ships binaries. miniaudio would be one header and one `.c` there.
+
+## 6. Area 2, measured
+
+Probes for area 2 ([AGENTS.audio.md](AGENTS.audio.md) § The design pass, 2), run 2026-11-13 on the Mac in the
+pinned browsers, headless. Each worklet writes zeros, so nothing could be heard. Each probe re-runs with its `run.sh`
+and writes `results/`. **A quantum is 128 frames, 2.67 ms at 48 kHz.** Chrome reports underruns through
+`AudioContext.playbackStats`. Firefox has no such API, so its underruns are unknown, not zero.
+
+- **A realtime context runs headless in both browsers** when Chrome is given `--autoplay-policy=no-user-gesture-required`
+  and Firefox `media.autoplay.default=0`. This corrects § 5's "0 frames": what was missing was the autoplay switch.
+- **Headless Chrome slows frames to 15 Hz** on a page that draws nothing. A page that changes the DOM each frame keeps
+  60 Hz, so the probes do that.
+
+### 6.1 The ring, in kama (`.scratch/aud-probe-ring/`)
+
+The peers' single-producer ring, written in kama: `Atomic<int64>` head and tail as monotonic counters on separate
+128-byte lines (the M4's line size), and an acquire load and a release store on each side. Each command is a typed
+`type value` of 48 bytes, holding an enum whose variants carry payloads, stored in an `InlineArray`. FFD had left that
+shape unprobed. The consumer is a C thread calling a `@noheap @onPanic` kama drain through the pointer C hands it, as
+an audio callback will.
+
+- **10⁷ commands with nothing lost or reordered, natively:**
+  - every sequence number in order and every checksum intact, in each of 13 release runs, at 27 to 35 million
+    commands a second (8.6 million in debug);
+  - **on wasm**, between the main thread and a Wasm Worker under node: the same, at 16 million a second.
+- **The test catches a missing release.** With the publish and its read made relaxed, 3 of 5 release runs on the M4
+  delivered 1 to 8 torn or reordered commands. The M4's memory model is weak enough to show it.
+- **ThreadSanitizer is not the evidence.** Apple clang 21's TSan reports a plain race and relaxed message passing on
+  one scalar, but stays silent on the ring with its release and acquire removed. That holds for kama's ring and for
+  the same ring written in plain C.
+- **The atomics are real hardware atomics:**
+  - the emitted C calls `__atomic_load_n` and `__atomic_store_n` with the stated orders, through std's width switch;
+  - on wasm, `Atomic<int64>` is `i64.atomic.load` and `i64.atomic.store`, lock-free, with no lock in the C. Every
+    wasm atomic is sequentially consistent, so acquire and release cost no less there.
+- **A safe function can call `storeExplicit`:** kama's `unsafe` marks a body, not a call, so a ring's `push` need not
+  be `unsafe`.
+- **kama holds a program's DSP to the real-time rules through a contract** (`aud-probe-ring/contract/`):
+
+  | The check | Result |
+  |---|---|
+  | an implementation of a `@noheap` contract member that is not itself `@noheap` | refused |
+  | a `@noheap fn` calling through a contract value, a generic or not | the walk enters every implementation, and refuses one that allocates |
+  | `@noparks` on a contract member | refused: kama allows it only on a `fnptr` type |
+  | a render `fnptr` typed `@noheap @noparks`, calling a processor held as an `Owned<Processor>` | the walk finds a `wait` in any implementation and refuses it |
+
+  So the render callback's type carries both checks for every processor a program could hand the engine. What still
+  passes is KAUD-2's: a lock window, `sleep` and output.
+
+### 6.2 Commands into the worklet, and the way back (`.scratch/aud-probe-cmd/`)
+
+**The setup:**
+- **The program.** kama on emscripten's Wasm Audio Worklets, built in release. The worklet counts finished quanta into
+  an `Atomic<int64>`.
+- **The stamp.** Each command carries the counter's value when the main thread sent it, so 0 means the command landed
+  in the very next quantum.
+- **The arms.** The ring, drained at the top of each quantum, against emscripten's `postMessage` route
+  (`emscripten_audio_worklet_post_function_viii`).
+- **The load.** Eight commands each frame at 60 Hz. "Busy" means the main thread spins for 12 ms of each frame and
+  makes 20,000 JS objects.
+- **The way back.** A sound's end every 37 quanta, and a meter every quantum. On the ring arm the main thread drains
+  the events and reads the meter's snapshot once a frame; on the other arm they come back by `postMessage`.
+- **The length.** 8 s a phase.
+
+Quanta from the stamp to arrival, as median / 99th percentile / worst:
+
+| | Chrome 157, idle | Chrome, busy | Firefox 160, idle | Firefox, busy |
+|---|---|---|---|---|
+| command in, ring | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 |
+| command in, `postMessage` | 0 / 0 / 2 | 0 / 0 / 2 | 0 / 2 / 6 | 0 / 4 / 4 |
+| a sound's end back, ring polled each frame | 4 / 8 / 8 | 3 / 8 / 8 | 4 / 9 / 9 | 4 / 12 / 12 |
+| a sound's end back, `postMessage` | 2 / 2 / 2 | 2 / 6 / 6 | 2 / 4 / 4 | 3 / 9 / 9 |
+| meter, snapshot (staleness when read) | 1 / 1 / 1 | 1 / 1 / 1 | 1 / 1 / 1 | 1 / 1 / 1 |
+| meter, `postMessage` (staleness on arrival) | 1 / 2 / 2 | 2 / 6 / 6 | 2 / 4 / 8 | 3 / 9 / 18 |
+| **64 meters a quantum** (24,000 messages a second), `postMessage`, busy | | 2 / 6 / 6 | | 3 / 9 / 12 |
+
+- **Chrome counted no underrun in any phase,** including 24,000 messages a second posted from the audio thread. One
+  12 ms underrun in the first phase of the first run did not recur.
+- **Nothing was lost.** Every phase delivered exactly 8 commands per frame. Firefox ran fewer frames when busy (464
+  of 480).
+- **A ring polled once a frame answers no later than the frame that acts on it.** Posted events reach the main thread
+  sooner, but a program reads them at its next frame either way.
+- **A program whose `main` runs in a worker** (`spawn/`; a program that spawns gets `PROXY_TO_PTHREAD`):
+  - a JS library function with `__proxy: 'sync'` ran the C seam on the page's thread and started the context;
+  - the worker then pushed straight into the ring: 0 / 0 / 0 quanta in both browsers;
+  - the way back was 4 / 8 / 8, polled by the worker;
+  - Firefox's frames were steadier with the page's thread free.
+- **emscripten's `postMessage` route cannot serve that program:**
+  - it posts through `emAudio[context].audioWorklet.port`, a table only the page's thread has;
+  - its replies arrive on the page's thread, not on the program's;
+  - each message is a new `{_wsc, args}` object, made on the sending thread, the audio thread included.
+  - emscripten's Web Audio library proxies nothing itself (`src/lib/libwebaudio.js` has no `__proxy`).
+
+### 6.3 Allocation on the audio thread (`.scratch/aud-probe-alloc/`)
+
+**The setup:**
+- **The allocation.** Inside a Wasm Audio Worklet with shared memory, each quantum's `process()` makes 16
+  `malloc`/`free` pairs of 64 B to 64 KB.
+- **The clock.** A Wasm Worker publishes `performance.now()` into shared memory, since a worklet has no
+  `performance.now()` (Web Audio issue 2527). It resolves 20 to 25 µs.
+- **The phases, 8 s each:**
+  - the worklet alone;
+  - against the page's thread and a Wasm Worker churning the same heap;
+  - the same, while the page's thread also grows the heap by 16 MB twice a second.
+- **The reference.** The same pattern natively on macOS, on a thread woken every 2.67 ms.
+
+The worst quantum's allocation time, in µs (99th percentile in brackets):
+
+| | alone | contended | contended, heap growing |
+|---|---|---|---|
+| Chrome, dlmalloc (emscripten's default) | 80 | 825 (80) | 940 (80) |
+| Chrome, mimalloc | 410 (30) | 70 (20) | 90 (20) |
+| Firefox, dlmalloc, run 1 | 20 | **6,000** (480) | 2,320 (80) |
+| Firefox, dlmalloc, run 2 | 20 | **63,500** (≥ 4,000) | **42,420** (≥ 4,000) |
+| Firefox, mimalloc | 80 (20) | 300 (20) | 40 (20) |
+| macOS natively, libmalloc | 75 (10) | 213 (20) | 523 (20) |
+
+- **With shared memory, a `malloc` on the audio thread has no bound.** In Firefox, one call waited 63.5 ms for the
+  allocator's lock: 24 quanta. In that run, more than 1 in 100 quanta lost a whole quantum to allocation.
+- **mimalloc's per-thread heaps shorten the tail but do not bound it:** 410 µs in a quantum with nothing else running.
+- **Natively the tail is shorter but still real:** half a millisecond while the heap grows.
+- **kama's heap is this `malloc`.** `kama_runtime.h` sends the default `GlobalAllocator` to `malloc` and `free`, unless
+  the program declares `@globalAllocator`.
+
+### 6.4 A page that cannot be isolated (`.scratch/aud-probe-noiso/`)
+
+**The setup:**
+- **The page.** Served with no COOP or COEP, so `crossOriginIsolated` is false and `SharedArrayBuffer` is undefined,
+  on the page and in the worklet.
+- **The engine.** A second wasm instance, built with `-sENVIRONMENT=worklet -sSINGLE_FILE -sMODULARIZE -sEXPORT_ES6`
+  and imported by the processor's module. A worklet loads scripts as ES modules, so a top-level `var` from one
+  `addModule` is invisible to the next.
+- **The arms.** A frame's 8 commands go as 8 messages, as one structured-clone batch, or as one transferred
+  `ArrayBuffer`.
+- **The measure.** With no shared clock, a command's landing quantum on the audio clock, minus its send time on the
+  page's clock, is counted as its **excess over the best case in the run**.
+
+| | Chrome, idle | Chrome, busy | Firefox, idle | Firefox, busy |
+|---|---|---|---|---|
+| excess quanta, median / 99th / worst (the worst of the three arms) | 1.0 / 2.1 / 4.7 | 1.6 / 2.4 / 2.4 | 1.3 / 2.4 / 4.5 | 1.3 / 2.4 / 2.4 |
+| round trip, ms, median / 99th | 0.2 / 0.3 | 12.4 / 12.6 | 3 / 7 | 12 / 18 |
+
+- **The three arms differ by less than one quantum.** One batch a frame is as prompt as one message per command.
+- **A busy main thread does not delay the commands it has already sent.** It delays only the replies, by its own
+  busy time.
+- **Allocation is fast here.** In the worklet's own instance no other thread shares the heap: 10⁶ `malloc`/`free`
+  pairs took 7 ms (7 ns each), and growing the memory took about 1 ms (by `Date.now`, whole milliseconds).
+- **Firefox's `performance.now()` counts whole milliseconds on a page that is not isolated,** so its round trips are
+  coarse.
+- **kama can build the worklet's instance with no gap** (`kama/`). Set through `emSettings` alone (`ENVIRONMENT`,
+  `SINGLE_FILE`, `MODULARIZE`, `EXPORT_ES6`, `EXIT_RUNTIME: 0`, `EXPORTED_FUNCTIONS`), a kama program loaded in both
+  browsers' worklets:
+  - its `main` ran, and its `println` reached the processor;
+  - `expose fn`s answered;
+  - a `DynamicArray` allocated.
+
+  So the route for a page that cannot be isolated is two builds of one program: the page's, and the worklet's.

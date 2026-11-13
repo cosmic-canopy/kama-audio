@@ -25,12 +25,20 @@ It is the audio half of kyoten's rule that each engine module is built on a gene
 
 **Seeded on 2026-11-13 with `kama seed` on kama 0.9.938+g94365be5 (kyoten's pin). Nothing is built.** A design pass
 comes before any code, as `@kama/graphics`' did. **Its research is done and measured (2026-11-13, [RESEARCH.md](RESEARCH.md)).
-Area 1 is decided (§ Decided, 1 and 2).**
+Areas 1 and 2 are decided (§ Decided, 1 to 11),** and area 2's rows are in [ROADMAP.md](ROADMAP.md).
 
-**The next session starts area 2** (the owner, 2026-11-13: a session begun in plan mode). Read § Decided, then
-[RESEARCH.md](RESEARCH.md) § 1 (the peers' ring and mixers) and § 5 (kama for real time). Then plan area 2's probes,
-listed under it below, run them, and ask the area in full. The Mac's toolchain (emsdk's Python, Homebrew's paths, the
-pinned browsers) is in kyoten's `AGENTS.kyoten.md` § Build, *On macOS*. Waiting, and not area 2's:
+**The next session starts area 3, the two legs.** It begins in plan mode, as area 2's did.
+- **Read first:** § Decided, then [RESEARCH.md](RESEARCH.md) § 4 (the native engines and devices) and § 6 (what area 2
+  measured, which is area 3's input).
+- **Then:** plan area 3's probes, run them, and ask the area in full.
+- **The Mac's toolchain** (emsdk's Python, Homebrew's paths, the pinned browsers) is in kyoten's `AGENTS.kyoten.md`
+  § Build, *On macOS*.
+- **The probes' harness** is in `.scratch/`, which is git-ignored:
+  - `env.sh` sets the toolchain;
+  - `browsers.sh` runs a page headless and muted, with the autoplay switches that let a realtime context start;
+  - `serve.mjs` serves a page, isolated or not, and collects its printed rows.
+
+Waiting, and not area 3's:
 - Safari's measurements, which take the owner's focus, so ask first;
 - a long convolution reverb's cost as a built-in node against the worklet (area 4);
 - KAUD-1 and KAUD-2 upstream.
@@ -73,46 +81,27 @@ The areas, each asked in full in turn (area 1 first):
    its tiers: Web Audio's graph (a context, nodes, `AudioParam`s with the spec's automation) with a tier above it for
    sounds, voices, buses, snapshots and emitters, as `@kama/graphics` has a flat core with a scene graph on it?
    **Decided: two tiers in this package (§ Decided, 2).**
-2. **The object model, the names and the real-time model.** What it settles:
-   - **The names.** Web Audio's in the lower tier wherever the concept is the same (context, node, param, buffer, and
-     each node's own). The middleware's in the upper tier (sound, voice, bus, snapshot, emitter, listener).
-   - **Ownership.**
-     - The context is a resource.
-     - A node or a buffer is either a handle into a slot map with generations, or a shared count.
-     - When it dies: a Web Audio node outlives the program's last reference while it plays or has a tail.
-     - Freeing happens off the audio thread.
-   - **The real-time model.**
-     - Commands to the audio thread are stamped in sample frames, as `int64`: TMM's `int32` counters overflow after
-       about 12.4 h at 48 kHz, which a DAW reaches.
-     - They go on a ring that never blocks. What an overflow does is open: the peers drop the command and count it.
-     - The way back carries a sound's end, the meters and a playhead.
-     - Where the upper tier runs: on the control side, with the audio side only executing, or on an update thread of
-       its own, as FMOD Studio's does.
-   - **A program's own DSP:** kama implementing a contract shaped like `AudioWorkletProcessor.process`, held to
-     `@noheap` and, once kama has it, to a no-blocking proof (KAUD-2).
-
-   **Measured first**, in `.scratch/aud-probe-*/`, headless and muted in Chrome for Testing 157 and Firefox 160:
-   1. Commands into the worklet: a `SharedArrayBuffer` ring polled each quantum against `port.postMessage`. Measure
-      the latency and jitter in quanta, with the main thread idle and then busy with a frame's work.
-   2. The way back: the same two routes, for a sound's end and for meters.
-   3. Allocation on the audio thread: emscripten's `malloc` and `free` inside a Wasm Audio Worklet while the main
-      thread allocates. With shared memory the allocator takes a lock, which is what freeing off the audio thread
-      guards against. Measure the worst case a quantum.
-   4. A page that cannot be isolated (`-sENVIRONMENT=worklet`, no shared memory), where `postMessage` is all that is
-      left. This is area 3's input, measured here because the probe is the same.
-   5. The peers' ring written in kama on 0.9.938, with `Atomic` `int64` counters, acquire and release, natively and on
-      wasm with shared memory, reading the emitted C.
-
-   **Known before measuring** (RESEARCH.md § 5):
-   - std has no lock-free single-producer ring (`Channel` is one mutex), so the rings are this package's.
-   - Module statics are thread-local, so the audio side's state travels through the pointer C hands the callback.
-   - A program that spawns runs `main` in a worker, where `AudioContext` does not exist. The seam's route, a JS
-     library function with `__proxy: 'sync'`, is not yet probed.
+2. **The object model, the names and the real-time model.** **Decided (§ Decided, 3 to 11)**, after five probes measured
+   on both legs (RESEARCH.md § 6):
+   - **Names:** Web Audio's names and units.
+   - **Ownership:** counted resources over slots with generations, and an audio thread that never waits on an
+     allocator.
+   - **Memory:** declared capacities and an injected allocator.
+   - **Commands:** stamped on one ordered ring per context, by two routes. An overflow never drops and never blocks.
+   - **The way back:** a ring of events and snapshots of levels.
+   - **The upper tier** runs in `update()` on the program's thread.
+   - **A program's own DSP** implements `AudioWorkletProcessor`, in the same quantum on both legs.
 3. **The two legs.** On the web: shared memory when the page is isolated, and emscripten's worklet without shared
-   memory when it cannot be; Web Audio 1.1's features used where present and reported, never required; Safari's
+   memory when it cannot be (§ Decided, 7: a second build of the program, which kama builds with no gap, RESEARCH.md
+   § 6.4); Web Audio 1.1's features used where present and reported, never required; Safari's
    quirks (the audio session, gestures). Natively: miniaudio's device layer only (low-latency modes, duplex, a null
    device for tests, a custom backend for consoles), and the render graph across cores natively where the web has one
    thread.
+   **Area 2's probes found for it** (RESEARCH.md § 6):
+   - A program that spawns runs `main` in a worker. A JS library function with `__proxy: 'sync'` starts the context on
+     the page's thread, and the worker then drives the ring directly.
+   - Firefox has no `playbackStats`, so underruns there cannot be counted.
+   - Headless runs need the autoplay switches, and a page that draws each frame.
 4. **The ladders:** spatial sound (HRTF from SOFA data in kama on both legs, Steam Audio natively for occlusion and
    rooms, equal-power panning), decoding (WebCodecs where it works, kama-built decoders where it does not, the OS's
    AAC natively), resampling quality, and streaming.
@@ -176,6 +165,147 @@ Those questions stay in kyoten's `audio.md`.
        on top. It is also `@kama/graphics`', a flat core with a scene graph on it.
    - **Still open, in area 5:** whether a DAW's own engine (transport, clips, plugin hosting, delay compensation) is a
      tier here or a package of its own.
+
+3. **Decided on 2026-11-13: the lower tier keeps Web Audio's names and units** (area 2, the names). The owner took the
+   recommendation.
+   - **The types are Web Audio's interfaces verbatim:** `AudioContext`, `OfflineAudioContext`, `AudioNode`,
+     `AudioParam`, `AudioBuffer`, `GainNode`, `AudioBufferSourceNode`, `AudioWorkletNode`, `AudioWorkletProcessor`,
+     `AudioListener`. Their methods and parameters become kama's named arguments, so MDN documents the lower tier:
+     `src.start(when:, offset:, duration:)`, `p.setValueAtTime(value:, startTime:)`.
+   - **Its times are Web Audio's:** float64 seconds on the context's clock. Each is converted once, at the API, with
+     one rounding rule, to an int64 sample frame, plus a sub-frame fraction for a source's start. So no counter
+     overflows in a session of any length; the peers' `int32` frames last about 12.4 hours at 48 kHz.
+   - **kama's conventions bind where kama has one:**
+     - construction is `GainNode.make(context:, …)`, Web Audio's constructor form, and not `createGain()` as well;
+     - properties follow `@kama/graphics`' `x()`/`xMut()` pairs.
+   - **The upper tier has the middleware's words, in a module of its own** (proposed `audio::sound`): `Sound` (a
+     definition with its variations), `Voice` (one playing instance, which may be virtual), `Bus`, `Snapshot` and
+     `Emitter`. It reuses `AudioListener`, the same concept.
+   - **Why:** one decided rule, "Web Audio's names wherever the concept is the same", as `@kama/graphics` takes
+     three.js's. Frames as the public unit would turn every MDN example into a conversion, and a game thinks in
+     seconds; a float64 second round-trips a frame exactly.
+4. **Decided on 2026-11-13: counted resources for the program, slots with generations for the engine** (area 2,
+   ownership). The owner took the recommendation.
+   - **What the program holds.** A node or a buffer is a `type resource`: a copy shares it, and the last copy dropped
+     releases it, as `@kama/gpu`'s handles and `@kama/graphics`' assets do.
+   - **What the audio side sees.** Only a slot index and a generation, never a pointer.
+   - **Where the count lives.** On the program's side only, so the audio thread never touches it. The program's side
+     picks the slot, so creating a node needs no round trip, and the next command can name it in the same frame.
+   - **When a node dies, Web Audio's rule.** After the last drop the audio side keeps the node while it can still
+     sound: a scheduled or playing source until it ends, and any node with a live input or a tail not yet silent. It
+     then reports the slot freed (decision 9), and the program's side reuses the slot with the next generation.
+   - **The context.** It is a resource, and every node holds the context's state, as `@kama/gpu`'s children hold the
+     device's. Web Audio's `close()` ends it early. A later call on one of its nodes is a reported error, never a trap
+     (`@kama/gpu`'s decision 9: nothing a program passes ends it).
+   - **Why:**
+     - A number crosses every boundary the engine has: shared memory, the separate wasm instance of a page that cannot
+       be isolated (decision 7), and later a plugin in its own process.
+     - A count the audio thread decremented would make it the thread that frees.
+     - A plain handle with an explicit release would leak a slot when forgotten, and would depart from the siblings'
+       RAII.
+5. **Decided on 2026-11-13: the audio thread never waits on an allocator** (area 2, ownership). The owner: "I think
+   option 1."
+   - **Where memory is shared (natively, and on an isolated page).** The program's side allocates everything the
+     audio side will use before the command that hands it over: a node's state, delay lines, sample data and a
+     program's processor (decision 11). It frees what the audio side hands back on the way back (decision 9). The audio
+     thread never calls the allocator.
+   - **Where it is not shared (a page that cannot be isolated).** The worklet's own wasm instance is the engine
+     (decision 7), and it allocates only in its message handler, between quanta, where no other thread can hold its
+     heap.
+   - **Why** (RESEARCH.md § 6.3, § 6.4):
+     - With shared memory one `malloc` on Firefox's audio thread waited 63.5 ms for emscripten's allocator lock (24
+       quanta), and Chrome's worst was 0.9 ms.
+     - mimalloc's tail was still 410 µs, and macOS natively reached 0.5 ms while the heap grew.
+     - In an instance of its own, a `malloc` took 7 ns, with no lock anyone else can hold.
+6. **Decided on 2026-11-13: declared capacities and an injected allocator** (area 2, ownership; asked because of the
+   owner's question on decision 5). The owner asked: "Does kyotens design so far allow for the custom allocator usage?
+   does it allow for pre-computed max total allocation?" kyoten's answer is yes for its own stores: a Budget record
+   per (zone, layer, prefab), reserved up front or committed in controlled steps, and one block per zone once kama's
+   KR-326 lands (kyoten's `components.md` question 6, KY-17). Nothing yet said how audio takes memory. Asked, the
+   owner took the recommendation.
+   - **Declared capacities.** Every limit is a field of the context's options: node slots, voices, the command ring,
+     the backlog (decision 8), sample memory and streaming buffers. So the library's footprint is known when the
+     context is created.
+   - **An injected allocator.** Everything the library allocates (on the program's side, decision 5) comes from a kama
+     `Allocator` the program hands the context, defaulting to the global heap. kyoten hands audio an `Arena` sized from
+     a Budget record. A program that replaces the whole heap with `@globalAllocator` needs nothing more.
+   - **At a limit, the answer is declared.** The upper tier steals a voice by its rules, or the call returns an error.
+     The library never allocates past a limit and never drops silently.
+   - **Why:** kyoten's vision asks for "a footprint you can calculate" and budgets per element. Dependency injection
+     (kyoten's rule) is how a library takes what it depends on.
+7. **Decided on 2026-11-13: stamped commands on one ordered ring per context, by two routes** (area 2, the real-time
+   model). The owner took the recommendation.
+   - **The commands.** Each call becomes a flat, typed command stamped with the int64 frame it applies at. One ring per
+     context keeps them in order, levels with cues, as the peers' rings do. Only the thread that owns the context
+     pushes, and that thread may be a worker.
+   - **The routes.** The same bytes travel two ways:
+     - natively and on an isolated page, through a ring in shared memory that the audio thread drains at the top of
+       each quantum;
+     - on a page that cannot be isolated, as one transferred `ArrayBuffer` per flush, sent to the engine's own
+       instance in the worklet (`-sENVIRONMENT=worklet`, a second build of the program).
+   - **Replay.** A recorded command stream replays offline, so a bounce and a test that compares samples are the same
+     run.
+   - **Why** (RESEARCH.md § 6.1, § 6.2, § 6.4):
+     - The ring in kama passed 10⁷ commands in order on both legs, and its test caught a missing release on the M4.
+     - It delivered every command in the next quantum in both browsers, idle or busy, and from a worker `main`.
+     - emscripten's `postMessage` route was up to 6 quanta late in Firefox. It allocates an object per message, and
+       only the page's thread can use it.
+     - A page that cannot be isolated still gets each frame's commands within 2.4 quanta of the best case, and kama
+       builds the worklet's instance with no gap.
+8. **Decided on 2026-11-13: overflow never drops and never blocks** (area 2, the real-time model). The owner took the
+   recommendation.
+   - **The backlog.** Commands that do not fit the ring wait in order in a backlog on the program's side, flushed
+     first on the next flush. Its high-water mark is counted.
+   - **Its bound.** The backlog's size is a declared capacity (decision 6). Past it the call returns an error to the
+     program; the command is never lost silently.
+   - **A late command,** one whose frame has passed, applies at the next quantum and is counted as late.
+   - **The audio side** only ever sees whole commands, in order, and never waits.
+   - **Why:** the peers drop and count, which loses a stop (a stuck note) or a release (a leaked slot). A DAW cannot
+     accept that, and the program could not see it at the call.
+9. **Decided on 2026-11-13: the way back is a ring of events and snapshots of levels** (area 2, the real-time model).
+   The owner took the recommendation.
+   - **Events go on a second ring:** a sound's end, a slot freed, an error, and a buffer or processor handed back to
+     free. It is sized from the slot capacity, so lifecycle events cannot overflow it: a slot frees at most once before
+     the program reuses it.
+   - **Levels are latest-value snapshots** the audio side overwrites every quantum, never queued: meters, and the
+     playhead's frame with its output timestamp.
+   - **The program polls both** in the context's `update()`, as `@kama/gpu` polls and `@kama/window` pumps. The engine
+     never calls back into kama.
+   - **Why** (RESEARCH.md § 6.2):
+     - A snapshot was 1 quantum old when read.
+     - An event polled once a frame arrived by the frame that acts on it.
+     - 64 meters a quantum by `postMessage` is 24,000 messages a second from the audio thread, up to 12 quanta stale
+       in Firefox.
+10. **Decided on 2026-11-13: the upper tier runs in `update()`, on the program's thread** (area 2, the real-time
+    model). The owner took the recommendation.
+    - **What runs there.** The program calls the context's `update()` once a frame, as FMOD Studio's synchronous update
+      is called. In it the upper tier steals voices, applies snapshots, moves emitters and computes attenuation, and
+      turns "play this footstep here, on the effects bus" into lower-tier commands stamped a little ahead.
+    - **The audio side only executes.**
+    - **The library starts no thread of its own.** A program that wants FMOD's asynchronous update calls `update()`
+      from a thread it owns, and the context moves there whole.
+    - **Why:**
+      - Dependency injection: nothing is hidden.
+      - A page that cannot be isolated has no second thread.
+      - A worker `main` drove the ring as promptly as the page's thread did (RESEARCH.md § 6.2).
+      - A stamped command scheduled ahead makes the update's thread irrelevant to timing.
+11. **Decided on 2026-11-13: a program's own DSP implements `type contract AudioWorkletProcessor`, in the same quantum
+    on both legs** (area 2, a program's own DSP). The owner took the recommendation.
+    - **The contract.** `fn bool process(inputs:, outputs:, parameters:)`, Web Audio's shape: planar `View<float32>`
+      channels; an a-rate parameter as one value per frame, or one when it is constant; and a return value that keeps
+      the node alive.
+    - **The checks.** The contract member is `@noheap`, and the render callback's `fnptr` type is
+      `@noheap @noparks`. KAUD-2's no-blocking proof joins them when kama has one.
+    - **Its lifetime.** The processor is built on the program's side, moved to the audio side by the create command,
+      and handed back to be dropped on the program's side (decision 5).
+    - **One block size on both legs.** Natively the engine renders in the same quantum as the web, 128 frames or what
+      `renderSizeHint` sets, with a FIFO in front of the device. So a processor sees identical blocks on both legs and
+      the samples compare bit for bit. The FIFO adds up to 127 frames, and only when the device's buffer is not a
+      multiple of the quantum.
+    - **Why** (RESEARCH.md § 6.1): kama 0.9.938 refuses an implementation of a `@noheap` member that is not
+      `@noheap`. Its walk follows a call through a contract value, even an `Owned<Processor>` held in a field, into
+      every implementation, and refuses an allocation or a wait in any of them. A device-sized block would put k-rate
+      parameters on different frames on each leg.
 
 ## Where the truth is
 

@@ -28,6 +28,10 @@ comes before any code, as `@kama/graphics`' did. **Its research is done and meas
 Areas 1 and 2 are decided (§ Decided, 1 to 11),** and area 2's rows are in [ROADMAP.md](ROADMAP.md).
 
 **The next session starts area 3, the two legs.** It begins in plan mode, as area 2's did.
+- **First, rebuild the Mac's pin.** kyoten moved its pin to 0.9.940 (`1873bcda`) on 2026-11-13, while area 2 was
+  measured on 0.9.938. Rebuild `../kyoten/.kama-pin` from a clean clone at that commit, using `AGENTS.kyoten.md`
+  § Build's recipe (the commit is already in `../kama`). Then re-run `.scratch/aud-probe-ring/` on it, and its
+  `contract/` checks.
 - **Read first:** § Decided, then [RESEARCH.md](RESEARCH.md) § 4 (the native engines and devices) and § 6 (what area 2
   measured, which is area 3's input).
 - **Then:** plan area 3's probes, run them, and ask the area in full.

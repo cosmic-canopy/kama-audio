@@ -25,7 +25,15 @@ It is the audio half of kyoten's rule that each engine module is built on a gene
 
 **Seeded on 2026-11-13 with `kama seed` on kama 0.9.938+g94365be5 (kyoten's pin). Nothing is built.** A design pass
 comes before any code, as `@kama/graphics`' did. **Its research is done and measured (2026-11-13, [RESEARCH.md](RESEARCH.md)).
-Area 1 is decided (§ Decided, 1 and 2); area 2 is next.**
+Area 1 is decided (§ Decided, 1 and 2).**
+
+**The next session starts area 2** (the owner, 2026-11-13: a session begun in plan mode). Read § Decided, then
+[RESEARCH.md](RESEARCH.md) § 1 (the peers' ring and mixers) and § 5 (kama for real time). Then plan area 2's probes,
+listed under it below, run them, and ask the area in full. The Mac's toolchain (emsdk's Python, Homebrew's paths, the
+pinned browsers) is in kyoten's `AGENTS.kyoten.md` § Build, *On macOS*. Waiting, and not area 2's:
+- Safari's measurements, which take the owner's focus, so ask first;
+- a long convolution reverb's cost as a built-in node against the worklet (area 4);
+- KAUD-1 and KAUD-2 upstream.
 
 **It is designed and built on the Mac Mini, in parallel with kyoten's graphics track on Windows** (the owner,
 2026-11-13: "the mac kyoten clone can then design it and develop it in parallel to what we are doing here for
@@ -65,10 +73,41 @@ The areas, each asked in full in turn (area 1 first):
    its tiers: Web Audio's graph (a context, nodes, `AudioParam`s with the spec's automation) with a tier above it for
    sounds, voices, buses, snapshots and emitters, as `@kama/graphics` has a flat core with a scene graph on it?
    **Decided: two tiers in this package (§ Decided, 2).**
-2. **The object model, the names and the real-time model.** Web Audio's names where the concept is the same; a context
-   as a resource and nodes and buffers as shared handles, freed off the audio thread; commands to the audio thread
-   stamped in sample frames on a ring that never blocks (the peers'); a program's own DSP as kama implementing a
-   contract, held to `@noheap` and, once kama has it, a no-blocking proof (KAUD-2).
+2. **The object model, the names and the real-time model.** What it settles:
+   - **The names.** Web Audio's in the lower tier wherever the concept is the same (context, node, param, buffer, and
+     each node's own). The middleware's in the upper tier (sound, voice, bus, snapshot, emitter, listener).
+   - **Ownership.**
+     - The context is a resource.
+     - A node or a buffer is either a handle into a slot map with generations, or a shared count.
+     - When it dies: a Web Audio node outlives the program's last reference while it plays or has a tail.
+     - Freeing happens off the audio thread.
+   - **The real-time model.**
+     - Commands to the audio thread are stamped in sample frames, as `int64`: TMM's `int32` counters overflow after
+       about 12.4 h at 48 kHz, which a DAW reaches.
+     - They go on a ring that never blocks. What an overflow does is open: the peers drop the command and count it.
+     - The way back carries a sound's end, the meters and a playhead.
+     - Where the upper tier runs: on the control side, with the audio side only executing, or on an update thread of
+       its own, as FMOD Studio's does.
+   - **A program's own DSP:** kama implementing a contract shaped like `AudioWorkletProcessor.process`, held to
+     `@noheap` and, once kama has it, to a no-blocking proof (KAUD-2).
+
+   **Measured first**, in `.scratch/aud-probe-*/`, headless and muted in Chrome for Testing 157 and Firefox 160:
+   1. Commands into the worklet: a `SharedArrayBuffer` ring polled each quantum against `port.postMessage`. Measure
+      the latency and jitter in quanta, with the main thread idle and then busy with a frame's work.
+   2. The way back: the same two routes, for a sound's end and for meters.
+   3. Allocation on the audio thread: emscripten's `malloc` and `free` inside a Wasm Audio Worklet while the main
+      thread allocates. With shared memory the allocator takes a lock, which is what freeing off the audio thread
+      guards against. Measure the worst case a quantum.
+   4. A page that cannot be isolated (`-sENVIRONMENT=worklet`, no shared memory), where `postMessage` is all that is
+      left. This is area 3's input, measured here because the probe is the same.
+   5. The peers' ring written in kama on 0.9.938, with `Atomic` `int64` counters, acquire and release, natively and on
+      wasm with shared memory, reading the emitted C.
+
+   **Known before measuring** (RESEARCH.md § 5):
+   - std has no lock-free single-producer ring (`Channel` is one mutex), so the rings are this package's.
+   - Module statics are thread-local, so the audio side's state travels through the pointer C hands the callback.
+   - A program that spawns runs `main` in a worker, where `AudioContext` does not exist. The seam's route, a JS
+     library function with `__proxy: 'sync'`, is not yet probed.
 3. **The two legs.** On the web: shared memory when the page is isolated, and emscripten's worklet without shared
    memory when it cannot be; Web Audio 1.1's features used where present and reported, never required; Safari's
    quirks (the audio session, gestures). Natively: miniaudio's device layer only (low-latency modes, duplex, a null

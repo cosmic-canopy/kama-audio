@@ -8,7 +8,11 @@ hand-edited. This file is the project-specific third, and it is the one to edit.
 
 **An audio library for kama, on the browser's Web Audio and the same API natively:** playback, mixing, effects and
 spatial sound. It names no engine concept, so a tool, an editor, a product or a game can use it. In the owner's words
-(2026-11-13): "Then other apps can use the same audio engine."
+(2026-11-13): "Then other apps can use the same audio engine." And on the Mac, the same day: "This will be a general
+purpose audio package that can be used in DAWs and Kyoten game engine or any other application … it should be low
+overhead on web by using the state of the art native web API for the purpose. Then the native side will be abstracted
+by the same interface." So the bar is two at once: what a DAW's engine and a game's middleware do, and the least
+overhead the web allows.
 
 It is the audio half of kyoten's rule that each engine module is built on a general-purpose library (kyoten's
 `../kyoten/docs/design/architecture.md` § Decided, 2026-11-02), as `@kama/graphics` is for rendering. Its first users:
@@ -20,7 +24,8 @@ It is the audio half of kyoten's rule that each engine module is built on a gene
 ## Where things stand
 
 **Seeded on 2026-11-13 with `kama seed` on kama 0.9.938+g94365be5 (kyoten's pin). Nothing is built.** A design pass
-comes before any code, as `@kama/graphics`' did.
+comes before any code, as `@kama/graphics`' did. **Its research is done and measured (2026-11-13, [RESEARCH.md](RESEARCH.md)).
+Area 1 is decided (§ Decided, 1 and 2); area 2 is next.**
 
 **It is designed and built on the Mac Mini, in parallel with kyoten's graphics track on Windows** (the owner,
 2026-11-13: "the mac kyoten clone can then design it and develop it in parallel to what we are doing here for
@@ -30,35 +35,108 @@ graphics").
 
 Each question is measured first where it can be (a probe on both legs, as `@kama/gpu`'s were), then asked of the owner
 in full: the problem, an example, the options and the production answer. The answers are recorded here with their
-reasons, and the rows they create go in a `ROADMAP.md` (ids `AUD-<n>`). kyoten's `../kyoten/docs/design/audio.md`
-lists the questions as kyoten first wrote them:
+reasons, and the rows they create go in a `ROADMAP.md` (ids `AUD-<n>`). kyoten first wrote the questions in its
+`../kyoten/docs/design/audio.md`.
 
-1. **The interface.** A graph of nodes, as Web Audio is (sources, gain, filters, panners, a destination), or a smaller
-   API (play this sound here, on this bus) over one? Web first: designed against Web Audio's own concepts.
-2. **Custom DSP.** An `AudioWorklet` on the web, kama compiled to wasm inside it, and a native audio callback: the
-   same kama DSP code on both? A worklet fed through a `SharedArrayBuffer` needs the page cross-origin isolated
-   (COOP and COEP).
-3. **The native engine.** What implements the API natively. Candidates to measure, none decided:
-   - **web-audio-api-rs**, which implements Web Audio's spec natively and runs its official test suite (1.5 on
-     docs.rs, checked 2026-11-13); Rust, with no C API, so it would need a shim, as wgpu-native is Rust behind one;
-   - **miniaudio**, the device both of the owner's games already use, with its own node graph and spatializer; the
-     Web Audio-shaped graph would then be kama's own, over its device;
-   - the OS APIs directly (WASAPI, Core Audio, AAudio, PipeWire).
-4. **The leading edge.** The owner asked for "the most cutting edge audio (webaudio 2?)". There is no Web Audio 2:
-   its v2 work became **Web Audio API 1.1**, a W3C Working Draft since November 2024, which adds `setSinkId` (choosing
-   the output device) and a configurable render quantum (`renderSizeHint`, 128 frames by default, or the hardware's).
-   Which browsers ship which of it is measured, in the pinned browsers and Safari.
-5. **Spatial sound and the listener:** Web Audio's `PannerNode` (HRTF) on the web; natively, the engine's own or a
-   library such as Steam Audio (its licence to be checked).
-6. **Decoding:** the browser's own (`decodeAudioData`, WebCodecs' `AudioDecoder`) on the web, and natively a decoder
-   per format (Opus, Vorbis, FLAC, WAV).
-7. **What the peers already have:** both games' audio is a miniaudio pull on its own thread behind a lock-free command
-   ring, with the identical synth entry pumped from the frame on the web (kyoten's
-   `../kyoten/docs/research/peer-games.md` § platform split). kama's real-time constraints (`@noheap`, a lock window
-   that cannot wait) are in `../kyoten/docs/research/kama-for-engines.md`.
+**The evidence is [RESEARCH.md](RESEARCH.md)** (2026-11-13): the peers' audio, Web Audio measured in Chrome 157 and
+Firefox 160, the sources' picture of Safari and the leading edge, the native engines and their licences, and what kama
+0.9.938 gives a real-time library. What it found that shapes every area:
+- **The browsers' built-in nodes do not make the same sound** (§ 2.3): resampling, sub-sample starts, HRTF, the
+  compressor and the waveshaper differ materially between Chrome and Firefox. An AudioWorklet running the same code
+  makes identical samples in both.
+- **One wasm worklet mixing N voices costs 2.7 to 4 times less than N voices of built-in nodes,** and within 14 to 18%
+  of the same C natively (§ 2.4).
+- **kama compiled to wasm already runs as an AudioWorklet's processor** through emscripten's Wasm Audio Worklets, and
+  `@onPanic` keeps audio running through a panic (§ 2.5).
+- **Web Audio 1.1 ships in Chrome only** (§ 2.1, § 3); Safari's WebCodecs fails FLAC and Vorbis (§ 3); cross-origin
+  isolation keeps cross-origin WebSockets, which the peers had feared it would not (§ 2.6).
+- **Natively, the clean stack is permissive end to end:** miniaudio's device layer (with a custom-backend seam for a
+  private console package), Steam Audio (Apache-2.0), libopus and the dr_libs. web-audio-api-rs has no C API, cannot
+  reach consoles and requires an MPL dependency; the ASIO SDK is GPLv3 or proprietary, so ASIO is a separate package
+  if ever (§ 4).
+
+The areas, each asked in full in turn (area 1 first):
+
+1. **The engine and its tiers.** Both answers play through Web Audio; they differ in which half of it does the DSP.
+   Wire Web Audio's built-in nodes on the web and reimplement them natively, or run **one engine written in kama on
+   both legs**: the processor of one `AudioWorkletNode` (Web Audio's programmable node) on the web, called by
+   the device's callback natively, with Web Audio supplying what only the browser can (the audio thread, the output
+   device, the microphone, decoding where it is reliable, MIDI)? **Decided: one engine in kama (§ Decided, 1).** And
+   its tiers: Web Audio's graph (a context, nodes, `AudioParam`s with the spec's automation) with a tier above it for
+   sounds, voices, buses, snapshots and emitters, as `@kama/graphics` has a flat core with a scene graph on it?
+   **Decided: two tiers in this package (§ Decided, 2).**
+2. **The object model, the names and the real-time model.** Web Audio's names where the concept is the same; a context
+   as a resource and nodes and buffers as shared handles, freed off the audio thread; commands to the audio thread
+   stamped in sample frames on a ring that never blocks (the peers'); a program's own DSP as kama implementing a
+   contract, held to `@noheap` and, once kama has it, a no-blocking proof (KAUD-2).
+3. **The two legs.** On the web: shared memory when the page is isolated, and emscripten's worklet without shared
+   memory when it cannot be; Web Audio 1.1's features used where present and reported, never required; Safari's
+   quirks (the audio session, gestures). Natively: miniaudio's device layer only (low-latency modes, duplex, a null
+   device for tests, a custom backend for consoles), and the render graph across cores natively where the web has one
+   thread.
+4. **The ladders:** spatial sound (HRTF from SOFA data in kama on both legs, Steam Audio natively for occlusion and
+   rooms, equal-power panning), decoding (WebCodecs where it works, kama-built decoders where it does not, the OS's
+   AAC natively), resampling quality, and streaming.
+5. **The feature map and the order of work:** a `FEATURES.md` from Web Audio, the middleware and the DAW engines, and a
+   `ROADMAP.md` by example: a sample-exact loop (cosmic-forge's CF-24), a game's sounds, voice chat, a synth on MIDI, a
+   multitrack session with automation and bounce, and spatial sound on a headset. Whether a DAW's engine (transport,
+   tracks, clips, plugin hosting through CLAP natively and WebCLAP on the web, delay compensation) is a tier here or a
+   package of its own.
 
 What stays kyoten's, not this package's: how kyoten's frame phases schedule sound (Output, timestamps a little ahead),
-its components, and the DAW. Those questions stay in kyoten's `audio.md`.
+its components, and its DAW tool (KYR-35). This package must be able to serve a DAW; the DAW tool itself is kyoten's.
+Those questions stay in kyoten's `audio.md`.
+
+## Decided
+
+1. **Decided on 2026-11-13: one engine, written in kama, on both legs** (area 1's first question). The owner first
+   asked whether it meant getting sound out of the browser without its API ("How do you get sound out of the browser
+   without using a browser API?"). Told that both options play through Web Audio and differ only in which half of it
+   runs the DSP, the owner answered: "AH ok that makes much more sense. Yes I agree with your recommendation."
+   - **Both legs play through the platform's own audio.** On the web, Web Audio supplies:
+     - the audio thread, the output device and the clock (`AudioContext`, and `setSinkId` where present);
+     - the microphone (`getUserMedia` into a `MediaStreamAudioSourceNode`);
+     - decoding where it is reliable (`decodeAudioData`, WebCodecs);
+     - MIDI (Web MIDI).
+
+     The DSP is kama compiled to wasm, running as the processor of one `AudioWorkletNode`, Web Audio's programmable
+     node, as a renderer is kama on WebGPU. The DSP is the mixing, the voices, the effects, spatial sound and
+     sample-exact scheduling. Natively, the same kama runs in the device's callback; what implements the device is
+     area 3.
+   - **Why** ([RESEARCH.md](RESEARCH.md) § 2.3 to § 2.5):
+     - The built-in nodes make different samples in each browser: their resamplers, HRTF data, compressors and
+       oversampling differ. A native implementation could match the spec, but not "the browser", so neither a bounce
+       nor a test comparing samples could hold between the legs. One worklet made the same samples in Chrome and Firefox.
+     - Many voices mixed in one loop cost 2.7 to 4 times less than the same voices as built-in nodes, and came within
+       14 to 18% of native.
+     - The built-in set has no voice limits or stealing, no sidechain, no plugin hosting and no latency compensation.
+       Built from nodes, each would be JavaScript on the main thread rewiring the graph.
+   - **A built-in node is used only where a measurement shows it is the better tool and its differences between
+     browsers do not matter,** each as a decision of its own. The likely first is a long convolution reverb, which is
+     not yet measured: the browser may run part of it off the audio thread, which one worklet cannot.
+   - **It keeps the web light,** as kyoten's vision asks ("The web build does not ship heavy features of its own").
+     Everything the browser does best comes from Web Audio. The wasm carries only the DSP, and its size is measured as
+     each feature enters. A budget is a measurement, never a cap.
+2. **Decided on 2026-11-13: two tiers, in this one package** (area 1's second question). The owner: "Yes I take your
+   recommendation. I like the split which is similar to what we are doing with kama graphics."
+   - **The lower tier is Web Audio's graph:** a context, nodes, and `AudioParam`s with the spec's automation
+     (`setValueAtTime`, the linear and exponential ramps, `setTargetAtTime`, `setValueCurveAtTime`). A DAW works here:
+     a track is a clip player, its inserts, a fader and a bus, and an automation lane is a parameter's curve.
+   - **The upper tier is what a game's middleware gives:** sounds with their variations, voices (limits, priority,
+     stealing, virtual voices), buses, snapshots (a mix state such as music ducked under dialogue), and emitters with a
+     listener for spatial sound. A game says what to play and where, as in "play this footstep here, on the effects
+     bus", and the limit, the stealing, the attenuation and the ducking are settings, not wiring.
+   - **The upper tier is built only on the lower tier's public API,** so a program that wants only the graph ignores
+     it, and nothing the upper tier does is out of a graph user's reach. It names no engine concept: an emitter is
+     audio's own word, and an engine binds its components to emitters.
+   - **Why:**
+     - Without the upper tier, every game solves voices, buses and ducking again.
+     - As a second package, it would add a package to version and publish for code that runs in the same audio callback
+       and the same wasm anyway.
+     - The split is FMOD's: its Core API is channels and a DSP graph, and its Studio API adds events, buses and snapshots
+       on top. It is also `@kama/graphics`', a flat core with a scene graph on it.
+   - **Still open, in area 5:** whether a DAW's own engine (transport, clips, plugin hosting, delay compensation) is a
+     tier here or a package of its own.
 
 ## Where the truth is
 
@@ -98,5 +176,6 @@ decision recorded in `audio.md`, and the KYR-15 row. kyoten's hot spots, `FIRST-
     kama check kama.json
 
 kyoten builds with its own pinned kama (`../kyoten/.kama-version` names the commit, and its `AGENTS.kyoten.md` § Build
-says how to make the pin from a clean clone). On macOS, build that commit the same way. A web build needs emscripten's
-`emcc`.
+says how to make the pin from a clean clone, with the Mac's steps). Run it as `../kyoten/tools/kama`. A web build needs
+emscripten's `emcc`. The probes in `.scratch/aud-probe-*/` each run with their `run.sh`, headless and muted, in the
+pinned browsers in `~/browsers`.

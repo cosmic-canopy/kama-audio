@@ -6,3 +6,6 @@ out/
 
 # Per-machine manifest override (deep-merges over kama.json). Yours, not the project's.
 kama.local.json
+
+# Throwaway prototypes and probes (the design pass measures things here).
+.scratch/

@@ -1,0 +1,18 @@
+{
+  "name": "@kama/audio",
+  "version": "0.1.0",
+  "license": "MIT OR Apache-2.0",
+  "description": "An audio library on the browser's Web Audio and the same API natively: playback, mixing, effects and spatial sound",
+  "repository": "https://github.com/cosmic-canopy/kama-audio",
+  "keywords": ["audio", "sound", "web-audio", "mixing", "dsp"],
+  "kind": "library",
+  "kama": ">=0.9.938",
+  "publish": {
+    "exclude": [
+      ".claude/", "AGENTS.md", "AGENTS.package.md", "AGENTS.audio.md", "CLAUDE.md", "KAMA_GAPS.md"
+    ]
+  },
+  "modules": {
+    ".": { "visibility": "public" }
+  }
+}

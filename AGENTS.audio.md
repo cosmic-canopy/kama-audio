@@ -133,7 +133,7 @@ The areas, each asked in full in turn (area 1 first):
    - **Input:** Web Audio's model on both legs.
    - **Cores:** declared render workers natively, one thread on the web.
 4. **The ladders: spatial sound, decoding, resampling and streaming.** Planned on 2026-11-13, and its parts are staged
-   and smoke-tested (RESEARCH.md § 8). **Questions 1 and 2 are decided; 3 to 6 are open.** A ladder is a feature in
+   and smoke-tested (RESEARCH.md § 8). **Questions 1 to 3 are decided; 4 to 6 are open.** A ladder is a feature in
    rungs from cheap to best. A program picks a rung per sound, and each rung is the same on every leg. Each question
    below is measured first, then asked in full.
    1. **Where a sound seems to come from.** **Decided (§ Decided, 20 and 21)** after P5 (`aud-probe-spatial/`,
@@ -145,25 +145,9 @@ The areas, each asked in full in turn (area 1 first):
       (`aud-probe-hrtf/`, RESEARCH.md § 9.2, added at the session's start because the licence survey made the
       reduction the real question): a build-time converter, a default of SADIE II's D1 at about 1 MB, and reading
       SOFA at run time as an option.
-   3. **Which code turns a file into samples, on each leg.**
-      - *The problem:* a sample-exact loop and a bounce need the same samples from the same file everywhere. But a
-        game ships formats each browser decodes differently or not at all: Safari fails FLAC and Vorbis (§ 3).
-        WebCodecs decodes packets, not files, so a program needs a container reader as well.
-      - *The options:*
-        - kama-built decoders on both legs. The smoke run made identical samples natively and in wasm. The browser
-          decodes only AAC, whose patents keep it out, and is otherwise an option;
-        - the browser's decoders on the web (`decodeAudioData`, WebCodecs) and ours natively. No decoder wasm, but
-          the samples differ per browser and Safari has gaps;
-        - a choice per codec.
-      - *Also:* the containers (Ogg, WebM, MP4, FLAC, WAV), and the metadata that makes decoding gapless: Opus's
-        pre-skip, LAME's tag, and AAC's priming in MP4's edit list.
-      - **P6** (`aud-probe-decode/`): every fixture through WebCodecs and `decodeAudioData` in Chrome and Firefox,
-        against the C decoders in wasm and natively (through kama, with `reproducible-float`). It compares:
-        - the samples (FLAC must be exact);
-        - the frame counts and the priming;
-        - decode speed in a worker, and wasm size per decoder.
-
-        Natively, AAC goes through AudioToolbox, and through Media Foundation on the Windows box.
+   3. **Which code turns a file into samples, on each leg.** **Decided (§ Decided, 23)** after P6
+      (`aud-probe-decode/`, RESEARCH.md § 9.3): our C decoders and containers on both legs, each codec a module, and AAC
+      through the platform.
    4. **Changing a sound's rate, and its pitch.**
       - *The problem:* a 44.1 kHz sound in a 48 kHz context needs resampling, and so do a `playbackRate` change and
         Doppler. A cheap resampler aliases, which is audible as whistles on a sweep; a good one costs CPU per voice.
@@ -592,6 +576,31 @@ Those questions stay in kyoten's `audio.md`.
       - Minimum phase with onsets interpolates far better than raw HRIRs (at 5°: 0.45 against 1.57 dB).
       - libmysofa reads D1 in 101 ms natively and 117 ms in wasm, and adds 48 KB of wasm. The table reads in 2.5 ms.
       - Plain least squares makes SH HRIRs 15 dB wrong at order 3, and MagLS makes them 6 dB wrong.
+23. **Decided on 2026-11-13: our C decoders on both legs; AAC through the platform** (area 4, question 3). The owner
+    took the recommendation.
+    - **The decoders, in the package's C seam on every leg:**
+      - dr_wav and dr_flac;
+      - dr_mp3, LAME's tag read for its delay and padding;
+      - stb_vorbis;
+      - libopus through opusfile in Ogg, and through nestegg in WebM.
+    - **The containers:** libogg, nestegg (WebM) and minimp4 (MP4), with the MP4 edit list read for AAC's priming.
+    - **Each codec is a module a program opts into,** so a program ships only the decoders its files need:
+      - dr_wav 21 KB, dr_mp3 30 KB, stb_vorbis 43 KB, dr_flac 52 KB;
+      - Opus 168 KB with its Ogg reader;
+      - the containers 11 to 15 KB each.
+    - **AAC goes through the platform,** since its patents keep a decoder out of the package. On the web that is
+      WebCodecs, fed by the package's MP4 reader, which trims the edit list's priming itself. Natively it is the OS's
+      decoder: AudioToolbox on Apple, Media Foundation on Windows. AAC's samples are the one exception to "the same on
+      every leg", and the docs say so.
+    - **Decoding never runs on the audio thread.** A buffer is decoded before it is handed over (decision 5), and a
+      stream is question 5's.
+    - **Why** (RESEARCH.md § 9.3):
+      - Our decoders made the same samples natively and in wasm for every fixture.
+      - They trim each container's priming (the 2 s loop is exactly 96,000 frames from every codec).
+      - In wasm they decode as fast as the browsers' own (10 min of Opus: 848 ms against Chrome's 838).
+      - The browsers differ from ours and from each other. Chrome's `decodeAudioData` turns 16-bit PCM half an LSB
+        from its own WebCodecs and drops 24 frames of WebM Opus, and the lossy codecs differ by 79 to 145 dB.
+      - WebCodecs trims no priming, and Safari fails FLAC and Vorbis.
 
 ## Where the truth is
 

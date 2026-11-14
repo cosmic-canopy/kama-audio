@@ -133,7 +133,7 @@ The areas, each asked in full in turn (area 1 first):
    - **Input:** Web Audio's model on both legs.
    - **Cores:** declared render workers natively, one thread on the web.
 4. **The ladders: spatial sound, decoding, resampling and streaming.** Planned on 2026-11-13, and its parts are staged
-   and smoke-tested (RESEARCH.md § 8). **Questions 1 to 3 are decided; 4 to 6 are open.** A ladder is a feature in
+   and smoke-tested (RESEARCH.md § 8). **Questions 1 to 4 are decided; 5 and 6 are open.** A ladder is a feature in
    rungs from cheap to best. A program picks a rung per sound, and each rung is the same on every leg. Each question
    below is measured first, then asked in full.
    1. **Where a sound seems to come from.** **Decided (§ Decided, 20 and 21)** after P5 (`aud-probe-spatial/`,
@@ -148,19 +148,8 @@ The areas, each asked in full in turn (area 1 first):
    3. **Which code turns a file into samples, on each leg.** **Decided (§ Decided, 23)** after P6
       (`aud-probe-decode/`, RESEARCH.md § 9.3): our C decoders and containers on both legs, each codec a module, and AAC
       through the platform.
-   4. **Changing a sound's rate, and its pitch.**
-      - *The problem:* a 44.1 kHz sound in a 48 kHz context needs resampling, and so do a `playbackRate` change and
-        Doppler. A cheap resampler aliases, which is audible as whistles on a sweep; a good one costs CPU per voice.
-        The browsers already differ here (§ 2.3).
-      - *The rungs:* linear, cubic, and windowed sinc at chosen lengths. A variable ratio per sample serves pitch and
-        Doppler, and a fixed high-quality conversion serves loading.
-      - *The options:* our own polyphase sinc in kama, or a vendored one: libsamplerate or speexdsp. r8brain only
-        fits offline conversion, and its NEON path differs from wasm.
-      - **P7** (`aud-probe-resample/`), for each rung and candidate, at a fixed and a moving ratio, natively and in
-        wasm:
-        - the quality: aliasing on the sweep, passband ripple, noise;
-        - the cost per voice;
-        - whether it makes the same samples on both legs.
+   4. **Changing a sound's rate, and its pitch.** **Decided (§ Decided, 24)** after P7 (`aud-probe-resample/`,
+      RESEARCH.md § 9.4): our ladder in kama for every voice, and libsamplerate's best for converting a whole buffer.
    5. **Playing a long sound without loading it whole.**
       - *The problem:* 10 minutes of stereo at 48 kHz is 230 MB as floats. Music and dialogue are decoded a little
         ahead, off the audio thread, and the audio thread must never wait for the decoder.
@@ -601,6 +590,25 @@ Those questions stay in kyoten's `audio.md`.
       - The browsers differ from ours and from each other. Chrome's `decodeAudioData` turns 16-bit PCM half an LSB
         from its own WebCodecs and drops 24 frames of WebM Opus, and the lossy codecs differ by 79 to 145 dB.
       - WebCodecs trims no priming, and Safari fails FLAC and Vorbis.
+24. **Decided on 2026-11-13: our resampling ladder in kama for every voice; libsamplerate's best for converting a whole
+    buffer** (area 4, question 4). The owner asked: "what is the best quality production answer? is that option 1? I
+    assume if we choose option 1 we can later write it all in kama in the future?" Told yes to both, the owner took it.
+    - **A voice reads its buffer through our ladder,** chosen per sound. The rungs:
+      - linear and cubic (Catmull-Rom), the cheap ones, which alias;
+      - band-limited interpolation at 8, 16 and 32 zero crossings, a Kaiser-windowed sinc whose cutoff follows the
+        pitch.
+      It reads at any fractional position, with a new ratio every frame, which a sub-sample start, a loop point and
+      Doppler need. It is the same on every leg, and it is optimized as it is built (a polyphase bank, SIMD).
+    - **Converting a whole buffer** (a file at another rate than the context's, at load or in a bounce) uses
+      libsamplerate's best (BSD-2), vendored behind the package's own seam.
+    - **A kama rung can replace libsamplerate later,** once it measures 140 dB or better. No program sees the change.
+    - **Why** (RESEARCH.md § 9.4):
+      - Every candidate but r8brain made the same samples natively and in wasm.
+      - Only ours reads at a fractional position with a ratio per frame. On a Doppler sweep it leaks -115 dB at 32
+        crossings; libsamplerate leaks -101 dB and speexdsp -48, since it steps its ratio per call.
+      - libsamplerate's best (140 dB SINAD) is the highest quality that makes the same samples on every leg.
+        r8brain reaches 152 dB, but its NEON path makes different samples in wasm.
+      - Ours is not yet optimized: at equal quality libsamplerate is cheaper today.
 
 ## Where the truth is
 

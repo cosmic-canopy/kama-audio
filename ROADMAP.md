@@ -6,7 +6,7 @@
 > **`AUD-<n>` is a permanent id, not a position.** It is assigned once, from the counter below, which the same edit
 > bumps. It is never reused or renumbered, and a shipped row's id retires with it.
 
-**Next id: AUD-23**
+**Next id: AUD-25**
 
 ## NOW: the design pass
 
@@ -39,3 +39,5 @@ decisions it depends on are recorded. Area 5 puts the rows below in order, by ex
 | AUD-20 | **Geometric acoustics, a later tier**: triangles with acoustic materials and a ray-tracing contract the program fills; occlusion and transmission by ray casts, a reverb estimated from the room, pathing around corners, convolution reflections. Run on the program's side. Its own probe, with Steam Audio as the reference, when a program first needs it | [decision 20](AGENTS.audio.md#decided) |
 | AUD-21 | **The decoders and containers, in the C seam on every leg**, each codec a module a program opts into: dr_wav, dr_flac, dr_mp3 (LAME's delay and padding), stb_vorbis, libopus through opusfile (Ogg) and nestegg (WebM); libogg, nestegg and minimp4, with MP4's edit list read; each container's priming trimmed | [decision 23](AGENTS.audio.md#decided) |
 | AUD-22 | **AAC through the platform**: WebCodecs on the web, fed by the package's MP4 reader, which trims the edit list's priming; AudioToolbox and Media Foundation natively. Documented as the one codec whose samples differ between legs | [decision 23](AGENTS.audio.md#decided) |
+| AUD-23 | **The voices' resampling ladder, in kama**: linear, cubic, and band-limited interpolation at 8, 16 and 32 zero crossings (the cutoff following the pitch), a fractional read position and a ratio per frame; a polyphase bank and SIMD | [decision 24](AGENTS.audio.md#decided) |
+| AUD-24 | **libsamplerate's best vendored behind the package's seam** for converting a whole buffer (at load, in a bounce); replaceable by a kama rung measured at 140 dB or better | [decision 24](AGENTS.audio.md#decided) |

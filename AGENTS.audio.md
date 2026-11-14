@@ -27,20 +27,30 @@ It is the audio half of kyoten's rule that each engine module is built on a gene
 comes before any code, as `@kama/graphics`' did. **Its research is done and measured (2026-11-13, [RESEARCH.md](RESEARCH.md)).
 Areas 1 to 3 are decided (§ Decided, 1 to 19),** and their rows are in [ROADMAP.md](ROADMAP.md).
 
-**The next session starts area 4, the ladders** (spatial sound, decoding, resampling, streaming). It begins in plan
-mode, as areas 2 and 3 did.
+**The next session runs area 4, the ladders** (spatial sound, decoding, resampling, streaming). Its questions and
+probes are planned in § The design pass, 4, and their parts are staged and smoke-tested (RESEARCH.md § 8). So it
+starts by running the probes, not by planning them. It begins in plan mode only to adjust the plan to what the smoke
+run and the licences showed.
 - **The Mac's pin is kyoten's 0.9.943 (`590aa28a`),** taken from the Mac on 2026-11-13 (kyoten `01c1eae`, every suite
   with 0.9.940's results). It is built from a clean clone of `../cstar`, kama's working clone on this Mac until the
   owner renames it `kama`. On it:
   - KAUD-1 is fixed and retired;
   - KAUD-2 to KAUD-5 reproduce. Until kama fixes KAUD-3, check a program by its absolute path.
-- **Read first:** § Decided, then [RESEARCH.md](RESEARCH.md):
-  - § 3 (the state of the art's spatial and decoding rows);
-  - § 4 (Steam Audio, the decoders and the resamplers);
-  - § 7 (what area 3 measured).
-- **Then:** plan area 4's probes, run them, and ask the area in full.
+- **Read first:**
+  - § Decided;
+  - § The design pass, 4;
+  - [RESEARCH.md](RESEARCH.md) § 8 (what is staged, and what the smoke run showed), § 3 (the state of the art's
+    spatial and decoding rows) and § 4 (Steam Audio, the decoders and the resamplers).
+- **Staged in `.scratch/area4/`:**
+  - `third_party/` holds every candidate at a pinned tag, and its `README.md` lists them;
+  - `steamaudio/` holds Steam Audio 4.8.1's headers and its macOS and wasm libraries;
+  - `fixtures/make.sh` generates the test audio, and each codec's encodes;
+  - `smoke/run.sh` builds every library natively, natively with no FMA contraction, and in wasm, then compares the
+    hashes.
 - **The Mac's toolchain** (emsdk's Python, Homebrew's paths, the pinned browsers) is in kyoten's `AGENTS.kyoten.md`
   § Build, *On macOS*.
+  - ffmpeg 9.0.2 (Homebrew) has libopus, LAME and Apple's AAC encoder;
+  - CMake 4 needs `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` for libsamplerate.
 - **The probes' harness** is in `.scratch/`, which is git-ignored:
   - `env.sh` sets the toolchain;
   - `browsers.sh` runs a page headless and muted, with the autoplay switches that let a realtime context start.
@@ -51,15 +61,16 @@ mode, as areas 2 and 3 did.
     route still needs this harness (KAUD-5).
 
 Waiting, and not area 4's:
-- Safari's measurements, which take the owner's focus, so ask first:
+- **Safari's measurements, deferred by the owner** (2026-11-13: "we can do safari measurements later"). They take the
+  owner's focus, so they are asked for, never planned into a session:
   - its gesture rule (decision 16);
   - isolation with `require-corp`;
-  - its Web Audio 1.1 rows.
+  - its Web Audio 1.1 rows;
+  - its decoders (area 4 records Safari's rows from the sources until then).
 - A real microphone, on the owner's hardware with the owner's OK (macOS asks permission): its round trip, duplex, and
   each OS's echo cancellation (decision 18).
 - WASAPI's exclusive and `IAudioClient3` modes, and MMCSS for render workers (decisions 17 and 19), on the Windows box.
 - What `reproducible-float` costs the DSP (decision 14), once there is DSP.
-- A long convolution reverb's cost as a built-in node against the worklet (area 4).
 - KAUD-2 to KAUD-5 upstream.
 
 **It is designed and built on the Mac Mini, in parallel with kyoten's graphics track on Windows** (the owner,
@@ -121,9 +132,93 @@ The areas, each asked in full in turn (area 1 first):
    - **Natively:** miniaudio's device layer, with small seams of our own for what it lacks.
    - **Input:** Web Audio's model on both legs.
    - **Cores:** declared render workers natively, one thread on the web.
-4. **The ladders:** spatial sound (HRTF from SOFA data in kama on both legs, Steam Audio natively for occlusion and
-   rooms, equal-power panning), decoding (WebCodecs where it works, kama-built decoders where it does not, the OS's
-   AAC natively), resampling quality, and streaming.
+4. **The ladders: spatial sound, decoding, resampling and streaming.** Planned on 2026-11-13, and its parts are staged
+   and smoke-tested (RESEARCH.md § 8). A ladder is a feature in rungs from cheap to best. A program picks a rung per
+   sound, and each rung is the same on every leg. Each question below is measured first, then asked in full.
+   1. **Where a sound seems to come from.**
+      - *The problem:* a game says "this footstep is behind you, 3 m away, around a corner", and the listener should
+        hear the direction, the distance and the wall. Web Audio's `PannerNode` HRTF is one generic data set, and it
+        renders differently in each browser (§ 2.3). It has no personal HRTFs, no occlusion and no rooms.
+      - *The rungs:*
+        - equal-power panning (Web Audio's formula);
+        - HRTF binaural from SOFA data;
+        - Ambisonics: many sources encoded into one sound field, rotated by the head's pose and decoded binaurally
+          once, XR's usual path;
+        - the room: distance and air absorption, occlusion and transmission through walls, reflections and reverb,
+          and paths around corners.
+      - *The options:*
+        - our own rungs in kama on both legs, the room's inputs (occlusion, a reverb's parameters) supplied by the
+          program from its own geometry;
+        - Steam Audio on both legs, through its native libraries and its new wasm one (6.0 MB, and its samples
+          differ between the legs);
+        - our own rungs as the core, and Steam Audio as an optional package for geometric acoustics (baked
+          reflections, pathing). That would be a different sound from the core's, on the legs it supports.
+      - **P5** (`aud-probe-spatial/`): an HRTF binaural renderer in kama. Direct convolution against a partitioned
+        FFT, interpolation between measured directions, and a moving source with no clicks. Then:
+        - its cost per voice natively and in the worklet, and its samples on both legs;
+        - Steam Audio's binaural and Ambisonics effects natively and in wasm: cost per voice, wasm size, load time;
+        - `PannerNode`'s HRTF cost, the reference the web already has.
+   2. **Which HRTF data, and how a program brings its own.**
+      - *The problem:* HRTF sets are measurements under licences that range from Apache-2.0 to non-commercial, and a
+        default must be shippable in any program. A SOFA file is HDF5, a heavy format to read in a worklet.
+      - *The options:*
+        - read SOFA at run time, with libmysofa (66 KB of wasm, plus zlib);
+        - convert it at build time into a compact table the package reads, so no HDF5 runs at all.
+
+        The default set comes from the licence survey (RESEARCH.md § 8). SADIE II is Apache-2.0, and its KU100 and KEMAR
+        sets load identically on both legs, but each is 18 MB as float32. So the question includes how a default is
+        reduced: fewer directions, shorter filters, or spherical harmonics, as Resonance Audio ships.
+   3. **Which code turns a file into samples, on each leg.**
+      - *The problem:* a sample-exact loop and a bounce need the same samples from the same file everywhere. But a
+        game ships formats each browser decodes differently or not at all: Safari fails FLAC and Vorbis (§ 3).
+        WebCodecs decodes packets, not files, so a program needs a container reader as well.
+      - *The options:*
+        - kama-built decoders on both legs. The smoke run made identical samples natively and in wasm. The browser
+          decodes only AAC, whose patents keep it out, and is otherwise an option;
+        - the browser's decoders on the web (`decodeAudioData`, WebCodecs) and ours natively. No decoder wasm, but
+          the samples differ per browser and Safari has gaps;
+        - a choice per codec.
+      - *Also:* the containers (Ogg, WebM, MP4, FLAC, WAV), and the metadata that makes decoding gapless: Opus's
+        pre-skip, LAME's tag, and AAC's priming in MP4's edit list.
+      - **P6** (`aud-probe-decode/`): every fixture through WebCodecs and `decodeAudioData` in Chrome and Firefox,
+        against the C decoders in wasm and natively (through kama, with `reproducible-float`). It compares:
+        - the samples (FLAC must be exact);
+        - the frame counts and the priming;
+        - decode speed in a worker, and wasm size per decoder.
+
+        Natively, AAC goes through AudioToolbox, and through Media Foundation on the Windows box.
+   4. **Changing a sound's rate, and its pitch.**
+      - *The problem:* a 44.1 kHz sound in a 48 kHz context needs resampling, and so do a `playbackRate` change and
+        Doppler. A cheap resampler aliases, which is audible as whistles on a sweep; a good one costs CPU per voice.
+        The browsers already differ here (§ 2.3).
+      - *The rungs:* linear, cubic, and windowed sinc at chosen lengths. A variable ratio per sample serves pitch and
+        Doppler, and a fixed high-quality conversion serves loading.
+      - *The options:* our own polyphase sinc in kama, or a vendored one: libsamplerate or speexdsp. r8brain only
+        fits offline conversion, and its NEON path differs from wasm.
+      - **P7** (`aud-probe-resample/`), for each rung and candidate, at a fixed and a moving ratio, natively and in
+        wasm:
+        - the quality: aliasing on the sweep, passband ripple, noise;
+        - the cost per voice;
+        - whether it makes the same samples on both legs.
+   5. **Playing a long sound without loading it whole.**
+      - *The problem:* 10 minutes of stereo at 48 kHz is 230 MB as floats. Music and dialogue are decoded a little
+        ahead, off the audio thread, and the audio thread must never wait for the decoder.
+      - *The options, per leg:*
+        - natively, a decode thread fills a ring;
+        - on the web's shared route, a Worker decodes (wasm or WebCodecs) into the shared ring;
+        - on the page route, the Worker posts transferred buffers.
+      - *Also:* sample-exact loops and seams between streamed sections, seeking, and starting a stream with no gap.
+      - **P8** (`aud-probe-stream/`): `long_48000.opus` streamed through a decode worker into the engine, natively
+        and on both web routes. It measures:
+        - underruns, idle and loaded;
+        - memory, and the time to the first sample;
+        - a seek's accuracy, and a loop's seam.
+   6. **A long convolution reverb: the one built-in node in question** (decision 1).
+      - *The problem:* a concert hall's reverb is a 2 to 4 s impulse response, a heavy convolution. The browser's
+        `ConvolverNode` may run part of it off the audio thread, which one worklet cannot.
+      - **P9** (`aud-probe-convolver/`): a 3 s impulse response as a `ConvolverNode`, against a partitioned
+        convolution in the worklet, in Chrome and Firefox, and natively. It measures their cost and underruns, and
+        whether the two sound the same.
 5. **The feature map and the order of work:** a `FEATURES.md` from Web Audio, the middleware and the DAW engines, and a
    `ROADMAP.md` by example: a sample-exact loop (cosmic-forge's CF-24), a game's sounds, voice chat, a synth on MIDI, a
    multitrack session with automation and bounce, and spatial sound on a headset. Whether a DAW's engine (transport,
@@ -490,6 +585,10 @@ This repository is the Mac's row; kyoten's graphics track (`@kama/gpu`, `@kama/g
 before work and push after each commit. Audio's records live here. kyoten's docs get only what binds kyoten: a
 decision recorded in `audio.md`, and the KYR-15 row. kyoten's hot spots, `FIRST-SLICE.md` § Where it stands and each
 `ROADMAP.md`'s next id, are where two machines collide, so change them in a commit of their own, pulled first.
+
+**The Mac may take another package's Mac-only task when it is needed, even a GPU one,** such as a Metal-only
+`@kama/gpu` failure (the owner, 2026-11-13: "we can take mac tasks if needed... even if they are GPU specific. for now
+I think we focus on the audio tickets"). Offer one when it blocks something; audio's work stays the focus.
 
 ## Build
 

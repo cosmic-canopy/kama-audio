@@ -605,3 +605,75 @@ spinning thread per core (10 natively, 8 Wasm Workers on the web).
   360 to 465 µs at the median under load, up to 1 ms and more.
 - **One worklet thread held up under the same load:** no underrun in Chrome.
 - **The sums matched one thread's in both browsers.**
+
+## 8. Area 4, staged
+
+Staged 2026-11-13 on the Mac for area 4 ([AGENTS.audio.md](AGENTS.audio.md) § The design pass, 4), so its probes
+start from parts known to build. **A smoke run, not a measurement:** one run per case, and its timings are noise.
+Everything is in `.scratch/area4/` (git-ignored):
+- `third_party/`: each candidate at a pinned tag or commit (its `README.md` lists them);
+- `steamaudio/`: Steam Audio 4.8.1's release, its headers and its macOS and wasm libraries;
+- `fixtures/`: the test audio, made by `make.sh` so no licence applies;
+- `smoke/`: `build-libs.sh` and `run.sh`, each case natively and in wasm under node.
+
+**The fixtures:** a log sweep (left) with pink noise (right), a chord, a 2 s loop whose last sample joins its first,
+and a 10 min stream, at 48 kHz and 44.1 kHz. Each is encoded as WAV, FLAC (16 and 24 bit), MP3 (LAME), AAC-LC (Apple's
+encoder, in M4A), Vorbis and Opus (in Ogg and WebM). The encodes come from ffmpeg 9.0.2, and `SHA256SUMS` records them.
+
+**What the smoke run showed** (`smoke/results/`):
+- **Every permissive C decoder makes the same samples natively and in wasm,** given what kama's `reproducible-float`
+  already sends to C (`-ffp-contract=off`):
+  - the decoders: dr_flac, dr_wav, dr_mp3 (with `DR_MP3_NO_SIMD`), stb_vorbis, and libopus 1.6.1 through opusfile
+    0.12, the 10 min stream included;
+  - the resamplers: libsamplerate's four qualities, and speexdsp's at 3, 5 and 10;
+  - libmysofa's HRIR lookup, resampled to 48 kHz.
+
+  With the platform's default contraction, MP3, Vorbis, Opus, speexdsp and the HRIR differ. Lossless decoding (FLAC,
+  WAV) and libsamplerate are identical either way.
+- **r8brain 7.7 differs.** On arm64 it always takes its NEON path, which has no switch to turn off.
+- **`reproducible-float` covers a C seam only in part.** kama sends `-ffp-contract=off` to every C compile, the seam's
+  included, but its musl math reaches only `std::math`: a C library calling `sin` still gets the platform's libm
+  (`kama.driver.cpp`, at `KAMA_REPRODUCIBLE_FLOAT`). The decoders above matched anyway. Whether r8brain's difference
+  is its NEON or its libm is unmeasured.
+- **Gapless decoding held:** the 2 s loop decoded to exactly 96,000 frames from MP3 (the LAME tag), Vorbis and Opus
+  (opusfile applies the pre-skip).
+- **Steam Audio 4.8.1 ships a wasm library** (`lib/wasm/libphonon.a`, 7 MB). Its wasm build is still "experimental",
+  and steam-audio#496 is still open: the archive leaves libmysofa's, pffft's and zlib's symbols undefined.
+  - It links once libmysofa, pffft and emscripten's zlib are added: a 6.0 MB `.wasm` for one binaural effect.
+  - Its binaural output differs between native and wasm, with the default HRTF and with a SOFA one.
+  - The macOS library is universal (arm64 and x86_64) and ad hoc signed.
+- **Sizes:** one wasm with every decoder, libsamplerate and libmysofa is 1.9 MB unstripped at `-O2`. r8brain with
+  speexdsp is 128 KB. Steam Audio is 6.0 MB.
+- **Ports:**
+  - libmysofa 1.3.5 needs one define for emscripten (`portable_endian.h` has no emscripten case; `-D__linux__` takes
+    musl's `<endian.h>`);
+  - libsamplerate 0.2.2's CMake needs `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` on CMake 4;
+  - kama's `csources` compile C++ too, with `cxxflags`, so r8brain and Steam Audio's sources are reachable from a seam.
+- **SOFA files:** libmysofa's own test set carries the reference datasets, each with its licence file. Its
+  `D1_48K_24bit_0.3s_FIR_SOFA.sofa` is a `MultiSpeakerBRIR`, not an HRIR set, and both libmysofa and Steam Audio
+  refuse it.
+
+**The HRTF data and its licences** (`.scratch/area4/hrtf/`). A research agent read each set's own page, its licence
+file and the `License` attribute inside its SOFA file. The rows marked *loaded* were then loaded here with libmysofa
+1.3.5, and the HRIR at 60° left came out identical natively and in wasm. Each set is offered as a candidate default,
+or as a set a program loads itself.
+
+| Set | Terms | Format | Here |
+|---|---|---|---|
+| **SADIE II** (University of York): KU100 dummy head (D1), KEMAR (D2), 18 people | **Apache-2.0**. The dataset must be referenced, in original or modified form | 44.1 and 48 kHz, 256 taps (512 at 96 kHz). D1 and D2 have 8,802 directions; the people 2,114 to 2,818 | **Loaded:** D1 and D2 at 48 kHz, 36.6 MB each. Steam Audio loads D1 too |
+| HUTUBS (TU Berlin) | CC BY 4.0 | 44.1 kHz, 440 directions, 256 taps | **Loaded:** person 1, 279 taps at 48 kHz |
+| 3D3A (Princeton) | CC BY 4.0 | 96 kHz, 648 directions, 2,048 taps | libmysofa refuses it (10005) |
+| MIT KEMAR | "free with no restrictions on use, provided the authors are cited"; redistribution and modification not addressed | 44.1 kHz, 710 directions, 512 taps | **Loaded** (libmysofa's copy) |
+| CIPIC (UC Regents) | use for any purpose; each reproduction keeps the copyright notice; written acknowledgement asked for commercial use | 44.1 kHz, 1,250 directions, 200 taps | in libmysofa's tests |
+| IRCAM Listen | use for any purpose with the notice kept; modification not addressed | 44.1 kHz, 187 directions, 8,192 taps | one file opens, another does not (10001) |
+| ARI (ÖAW); TH Köln KU100 | CC BY-SA 3.0 (TH Köln: CC BY 3.0 on Zenodo, BY-SA in the file) | 48 kHz | share-alike binds anything made from them |
+| SADIE II's predecessor, Subject 002 | Apache-2.0, as Resonance Audio bundles it | 48 kHz WAVs, compiled in as spherical-harmonic HRIRs of orders 1 to 3 | not SOFA |
+| The browsers' `PannerNode` set (IRCAM "Composite", averaged by Chris Rogers) | Firefox's copy says "granted to the Public Domain"; Chromium's README states no licence | 44.1 kHz, 240 directions, 256 taps | |
+
+- **Steam Audio's built-in default HRTF is CIPIC subject 124,** under CIPIC's terms (its `THIRDPARTY.md`), and
+  steam-audio#525 asks for a build without it.
+- **What a default costs:** SADIE II's D1 is 8,802 directions × 2 ears × 256 taps, 18 MB as float32. So shipping one
+  in every program means reducing it: fewer directions, shorter filters, or Resonance's spherical-harmonic form. That
+  is area 4's question 2.
+- **libmysofa** needs only zlib and libm: it has its own HDF5 reader. It bundles the Speex resampler, and Steam Audio
+  builds it for wasm with the same `-D__linux__` define as here.

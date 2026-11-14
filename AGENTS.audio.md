@@ -191,6 +191,11 @@ The areas, each asked in full in turn (area 1 first):
    multitrack session with automation and bounce, and spatial sound on a headset. Whether a DAW's engine (transport,
    tracks, clips, plugin hosting through CLAP natively and WebCLAP on the web, delay compensation) is a tier here or a
    package of its own.
+   - **Speech, for kyoten's accessibility** (KYR-76, the owner, 2026-11-14: "Speach to text, text to speach"):
+     whether text to speech renders into this engine on every leg (a local voice model) or comes from the platform
+     (Web Speech's synthesis, which bypasses Web Audio, or the OS's), and whether speech to text runs on this
+     package's input node or in a speech package of its own. Its questions are in kyoten's
+     `docs/design/accessibility.md` (4 and 5); the audio half is answered here.
 
 What stays kyoten's, not this package's: how kyoten's frame phases schedule sound (Output, timestamps a little ahead),
 its components, and its DAW tool (KYR-35). This package must be able to serve a DAW; the DAW tool itself is kyoten's.

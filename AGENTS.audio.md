@@ -32,7 +32,7 @@ probes are planned in § The design pass, 4, and their parts are staged and smok
 starts by running the probes, not by planning them. It begins in plan mode only to adjust the plan to what the smoke
 run and the licences showed.
 - **The Mac's pin is kyoten's 0.9.945 (`c474b5e9`),** taken from the Mac on 2026-11-13 at the owner's word (kyoten
-  `09943ab`, every suite with 0.9.943's results). It is built from a clean clone of `../cstar`, kama's working clone on
+  `dbe1e03`, every suite with 0.9.943's results). It is built from a clean clone of `../cstar`, kama's working clone on
   this Mac until the owner renames it `kama`. On it:
   - KAUD-1 and KAUD-3 are fixed and retired, so a program checks by any path;
   - KAUD-2, KAUD-4 and KAUD-5 reproduce.

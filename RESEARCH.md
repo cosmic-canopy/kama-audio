@@ -818,3 +818,65 @@ direction and ear, and where it applies the ITD's error. `sofaload.c` times read
 - **So a default that ships in every program can be about 1 MB** (2°, 64 taps, float16: 0.38 dB mean, 1.1 dB p95),
   before the transfer's own compression. The full set stays available to a program that wants it. Steam Audio's
   default instead is CIPIC subject 124, under CIPIC's terms (§ 8).
+
+### 9.3 Which code turns a file into samples (`.scratch/aud-probe-decode/`, P6)
+
+**What ran.** Every fixture (§ 8: a sweep with noise, a chord, a 2 s loop and a 10 min stream, at 48 and 44.1 kHz, in
+WAV, FLAC 16 and 24 bit, MP3, AAC in M4A, Vorbis, and Opus in Ogg and WebM) through:
+- **our C decoders** (`cdec.c`): dr_wav, dr_flac, dr_mp3, stb_vorbis, opusfile with libopus, and nestegg with libopus
+  for WebM. They are built natively and in wasm (under node) with the flags kama 0.9.945 gives a C seam under
+  `reproducible-float` (`-O3` natively, `-Oz` in wasm, `-ffp-contract=off`). AAC goes through the OS, AudioToolbox's
+  `ExtAudioFile`, because its patents keep a decoder out of the package;
+- **each browser's `decodeAudioData`**, on an `OfflineAudioContext` at the file's own rate so nothing is resampled;
+- **each browser's WebCodecs `AudioDecoder`**, in a worker, fed packets demuxed natively (`demux.c`) by the readers
+  a web build would compile: libogg, nestegg (WebM, ISC-style), minimp4 (MP4, CC0, with the edit list read beside it),
+  and small readers for MP3 frames and native FLAC frames.
+
+Each browser decode is aligned with ours (the offset searched near 0 and near the container's priming, since the loop
+repeats) and compared: the largest difference and the SNR over the whole overlap. The 10 min files are counted and
+timed only.
+
+**Our C decoders make the same samples natively and in wasm, for every fixture and codec,** at kama's release flags.
+
+**How each browser's decode compares with ours** (Chrome 157, Firefox 160; "dAD" is `decodeAudioData`, "WC" is
+WebCodecs):
+
+| codec | dAD, Chrome | dAD, Firefox | WC, both | frames, against ours |
+|---|---|---|---|---|
+| FLAC 24 bit, WAV float | exact | exact | exact (FLAC) | equal |
+| FLAC 16 bit, WAV 16 bit | **half an LSB apart** (93 dB, at most 1.5e-5) | exact | exact (FLAC) | equal |
+| Opus (Ogg) | 136 to 143 dB | 134 to 137 dB | as each browser's dAD | dAD equal; WC keeps the pre-skip and the end (+312 and +336) |
+| Opus (WebM) | **24 frames short at the start** (479,976 of 480,000) | equal | as above | as above |
+| Vorbis | 135 to 136 dB | 143 to 145 dB | as dAD | dAD equal; WC keeps the end (+256 or +320) |
+| MP3 | 83 to 91 dB (at most 4.6e-5) | 79 to 85 dB (6.1e-5) | as dAD, but see below | dAD equal; WC keeps LAME's delay (+2,257 with the Info frame) |
+| AAC (against AudioToolbox) | 136 dB | **exact** (Firefox decodes through AudioToolbox on macOS) | as dAD | dAD equal; WC keeps the priming (+2,112) |
+
+- **The browsers make different samples from each other, and Chrome from itself.** Chrome's `decodeAudioData` turns
+  16-bit PCM into floats differently from its own WebCodecs, from Firefox and from dr_flac. The lossy decoders differ
+  at 79 to 145 dB. That is inaudible, but enough to break a bounce or a test that compares samples. Safari, from the
+  sources (§ 3), fails FLAC and Vorbis.
+- **Gapless:**
+  - `decodeAudioData` trims the priming and the padding for every codec, in both browsers, except Chrome's WebM Opus
+    (24 frames).
+  - **WebCodecs trims nothing.** The container's priming and padding are the program's to remove: Opus's pre-skip,
+    LAME's delay, MP4's edit list.
+  - Our decoders trim from the container: the 2 s loop decodes to exactly 96,000 frames from FLAC, MP3 (LAME's tag,
+    even as ffmpeg writes it, with "Lavc" for "LAME"), Vorbis, Ogg Opus and WebM Opus.
+  - Two fixtures carry their encoder's own counts:
+    - the AAC files' edit list says 96,256 frames for the loop. ffmpeg wrote its priming, 2,112, which AudioToolbox
+      and both browsers apply, but not the true end;
+    - the 44.1 kHz Vorbis files' last granule is 441,024.
+- **MP3 through WebCodecs needs the Xing/Info frame kept** as a packet: the next frame's bit reservoir reaches back
+  into its bytes. One fixture is still unexplained: the loop's MP3 decodes 16 dB from ours in both browsers through
+  WebCodecs, with no error reported. The other four MP3 fixtures align exactly.
+- **Speed**, 10 min of stereo at 48 kHz (28.8 million frames):
+
+  | | ours, native | ours, wasm (node) | dAD, Chrome | WC, Chrome | dAD, Firefox | WC, Firefox |
+  |---|---|---|---|---|---|---|
+  | Opus | 789 ms | 848 ms | 838 ms | 1,039 ms | 1,199 ms | 2,070 ms |
+  | MP3 | 253 ms | 600 ms | 411 ms | 482 ms | 657 ms | 1,376 ms |
+
+  In wasm, ours decode as fast as the browsers' own, and faster than Firefox's WebCodecs.
+- **What each one adds to the wasm**, alone in a program at kama's `-Oz` (`sizes/`): dr_wav 20.6 KB, dr_mp3 29.5 KB,
+  stb_vorbis 43.4 KB, dr_flac 51.8 KB, libopus 136.8 KB (opusfile, libopus and libogg together: 168.4 KB); the
+  containers: libogg 14.6 KB, nestegg 13.2 KB, minimp4 11.0 KB.

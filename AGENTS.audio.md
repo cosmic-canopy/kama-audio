@@ -31,11 +31,11 @@ Areas 1 to 3 are decided (§ Decided, 1 to 19),** and their rows are in [ROADMAP
 probes are planned in § The design pass, 4, and their parts are staged and smoke-tested (RESEARCH.md § 8). So it
 starts by running the probes, not by planning them. It begins in plan mode only to adjust the plan to what the smoke
 run and the licences showed.
-- **The Mac's pin is kyoten's 0.9.943 (`590aa28a`),** taken from the Mac on 2026-11-13 (kyoten `01c1eae`, every suite
-  with 0.9.940's results). It is built from a clean clone of `../cstar`, kama's working clone on this Mac until the
-  owner renames it `kama`. On it:
-  - KAUD-1 is fixed and retired;
-  - KAUD-2 to KAUD-5 reproduce. Until kama fixes KAUD-3, check a program by its absolute path.
+- **The Mac's pin is kyoten's 0.9.945 (`c474b5e9`),** taken from the Mac on 2026-11-13 at the owner's word (kyoten
+  `09943ab`, every suite with 0.9.943's results). It is built from a clean clone of `../cstar`, kama's working clone on
+  this Mac until the owner renames it `kama`. On it:
+  - KAUD-1 and KAUD-3 are fixed and retired, so a program checks by any path;
+  - KAUD-2, KAUD-4 and KAUD-5 reproduce.
 - **Read first:**
   - § Decided;
   - § The design pass, 4;
@@ -577,12 +577,13 @@ Those questions stay in kyoten's `audio.md`.
 - **Never edit `../kama` from here.** A compiler or std gap goes in [KAMA_GAPS.md](KAMA_GAPS.md), with a minimal repro
   and the kama version.
 - **Verify, don't trust.** Compile the snippet, run it, read the emitted C. A doc is not evidence, including this one.
-- **Commit on `main`, and push only when the owner asks.**
+- **Commit on `main`, and push at the session's end** (§ Two machines).
 
 ## Two machines
 
 This repository is the Mac's row; kyoten's graphics track (`@kama/gpu`, `@kama/graphics`) is the Windows box's. Pull
-before work and push after each commit. Audio's records live here. kyoten's docs get only what binds kyoten: a
+before work, commit as each step lands, and push at the session's end (the owner, 2026-11-13: "typically you will push
+at the end"). Audio's records live here. kyoten's docs get only what binds kyoten: a
 decision recorded in `audio.md`, and the KYR-15 row. kyoten's hot spots, `FIRST-SLICE.md` § Where it stands and each
 `ROADMAP.md`'s next id, are where two machines collide, so change them in a commit of their own, pulled first.
 

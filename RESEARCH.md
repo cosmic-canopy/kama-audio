@@ -8,11 +8,13 @@ decisions are the owner's and go in AGENTS.audio.md with their reasons.
 
 | Source | Version, as of 2026-11-13 |
 |---|---|
-| kama | 0.9.938+g94365be5, kyoten's pin, built from a clean clone on this Mac (§ 7 on 0.9.943+g590aa28a) |
+| kama | 0.9.938+g94365be5, kyoten's pin, built from a clean clone on this Mac (§ 7 on 0.9.943+g590aa28a, § 9 on 0.9.945+gc474b5e9) |
 | Chrome for Testing | 157.0.8103.50, pinned in `~/browsers`, headless and muted |
 | Firefox | 160.0, pinned in `~/browsers`, headless, autoplay blocked |
 | Safari | 27.2, the system's. Not measured yet: it has no headless mode, so a run waits for the owner |
 | emscripten | emsdk 7.0.0 (`777e6e5d`), the latest; the Windows box verified 6.0.13 |
+| node | 26.13.0 (§ 9's wasm legs) |
+| Steam Audio | 4.8.1, its release's headers and its macOS and wasm libraries (§ 8, § 9) |
 
 ## 1. What the owner's projects already do
 
@@ -677,3 +679,142 @@ or as a set a program loads itself.
   is area 4's question 2.
 - **libmysofa** needs only zlib and libm: it has its own HDF5 reader. It bundles the Speex resampler, and Steam Audio
   builds it for wasm with the same `-D__linux__` define as here.
+
+## 9. Area 4, measured
+
+Probes for area 4 ([AGENTS.audio.md](AGENTS.audio.md) § The design pass, 4), run 2026-11-13 on the Mac (Apple M4)
+**on kama 0.9.945** (`c474b5e9`, kyoten's pin from that day), emsdk 7.0.0, node 26.13.0 and the pinned browsers,
+headless and muted. Nothing was audible: every case rendered offline or into memory. Each probe re-runs with its
+`run.sh` and writes `results/`. **Costs are ms of one core per second of audio**, the median of 3 runs of 1 s, at
+128-frame blocks and 48 kHz. Some ran with the kama project's own test matrix on the same machine (load average 5 to
+8), so a row can vary by 10 to 20% between runs; each comparison below is made within a run.
+
+### 9.1 Where a sound seems to come from (`.scratch/aud-probe-spatial/`, P5)
+
+**What was built.** A binaural renderer and an Ambisonics rung in kama, the same source on every leg
+(`app/src/`, on area 4's shared FFT and partitioned convolver in `.scratch/area4/dsp/`):
+- **The data.** SADIE II's D1 (KU100, Apache-2.0) converted at build time by `.scratch/area4/hrtfconv/conv` (C,
+  native): its regular 1° grid (22 rings of 360 azimuths and the two poles, 7,922 directions; the set's 880 other
+  points are left out), each HRIR made minimum phase (by the real cepstrum) with its onset kept as a fractional delay,
+  and spherical-harmonic HRIRs to order 3 by least squares. Where no file can be read (a browser page), a synthetic set
+  of the same shape stands in: a render's cost depends on the shape only.
+- **A binaural voice.**
+  - The HRIR comes from the four grid directions around the source, blended bilinearly.
+  - It is convolved directly (FIR) or by uniformly partitioned FFT (overlap-save, an FFT of 256, one forward
+    transform a block shared by both ears).
+  - Each ear is then delayed by its interpolated onset (the ITD) through a cubic Lagrange delay line, the delay
+    ramped across the block.
+  - When the source moves, the block is rendered through the old and the new filters and crossfaded, every block or
+    every 4 blocks (10.7 ms, a usual update rate).
+- **Ambisonics.** Every source is encoded into one field (ACN, SN3D, its gains ramped across the block), the field is
+  rotated by a turning head (a block-diagonal matrix applied in full), and decoded binaurally once by convolving each
+  channel with the SH HRIRs. A symmetric head needs one ear's filters: L = S + A and R = S - A.
+- **The checks.** Hashes of each case's output over 200 blocks, a moving 1 kHz sine with and without the crossfade,
+  and the FFT's output against the FIR's.
+- **The references.** Steam Audio 4.8.1's binaural and Ambisonics effects on the same SOFA file (`steam/`), natively
+  (its release's dylib) and in wasm (its `libphonon.a`, linked with libmysofa, pffft and zlib, under node); and N
+  `PannerNode`s with HRTF in each browser, rendered offline (`panner/`).
+
+**Correctness:**
+- **Every leg makes the same samples.** With D1, native with `reproducible-float` equals wasm under node at `-Oz` and
+  at `-O3`. With the synthetic set, native equals Chrome and Firefox at both levels. Native without the flag differs,
+  as decision 14 found.
+- **The FFT path equals the FIR path to 4.2e-7** on a peak of 0.45.
+- **The crossfade removes the click.** A 1 kHz sine moving at 180°/s has a largest second difference of 0.0086 with
+  the crossfade, the sine's own. Without it, it has 0.0171: a step at each filter switch, which the ITD's delay moves
+  off the block's edge.
+
+**The cost** (`results/`; `summarize.py` prints the whole table). 64 voices, ms of one core per second of audio.
+"kama `-Oz`" is kama's release; "kama `-O3`" is the same emitted C at `-O3`, which kama 0.9.945 lets no program choose
+(KAUD-6, filed from this probe; `.scratch/area4/tools/emcc` swaps the flag and nothing else):
+
+| 64 voices | native | Chrome, kama `-Oz` | Chrome, `-O3` | Firefox, kama `-Oz` | Firefox, `-O3` | Steam Audio native | Steam Audio wasm (node) | `PannerNode` HRTF, Chrome | `PannerNode` HRTF, Firefox |
+|---|---|---|---|---|---|---|---|---|---|
+| static | 170 | 1,397 | 127 | 489 | 191 | 184 | 293 | 40 | 76 |
+| moving, filters every 4 blocks | 223 | 2,084 | 187 | 657 | 266 | 206 | 304 | 275 | 108 |
+| moving, filters every block | 413 | 4,032 | 355 | 1,325 | 551 | 206 | 309 | | |
+
+- **256 voices:** static 618 natively, 522 in Chrome at `-O3`, 669 in Firefox at `-O3`; Steam Audio 830 natively and
+  1,266 in wasm; `PannerNode` 211 (Chrome) and 306 (Firefox). Moving with filters every 4 blocks: 850 natively, 758
+  and 982 in the browsers at `-O3`; Steam Audio 845 natively; `PannerNode` 1,322 and 633.
+- **Shorter filters cost less:** 128 taps, 64 voices, static, 133 natively (256 taps: 170). The FIR is dearer than the
+  FFT at 256 taps (16 voices: 282 against 29) and close to it at 64 taps (64 voices: 250).
+- **Ambisonics** (sources moving, the head turning):
+
+  | | native | Chrome `-O3` | Firefox `-O3` | Chrome, kama `-Oz` | Steam Audio native | Steam Audio wasm |
+  |---|---|---|---|---|---|---|
+  | order 1, 256 sources | 60 | 46 | 71 | 300 | 26 | 27 |
+  | order 3, 64 sources | 61 | 45 | 59 | 388 | 29 | 41 |
+  | order 3, 256 sources | 175 | 144 | 186 | 1,035 | 70 | 85 |
+
+- **Sizes and loading:** the renderer's wasm is 76 KB (`-Oz`) or 101 KB (`-O3`). Steam Audio's is 6.03 MB, and it
+  loads D1's SOFA in 714 ms natively and 1,004 ms in wasm.
+- **Steam Audio's legs differ only by rounding:** 107 dB below the signal for binaural and 112 dB for order-3
+  Ambisonics, at most 4.2e-6, but only 359 of 51,200 samples are equal. Its prebuilt libraries cannot be held to equal
+  samples.
+
+**Where the renderer's time goes: the FFT.** A forward and an inverse of 256 real points:
+
+| | native | wasm `-O3` | wasm, kama `-Oz` | same bits on every leg |
+|---|---|---|---|---|
+| area 4's FFT, in kama (radix 2, checked indexing) | 2,701 ns | 2,221 ns | 26,357 ns | yes |
+| pffft (r8brain 7.7's copy), SIMD | 180 ns | 193 ns | | **yes, with `-ffp-contract=off`**: NEON, wasm SIMD and wasm scalar all hash `7303612289528294521`; native with contraction on differs |
+| pffft, wasm scalar | | 648 ns | | yes |
+
+- A static voice does one forward and two inverse transforms a block: 1.52 ms a second, 85% of a voice's cost at 16
+  voices and 57% at 64. **At pffft's speed a voice would cost a fifth to a half of what it does,** under Steam
+  Audio's binaural.
+- **pffft is permissive** (FFTPACK v5's terms: keep the notice, no endorsement) and adds 37 KB of wasm at `-Oz`.
+  kama's `reproducible-float` already sends `-ffp-contract=off` to a C seam. The x86-64 SSE path is not yet compared
+  (the Windows box).
+- **The kernels on their own** (`.scratch/area4/dsp/kernels/`): natively, checked indexing costs nothing measurable
+  (a 129-bin complex multiply-accumulate in 18 ns either way). In wasm at `-Oz` the same loop takes 4,446 ns over views
+  and 326 ns over raw pointers; at `-O2`, 100 and 84 ns. That is KAUD-6's repro.
+
+**So:**
+- **One renderer in kama makes the same samples on every leg**, natively and in both browsers, with SADIE's data.
+  Neither Steam Audio's libraries nor the browsers' `PannerNode` can (§ 2.3).
+- **Natively it already costs what Steam Audio's binaural does,** with an FFT 15 times slower than the state of the
+  art. **In the browser it costs the same as natively at `-O3`, and 5 to 10 times more at kama's `-Oz`.** So the web's
+  voice count depends on KAUD-6.
+- **The browser's own `PannerNode` is cheaper while static** (native C++, a different sound per browser), and
+  Chrome's costs 6 times more while its position is automated.
+- **Ambisonics' cost per source is a few gains**, so at 256 sources order 3 costs a third of binaural. Steam Audio's
+  encode is 2.5 times cheaper than this first one, which ramps gains per sample through checked indexing.
+
+### 9.2 Which HRTF data, and how small a default can be (`.scratch/aud-probe-hrtf/`, P10)
+
+`reduce.c` (C, native, a build-time analysis) takes SADIE II's D1 on its 1° grid and measures each reduction against
+the measured HRIR at the same direction and ear: the **log-spectral distortion** (LSD, dB RMS from 100 Hz to 20 kHz on
+a 1,024-point spectrum; about 1 dB is the usual threshold of audibility), as a mean and a 95th percentile over every
+direction and ear, and where it applies the ITD's error. `sofaload.c` times reading SOFA at run time.
+
+| reduction (float32 unless said) | size | LSD mean / p95, dB |
+|---|---|---|
+| the full grid, minimum phase, 256 taps | 16.3 MB | 0.00 / 0.00 |
+| minimum phase cut to 128 / 96 / 64 taps | 8.2 / 6.2 / 4.1 MB | 0.08 / 0.20; 0.17 / 0.34; 0.29 / 0.66 |
+| cut to 48 / 32 / 16 taps | 3.1 / 2.1 / 1.1 MB | 0.41 / 0.96; 0.68 / 1.56; 1.65 / 3.11 |
+| every 2nd / 3rd / 5th / 10th / 15th azimuth, the rest interpolated (minimum phase, onsets interpolated) | 8.2 / 5.4 / 3.3 / 1.6 / 1.1 MB | 0.19 / 0.91; 0.28 / 1.43; 0.45 / 2.35; 0.76 / 3.48; 0.99 / 4.09 |
+| the same, the raw HRIRs blended as they are | | 0.37 / 0.98; 0.67 / 1.93; 1.57 / 5.25; 2.93 / 8.22; 3.30 / 8.14 |
+| every 5th azimuth and every 2nd ring | 1.8 MB | 1.26 / 4.19 |
+| 64 taps in float16 / int16, against float32 | half | adds 0.003 / 0.005 (p95 0.008 / 0.016) |
+| **2°, 64 taps, float16** | **1.05 MB** | **0.38 / 1.09** |
+| 2°, 128 taps, float16 | 2.06 MB | 0.22 / 0.92 |
+| 3°, 64 taps, float16 | 0.70 MB | 0.44 / 1.49 |
+| 5°, 64 taps, float16 | 0.42 MB | 0.59 / 2.39 |
+| SH HRIRs, order 1 / 2 / 3, least squares | 4 / 9 / 16 KB | 19.2 / 26.0; 16.4 / 24.1; 14.9 / 21.9 |
+| SH HRIRs, order 1 / 2 / 3, MagLS (magnitudes only above 2 kHz) | 4 / 9 / 16 KB | 6.0 / 10.9; 6.5 / 9.8; 6.1 / 8.9 |
+
+- **The ITD's error** when directions are left out: 15 µs mean at 2° and 24 at 5°. The 95th percentile is already
+  80 µs at 2°, which looks like the onset estimate's own noise at the far ear rather than the interpolation's.
+- **Minimum phase with the onset as a delay interpolates far better than raw HRIRs:** at 5°, 0.45 dB against 1.57.
+  So the converter's form is the one to interpolate.
+- **SH HRIRs at order 3 or less are the Ambisonics rung's known price:** a sound field of 16 channels cannot hold a
+  head's high frequencies. MagLS takes the error from 15 to 6 dB. This first MagLS has no diffuse-field covariance
+  constraint, so 6 dB is an upper bound for the method.
+- **Reading SOFA at run time** (D1, 36.6 MB, 8,802 directions): libmysofa takes 101 ms natively and 117 ms in wasm
+  (node), and with zlib adds 48 KB of wasm (68,058 against 19,828 B for the same program without it). Reading the
+  converter's table takes 2.5 ms.
+- **So a default that ships in every program can be about 1 MB** (2°, 64 taps, float16: 0.38 dB mean, 1.1 dB p95),
+  before the transfer's own compression. The full set stays available to a program that wants it. Steam Audio's
+  default instead is CIPIC subject 124, under CIPIC's terms (§ 8).

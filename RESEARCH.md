@@ -880,3 +880,54 @@ WebCodecs):
 - **What each one adds to the wasm**, alone in a program at kama's `-Oz` (`sizes/`): dr_wav 20.6 KB, dr_mp3 29.5 KB,
   stb_vorbis 43.4 KB, dr_flac 51.8 KB, libopus 136.8 KB (opusfile, libopus and libogg together: 168.4 KB); the
   containers: libogg 14.6 KB, nestegg 13.2 KB, minimp4 11.0 KB.
+
+### 9.4 Changing a sound's rate and pitch (`.scratch/aud-probe-resample/`, P7)
+
+**What ran.** Every resampler read the same inputs (`gen.c`, written once natively, so no libm runs on a leg): 0.5
+sines at 44.1 and 48 kHz, and a Doppler ratio curve. The resamplers:
+- **ours, in kama** (`app/`): linear, cubic (Catmull-Rom), and band-limited interpolation (Julius Smith's) at 8, 16
+  and 32 zero crossings a side. That is a Kaiser-windowed sinc from a table of 512 phases per crossing, stretched by
+  the ratio when it reads faster than one input frame per output, so its cutoff follows the pitch. Its ratio may
+  change every output frame. The inner loop is an `unsafe fn` over raw pointers;
+- **libsamplerate 0.2.2** (BSD-2) at linear, fastest, medium and best;
+- **speexdsp 1.2.1** (BSD-3) at qualities 3, 5 and 10. Both libraries take their ratio per call, so the Doppler case
+  sets it every 128 output frames;
+- **r8brain 7.7**, natively only and at fixed ratios: the quality reference.
+
+There were three cases: 44.1 to 48 kHz ("load"), a playback rate of 1.37 ("pitch"), and a 15 kHz tone read at
+1 + 0.1 sin(πt) ("Doppler"). `analyze.c` takes each output through a 7-term Blackman-Harris window and measures:
+- the SINAD of a tone that should survive;
+- its gain at 20 kHz;
+- the level of a tone that a 1.37 pitch pushes past the new Nyquist (an alias that should be gone);
+- for Doppler, the energy outside the band the tone can sweep.
+
+**Results** (cost in ms of one core per second of output, for one voice, the median of 3; the machine ran the kama
+project's test matrix at a load of about 10, so the costs are indicative):
+
+| | load: worst SINAD, 100 Hz to 18 kHz | gain at 20 kHz | pitch: alias of 20 / 22 kHz | Doppler, out of band | native, load / pitch / Doppler | wasm (node), load |
+|---|---|---|---|---|---|---|
+| ours, linear | 6 dB | -6.3 dB | -4 / -5 dB | -15 dB | 0.04 / 0.04 / 0.04 | 0.11 (`-Oz`), 0.06 (`-O3`) |
+| ours, cubic | 8 dB | -4.4 dB | -3 / -3 dB | -18 dB | 0.22 / 0.22 / 0.22 | 0.14, 0.11 |
+| ours, sinc 8 | 73 dB | -10.8 dB | -67 / -80 dB | -81 dB | 3.3 / 1.7 / 3.8 | 2.1, 1.5 |
+| ours, sinc 16 | 89 dB | -5.7 dB | -89 / -86 dB | -93 dB | 4.8 / 8.2 / 6.8 | 4.5, 2.7 |
+| ours, sinc 32 | 108 dB | -0.8 dB | -108 / -109 dB | **-115 dB** | 6.0 / 7.5 / 5.9 | 7.9, 5.2 |
+| libsamplerate, fastest | 94 dB | -22.8 dB | -103 / -110 dB | -100 dB | 1.9 / 2.3 / 2.0 | 5.0 |
+| libsamplerate, medium | 119 dB | -3.3 dB | -129 / -129 dB | -101 dB | 3.4 / 4.3 / 3.6 | 4.6 |
+| libsamplerate, best | **140 dB** | 0.0 dB | -153 / -155 dB | -101 dB | 10.4 / 13.9 / 11.1 | 10.5 |
+| speexdsp 3 | 82 dB | -4.4 dB | -89 / -92 dB | **-48 dB** | 1.4 / 2.3 / 2.8 | 1.5 |
+| speexdsp 5 | 106 dB | -0.9 dB | -111 / -121 dB | **-48 dB** | 2.5 / 3.5 / 6.0 | 2.4 |
+| speexdsp 10 | 129 dB | 0.0 dB | -132 / -131 dB | **-48 dB** | 9.7 / 13.2 / 37.4 | 10.1 |
+| r8brain (native, fixed ratios) | 152 dB | 0.0 dB | -161 / -163 dB | | 3.2 / 1.7 / | |
+
+- **Every candidate made the same samples natively and in wasm,** ours at `-Oz` and `-O3` alike, and the C ones at
+  kama's flags, except r8brain (§ 8). Identity does not separate them.
+- **speexdsp cannot follow a moving ratio:** set per call, its rate steps every block, and a Doppler sweep leaks at
+  -48 dB whatever the quality.
+- **Linear and cubic alias heavily** (6 to 17 dB SINAD near the top of the band). They are the cheap rungs, for sounds
+  where that is acceptable.
+- **Ours reads the buffer at any fractional position,** which a voice needs: a sub-sample start, a loop point, a ratio
+  per frame. libsamplerate and speexdsp are streams with their own input buffering and latency, made for converting
+  a whole signal.
+- **Ours is unoptimized:** per-tap table interpolation in float64 positions, no polyphase bank, no SIMD. At equal
+  quality, libsamplerate is cheaper today (fastest: 94 dB at 1.9 ms/s, against our sinc 16's 89 dB at 4.8).
+  libsamplerate's best (140 dB, 10.4 ms/s) is the best quality that makes the same samples on every leg.

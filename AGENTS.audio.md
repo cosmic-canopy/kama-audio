@@ -32,7 +32,12 @@ are in [ROADMAP.md](ROADMAP.md).
 Both are planned in § The design pass, 4. Unlike P5 to P7, both need real-time runs: underruns in running contexts,
 idle and under load, on both web routes and natively. So they build on area 3's harness (`aud-probe-routes/` for the
 two routes, `aud-probe-device/` and `aud-probe-parallel/` for native real time). Then area 5, the feature map and the
-order of work.
+order of work. **Both are ready to run:**
+- their plans are in § The design pass, 4, items 5 and 6 (*Built from*, *How*);
+- P9's impulse response is staged (`area4/fixtures/ir_hall_48000.wav`);
+- area 3's harness was re-run on 0.9.945 on 2026-11-14 and matches § 7. The routes made the same hashes on both
+  routes in both browsers and natively, and the device probe made the same cases, periods and panic recoveries.
+  Each probe's 0.9.943 results are kept beside it as `results-0.9.943/`.
 - **The Mac's pin is kyoten's 0.9.945 (`c474b5e9`),** taken from the Mac on 2026-11-13 at the owner's word (kyoten
   `9b679c5`, every suite with 0.9.943's results). It is built from a clean clone of `../kama`, kama's working clone on
   this Mac (once `../cstar`, renamed on 2026-11-14). On it:
@@ -180,12 +185,48 @@ The areas, each asked in full in turn (area 1 first):
         - underruns, idle and loaded;
         - memory, and the time to the first sample;
         - a seek's accuracy, and a loop's seam.
+
+        *Built from* (planned 2026-11-14, from what P6 left):
+        - the engine and both routes of `aud-probe-routes/` (`WEB_SHARED`, and `WEB_PAGE` with `WEB_WORKLET`);
+        - natively, `aud-probe-device/`'s miniaudio, writing zeros to the device while the stream is consumed and
+          hashed, so nothing is heard (the browsers run muted, as `browsers.sh` starts them);
+        - the decoder: opusfile, built as P6's `cdec.c` was, in a decode thread or Worker. On the web, WebCodecs too,
+          fed by P6's `demux.c` packets, the program trimming the pre-skip itself (decision 23);
+        - the stream's ring of decoded frames: area 2's single-producer ring, in shared memory natively and on the
+          shared route. On the page route, transferred buffers to the worklet's instance (decision 7's second route).
+
+        *How:*
+        - the load is a main thread burning 50 ms a frame and a second busy Worker;
+        - an underrun is a quantum the engine fills with silence because the ring ran dry, beside Chrome's
+          `playbackStats`;
+        - a seek is checked against P6's whole decode (`aud-probe-decode/out/native/long_48000.opus.c.f32`);
+        - the seam is `loop_48000.opus` streamed as a loop, checked against its own whole decode.
    6. **A long convolution reverb: the one built-in node in question** (decision 1).
       - *The problem:* a concert hall's reverb is a 2 to 4 s impulse response, a heavy convolution. The browser's
         `ConvolverNode` may run part of it off the audio thread, which one worklet cannot.
       - **P9** (`aud-probe-convolver/`): a 3 s impulse response as a `ConvolverNode`, against a partitioned
         convolution in the worklet, in Chrome and Firefox, and natively. It measures their cost and underruns, and
         whether the two sound the same.
+
+        *Built from* (planned 2026-11-14):
+        - the impulse response: `area4/fixtures/ir_hall_48000.wav`, 3 s of stereo decaying noise with a 2.5 s RT60
+          (staged, in `make.sh` and `SHA256SUMS`);
+        - our convolution on area 4's shared DSP (`area4/dsp/`: `Fdl`, `Filter`, `Accum`), its FFT both the kama one
+          and pffft through a C seam (decision 21), the kernels over raw pointers and timed at `-Oz` and `-O3`
+          (KAUD-6);
+        - two partitionings:
+          - uniform, 128-frame partitions: 1,125 a channel, the simple one;
+          - non-uniform: a 128-frame head and longer tail partitions whose work is spread over the quanta before it
+            is due, so no quantum carries a long FFT;
+        - natively, the same code in the device's callback (zeros out), and with render workers for the tail
+          (decision 19).
+
+        *How:*
+        - the browsers' `ConvolverNode` runs with `normalize` off, so both compute the same convolution;
+        - each quantum's cost is kept whole (the mean and the worst, since the worst makes an underrun), idle and
+          under P8's load;
+        - each output is compared, as dB of RMS difference, with the `ConvolverNode`'s and with a direct convolution
+          in float64, offline and natively.
 5. **The feature map and the order of work:** a `FEATURES.md` from Web Audio, the middleware and the DAW engines, and a
    `ROADMAP.md` by example: a sample-exact loop (cosmic-forge's CF-24), a game's sounds, voice chat, a synth on MIDI, a
    multitrack session with automation and bounce, and spatial sound on a headset. Whether a DAW's engine (transport,

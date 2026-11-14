@@ -565,7 +565,7 @@ Those questions stay in kyoten's `audio.md`.
       - Minimum phase with onsets interpolates far better than raw HRIRs (at 5°: 0.45 against 1.57 dB).
       - libmysofa reads D1 in 101 ms natively and 117 ms in wasm, and adds 48 KB of wasm. The table reads in 2.5 ms.
       - Plain least squares makes SH HRIRs 15 dB wrong at order 3, and MagLS makes them 6 dB wrong.
-23. **Decided on 2026-11-13: our C decoders on both legs; AAC through the platform** (area 4, question 3). The owner
+23. **Decided on 2026-11-14: our C decoders on both legs; AAC through the platform** (area 4, question 3). The owner
     took the recommendation.
     - **The decoders, in the package's C seam on every leg:**
       - dr_wav and dr_flac;
@@ -590,7 +590,7 @@ Those questions stay in kyoten's `audio.md`.
       - The browsers differ from ours and from each other. Chrome's `decodeAudioData` turns 16-bit PCM half an LSB
         from its own WebCodecs and drops 24 frames of WebM Opus, and the lossy codecs differ by 79 to 145 dB.
       - WebCodecs trims no priming, and Safari fails FLAC and Vorbis.
-24. **Decided on 2026-11-13: our resampling ladder in kama for every voice; libsamplerate's best for converting a whole
+24. **Decided on 2026-11-14: our resampling ladder in kama for every voice; libsamplerate's best for converting a whole
     buffer** (area 4, question 4). The owner asked: "what is the best quality production answer? is that option 1? I
     assume if we choose option 1 we can later write it all in kama in the future?" Told yes to both, the owner took it.
     - **A voice reads its buffer through our ladder,** chosen per sound. The rungs:

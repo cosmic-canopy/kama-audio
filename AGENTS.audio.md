@@ -133,41 +133,18 @@ The areas, each asked in full in turn (area 1 first):
    - **Input:** Web Audio's model on both legs.
    - **Cores:** declared render workers natively, one thread on the web.
 4. **The ladders: spatial sound, decoding, resampling and streaming.** Planned on 2026-11-13, and its parts are staged
-   and smoke-tested (RESEARCH.md § 8). A ladder is a feature in rungs from cheap to best. A program picks a rung per
-   sound, and each rung is the same on every leg. Each question below is measured first, then asked in full.
-   1. **Where a sound seems to come from.**
-      - *The problem:* a game says "this footstep is behind you, 3 m away, around a corner", and the listener should
-        hear the direction, the distance and the wall. Web Audio's `PannerNode` HRTF is one generic data set, and it
-        renders differently in each browser (§ 2.3). It has no personal HRTFs, no occlusion and no rooms.
-      - *The rungs:*
-        - equal-power panning (Web Audio's formula);
-        - HRTF binaural from SOFA data;
-        - Ambisonics: many sources encoded into one sound field, rotated by the head's pose and decoded binaurally
-          once, XR's usual path;
-        - the room: distance and air absorption, occlusion and transmission through walls, reflections and reverb,
-          and paths around corners.
-      - *The options:*
-        - our own rungs in kama on both legs, the room's inputs (occlusion, a reverb's parameters) supplied by the
-          program from its own geometry;
-        - Steam Audio on both legs, through its native libraries and its new wasm one (6.0 MB, and its samples
-          differ between the legs);
-        - our own rungs as the core, and Steam Audio as an optional package for geometric acoustics (baked
-          reflections, pathing). That would be a different sound from the core's, on the legs it supports.
-      - **P5** (`aud-probe-spatial/`): an HRTF binaural renderer in kama. Direct convolution against a partitioned
-        FFT, interpolation between measured directions, and a moving source with no clicks. Then:
-        - its cost per voice natively and in the worklet, and its samples on both legs;
-        - Steam Audio's binaural and Ambisonics effects natively and in wasm: cost per voice, wasm size, load time;
-        - `PannerNode`'s HRTF cost, the reference the web already has.
-   2. **Which HRTF data, and how a program brings its own.**
-      - *The problem:* HRTF sets are measurements under licences that range from Apache-2.0 to non-commercial, and a
-        default must be shippable in any program. A SOFA file is HDF5, a heavy format to read in a worklet.
-      - *The options:*
-        - read SOFA at run time, with libmysofa (66 KB of wasm, plus zlib);
-        - convert it at build time into a compact table the package reads, so no HDF5 runs at all.
-
-        The default set comes from the licence survey (RESEARCH.md § 8). SADIE II is Apache-2.0, and its KU100 and KEMAR
-        sets load identically on both legs, but each is 18 MB as float32. So the question includes how a default is
-        reduced: fewer directions, shorter filters, or spherical harmonics, as Resonance Audio ships.
+   and smoke-tested (RESEARCH.md § 8). **Questions 1 and 2 are decided; 3 to 6 are open.** A ladder is a feature in
+   rungs from cheap to best. A program picks a rung per sound, and each rung is the same on every leg. Each question
+   below is measured first, then asked in full.
+   1. **Where a sound seems to come from.** **Decided (§ Decided, 20 and 21)** after P5 (`aud-probe-spatial/`,
+      RESEARCH.md § 9.1):
+      - the core is our own rungs in kama on both legs (panning, HRTF binaural, Ambisonics, and the room's inputs);
+      - geometric acoustics is a later tier of this package, in kama;
+      - the core's FFT is pffft, through the C seam.
+   2. **Which HRTF data, and how a program brings its own.** **Decided (§ Decided, 22)** after P10
+      (`aud-probe-hrtf/`, RESEARCH.md § 9.2, added at the session's start because the licence survey made the
+      reduction the real question): a build-time converter, a default of SADIE II's D1 at about 1 MB, and reading
+      SOFA at run time as an option.
    3. **Which code turns a file into samples, on each leg.**
       - *The problem:* a sample-exact loop and a bounce need the same samples from the same file everywhere. But a
         game ships formats each browser decodes differently or not at all: Safari fails FLAC and Vorbis (§ 3).
@@ -552,6 +529,69 @@ Those questions stay in kyoten's `audio.md`.
       - Plain threads were slower than one thread and overloaded the device under load, and spinning workers failed.
       - On the web, Wasm Workers made a quantum slower (2.0 against 1.3 ms) and collapsed under load: 2,985 underruns
         in 16 s in Chrome.
+
+20. **Decided on 2026-11-13: spatial sound is our own rungs, in kama, on both legs; geometric acoustics is a later tier
+    of this package, also in kama** (area 4, question 1). The owner first asked: "Do we need Steam Audio? can we write
+    our own? … I'm just curious what Steam Audio brings and if we can do it in kama better?" Told what Steam Audio adds
+    (geometric acoustics from the scene's triangles), the owner asked where it would live, whether to use Steam Audio
+    first, and how big a lift it is. Told the plan in one line, the owner took the recommendation.
+    - **The core, now: four rungs in kama, the same on every leg.** Each rung is chosen per sound:
+      - equal-power panning;
+      - HRTF binaural: the HRIR blended from the grid's four nearest directions, minimum phase with each ear's onset as
+        a fractional delay, convolved by partitioned FFT, crossfaded when the filters change;
+      - Ambisonics: sources encoded into one field, rotated by the head's pose, decoded binaurally once;
+      - the room's inputs, set by the program: distance and air absorption, occlusion and transmission as filters,
+        reverb sends, and a slot for a reflection impulse response.
+    - **The room's inputs are the seam.** Whatever computes acoustics (a program's own code, or the later tier) drives
+      them through the same commands (decision 7).
+    - **Geometric acoustics comes later, as a tier of this package, written in kama:**
+      - occlusion and transmission by ray casts (small);
+      - a reverb whose decay is estimated from rays bounced through the room (medium);
+      - pathing around corners from a baked probe graph (medium to large);
+      - convolution reflections, Ambisonic impulse responses traced per source or baked at probes (large).
+      It takes triangles with acoustic materials and a ray-tracing contract, which a program fills with its own scene
+      (kyoten with its physics scene, or a WebGPU tracer). kyoten's part is only the binding. It runs on the program's
+      side, never on the audio thread. When a program first needs it, it gets its own probe, with Steam Audio as the
+      reference. At Steam Audio's quality it is the package's biggest feature.
+    - **No Steam Audio wrapper first:** nothing that uses this package needs it yet.
+    - **Why** (RESEARCH.md § 9.1):
+      - The kama renderer made the same samples natively, in Chrome and in Firefox, with SADIE II's data. A moving
+        source does not click.
+      - Natively it costs what Steam Audio's binaural does (64 voices: 170 against 184 ms of a core per second).
+      - Steam Audio's native and wasm builds differ by rounding (107 dB down, but 359 of 51,200 samples equal), so a
+        bounce or a test cannot match across legs. Its wasm is 6.03 MB and experimental, against the renderer's 76 KB.
+      - Its default HRTF is CIPIC's, under CIPIC's terms, and its GPU path is AMD's OpenCL.
+      - **On the web the renderer costs what it does natively at `-O3`, and 5 to 10 times more at kama's fixed
+        `-Oz`.** So the web's voice count waits on KAUD-6.
+21. **Decided on 2026-11-13: the core's FFT is pffft, through the package's C seam** (area 4, question 1 continued). The
+    owner took the recommendation.
+    - **The vendoring:** pffft (the copy r8brain 7.7 bundles), its FFTPACK v5 notice kept in the package's notices.
+      It is compiled with `-ffp-contract=off`, which `reproducible-float` already sends to a C seam.
+    - **Before it ships,** its x86-64 SSE path is compared with NEON's and wasm's on the Windows box.
+    - **A kama FFT can replace it later behind the same seam,** as kama-native device backends may replace miniaudio
+      (decision 17).
+    - **Why** (RESEARCH.md § 9.1):
+      - The FFT is most of a voice's cost (57 to 85%), and the probe's kama FFT is 15 times slower than pffft:
+        2,701 against 180 ns for a forward and an inverse of 256 points natively, and 2,221 against 193 ns in wasm.
+      - pffft made the same bits natively (NEON), in wasm SIMD and in wasm scalar.
+      - It adds 37 KB of wasm.
+22. **Decided on 2026-11-13: HRTF data is converted at build time; reading SOFA at run time is an option** (area 4,
+    question 2). The owner took the recommendation.
+    - **The converter is the package's build tool.** It turns any SOFA set into the package's compact table: the
+      set's regular grid, each HRIR minimum phase with each ear's onset, and SH HRIRs for the Ambisonics rung, fitted
+      by MagLS. A set on another grid is resampled onto one.
+    - **The default is SADIE II's D1 (the KU100 dummy head, Apache-2.0)** at 2° of azimuth, 64 taps and float16:
+      about 1 MB. The dataset's citation goes in the package's notices. A program may ship the full set, or any other.
+    - **Reading SOFA at run time is a module a program opts into,** natively and on the web, for a set the program
+      cannot know when it is built, such as a listener's own measured HRTF. It reads through libmysofa and converts in
+      memory into the same table.
+    - **Why** (RESEARCH.md § 9.2):
+      - The full set is 16.3 MB as float32.
+      - At 2°, 64 taps and float16 the error is 0.38 dB mean and 1.1 dB at the 95th percentile, about the threshold
+        of audibility.
+      - Minimum phase with onsets interpolates far better than raw HRIRs (at 5°: 0.45 against 1.57 dB).
+      - libmysofa reads D1 in 101 ms natively and 117 ms in wasm, and adds 48 KB of wasm. The table reads in 2.5 ms.
+      - Plain least squares makes SH HRIRs 15 dB wrong at order 3, and MagLS makes them 6 dB wrong.
 
 ## Where the truth is
 

@@ -6,14 +6,14 @@
 > **`AUD-<n>` is a permanent id, not a position.** It is assigned once, from the counter below, which the same edit
 > bumps. It is never reused or renumbered, and a shipped row's id retires with it.
 
-**Next id: AUD-15**
+**Next id: AUD-21**
 
 ## NOW: the design pass
 
 Areas 4 and 5 of [AGENTS.audio.md](AGENTS.audio.md#the-design-pass-what-is-open). Nothing is built before the
 decisions it depends on are recorded. Area 5 puts the rows below in order, by example.
 
-## LATER: what areas 2 and 3 decided, unordered until area 5
+## LATER: what areas 2 to 4 decided, unordered until area 5
 
 | id | item | why |
 |---|---|---|
@@ -31,3 +31,9 @@ decisions it depends on are recorded. Area 5 puts the rows below in order, by ex
 | AUD-12 | **Input**: a media-stream source node on the web, a capture or duplex device natively, echo cancellation from the OS's voice processing where it has one | [decision 18](AGENTS.audio.md#decided) |
 | AUD-13 | **Render workers natively**: a declared count, real-time threads joined to the device's workgroup (MMCSS, rtkit elsewhere), woken by a semaphore, summed in a fixed order | [decision 19](AGENTS.audio.md#decided) |
 | AUD-14 | **`reproducible-float` is the program's**: the package's tests program sets it, and its docs say what it buys (the same samples between builds) | [decision 14](AGENTS.audio.md#decided) |
+| AUD-15 | **Spatial sound's core, in kama on both legs**: equal-power panning; HRTF binaural (the grid's four nearest HRIRs blended, minimum phase with each ear's onset as a fractional delay, partitioned FFT convolution, a crossfade when the filters change); Ambisonics (encode, rotate by the head's pose, decode binaurally once); and the room's inputs (distance, air absorption, occlusion and transmission filters, reverb sends, a slot for a reflection impulse response) | [decision 20](AGENTS.audio.md#decided) |
+| AUD-16 | **pffft vendored through the C seam** as the core's FFT, its FFTPACK notice in the package's notices, built with `-ffp-contract=off`; its x86-64 SSE path compared with NEON's and wasm's on the Windows box before it ships | [decision 21](AGENTS.audio.md#decided) |
+| AUD-17 | **The HRTF converter**, the package's build tool: any SOFA set to the compact table (the regular grid, minimum phase with onsets, MagLS SH HRIRs), another grid resampled onto one | [decision 22](AGENTS.audio.md#decided) |
+| AUD-18 | **The default HRTF set**: SADIE II's D1 (KU100) at 2°, 64 taps and float16, about 1 MB, its citation in the package's notices | [decision 22](AGENTS.audio.md#decided) |
+| AUD-19 | **Reading SOFA at run time**, a module a program opts into, natively and on the web: libmysofa, converted in memory into the same table | [decision 22](AGENTS.audio.md#decided) |
+| AUD-20 | **Geometric acoustics, a later tier**: triangles with acoustic materials and a ray-tracing contract the program fills; occlusion and transmission by ray casts, a reverb estimated from the room, pathing around corners, convolution reflections. Run on the program's side. Its own probe, with Steam Audio as the reference, when a program first needs it | [decision 20](AGENTS.audio.md#decided) |

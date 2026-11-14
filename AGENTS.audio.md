@@ -34,7 +34,7 @@ idle and under load, on both web routes and natively. So they build on area 3's 
 two routes, `aud-probe-device/` and `aud-probe-parallel/` for native real time). Then area 5, the feature map and the
 order of work.
 - **The Mac's pin is kyoten's 0.9.945 (`c474b5e9`),** taken from the Mac on 2026-11-13 at the owner's word (kyoten
-  `dbe1e03`, every suite with 0.9.943's results). It is built from a clean clone of `../kama`, kama's working clone on
+  `9b679c5`, every suite with 0.9.943's results). It is built from a clean clone of `../kama`, kama's working clone on
   this Mac (once `../cstar`, renamed on 2026-11-14). On it:
   - KAUD-1 and KAUD-3 are fixed and retired, so a program checks by any path;
   - KAUD-2, KAUD-4, KAUD-5 and KAUD-6 reproduce.

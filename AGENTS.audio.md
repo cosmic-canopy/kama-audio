@@ -24,33 +24,47 @@ It is the audio half of kyoten's rule that each engine module is built on a gene
 ## Where things stand
 
 **Seeded on 2026-11-13 with `kama seed` on kama 0.9.938+g94365be5 (kyoten's pin). Nothing is built.** A design pass
-comes before any code, as `@kama/graphics`' did. **Its research is done and measured (2026-11-13, [RESEARCH.md](RESEARCH.md)).
-Areas 1 to 3 are decided (§ Decided, 1 to 19),** and their rows are in [ROADMAP.md](ROADMAP.md).
+comes before any code, as `@kama/graphics`' did. **Its research is done and measured ([RESEARCH.md](RESEARCH.md)).
+Areas 1 to 3 are decided (§ Decided, 1 to 19), and area 4's questions 1 to 4 (§ Decided, 20 to 24),** and their rows
+are in [ROADMAP.md](ROADMAP.md).
 
-**The next session runs area 4, the ladders** (spatial sound, decoding, resampling, streaming). Its questions and
-probes are planned in § The design pass, 4, and their parts are staged and smoke-tested (RESEARCH.md § 8). So it
-starts by running the probes, not by planning them. It begins in plan mode only to adjust the plan to what the smoke
-run and the licences showed.
+**The next session finishes area 4: question 5, streaming (P8), and question 6, a long convolution reverb (P9).**
+Both are planned in § The design pass, 4. Unlike P5 to P7, both need real-time runs: underruns in running contexts,
+idle and under load, on both web routes and natively. So they build on area 3's harness (`aud-probe-routes/` for the
+two routes, `aud-probe-device/` and `aud-probe-parallel/` for native real time). Then area 5, the feature map and the
+order of work.
 - **The Mac's pin is kyoten's 0.9.945 (`c474b5e9`),** taken from the Mac on 2026-11-13 at the owner's word (kyoten
-  `dbe1e03`, every suite with 0.9.943's results). It is built from a clean clone of `../cstar`, kama's working clone on
-  this Mac until the owner renames it `kama`. On it:
+  `dbe1e03`, every suite with 0.9.943's results). It is built from a clean clone of `../kama`, kama's working clone on
+  this Mac (once `../cstar`, renamed on 2026-11-14). On it:
   - KAUD-1 and KAUD-3 are fixed and retired, so a program checks by any path;
-  - KAUD-2, KAUD-4 and KAUD-5 reproduce.
-- **Read first:**
-  - § Decided;
-  - § The design pass, 4;
-  - [RESEARCH.md](RESEARCH.md) § 8 (what is staged, and what the smoke run showed), § 3 (the state of the art's
-    spatial and decoding rows) and § 4 (Steam Audio, the decoders and the resamplers).
+  - KAUD-2, KAUD-4, KAUD-5 and KAUD-6 reproduce.
+- **Read first:** § Decided (20 to 24 above all), § The design pass, 4, and [RESEARCH.md](RESEARCH.md) § 9.
+- **What area 4 has taught so far, which P8 and P9 build on:**
+  - **kama's wasm release is `-Oz`, which no program can change (KAUD-6).** It makes view-indexed DSP 4 to 44 times
+    slower. So a kernel is an `unsafe fn` over raw pointers (`dataPtr()`, `dataPtrMut()`), and each wasm cost is
+    measured twice: at kama's `-Oz`, and at `-O3` through `.scratch/area4/tools/emcc`, which swaps the flag and
+    nothing else (`KAMA_REAL_EMCC`, `KAMA_WASM_OPT`).
+  - **`.scratch/area4/dsp/` is the shared DSP:** a real FFT and a uniformly partitioned convolver in kama (`Fft`,
+    `Filter`, `Fdl`, `Accum`), and `kernels/`, KAUD-6's repro and the FFT's timing. P9's partitioned reverb starts
+    from it. The core's FFT is pffft (decision 21), which P9 may measure beside it (`area4/dsp/fftref/`).
+  - **Every leg makes the same samples with `reproducible-float`**, and each probe proves it by hashes. A C library
+    makes them only with `-ffp-contract=off`, which the flag gives a C seam.
+  - **Inputs that must be identical on every leg are written once natively** (`aud-probe-resample/gen.c`), since a
+    C `sin` differs between legs.
+  - **P8 reuses P6's readers** (`aud-probe-decode/cdec.c` and `demux.c`): opusfile for `long_48000.opus`, and
+    WebCodecs needs the program's own priming trim.
 - **Staged in `.scratch/area4/`:**
-  - `third_party/` holds every candidate at a pinned tag, and its `README.md` lists them;
-  - `steamaudio/` holds Steam Audio 4.8.1's headers and its macOS and wasm libraries;
-  - `fixtures/make.sh` generates the test audio, and each codec's encodes;
-  - `smoke/run.sh` builds every library natively, natively with no FMA contraction, and in wasm, then compares the
-    hashes.
+  - `third_party/` holds every candidate at a pinned tag, nestegg and minimp4 included, and its `README.md` lists
+    them;
+  - `steamaudio/` holds Steam Audio 4.8.1's headers and libraries;
+  - `fixtures/` holds the test audio, and `hrtf/` the SOFA sets with `conv/`, SADIE II's D1 converted (`hrtfconv/`);
+  - `smoke/` holds the libraries built natively, natively with no FMA contraction, and in wasm.
 - **The Mac's toolchain** (emsdk's Python, Homebrew's paths, the pinned browsers) is in kyoten's `AGENTS.kyoten.md`
   § Build, *On macOS*.
   - ffmpeg 9.0.2 (Homebrew) has libopus, LAME and Apple's AAC encoder;
   - CMake 4 needs `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` for libsamplerate.
+  - The machine is shared with the kama project's own session, whose test matrix lifts the load average to 5 to 10.
+    A timing says what load it ran under.
 - **The probes' harness** is in `.scratch/`, which is git-ignored:
   - `env.sh` sets the toolchain;
   - `browsers.sh` runs a page headless and muted, with the autoplay switches that let a realtime context start.
@@ -71,7 +85,10 @@ Waiting, and not area 4's:
   each OS's echo cancellation (decision 18).
 - WASAPI's exclusive and `IAudioClient3` modes, and MMCSS for render workers (decisions 17 and 19), on the Windows box.
 - What `reproducible-float` costs the DSP (decision 14), once there is DSP.
-- KAUD-2 to KAUD-5 upstream.
+- KAUD-2, KAUD-4, KAUD-5 and KAUD-6 upstream.
+- Area 4's open ends, each for when its row is built: pffft's SSE path compared on the Windows box (decision 21); the
+  loop fixture's MP3 that WebCodecs decodes 16 dB from ours (RESEARCH.md § 9.3); MagLS with a covariance constraint
+  for the SH HRIRs (§ 9.2).
 
 **It is designed and built on the Mac Mini, in parallel with kyoten's graphics track on Windows** (the owner,
 2026-11-13: "the mac kyoten clone can then design it and develop it in parallel to what we are doing here for

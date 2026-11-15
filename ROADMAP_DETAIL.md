@@ -7,8 +7,8 @@ Each row's reasoning: what drives it, what it builds, what it needs, what is ope
   [FEATURES.md](FEATURES.md), and how it was decided is the git log.
 - `tools/check-roadmap.sh` holds every section to a row.
 
-**Every row keeps the decided design** (AGENTS.audio.md § Decided, 1 to 26): one engine in kama on both legs, the two
-tiers, Web Audio's names, the real-time model, the two legs and the ladders.
+**Every row keeps the decided design** (AGENTS.audio.md § Decided, 1 to 33): one engine in kama on both legs, the two
+tiers, Web Audio's names, the real-time model, the two legs, the ladders, the module cut and the commands' timing.
 - **Every row is test-first.** Every feature it builds gets golden samples: an offline render whose hash is the same in
   native debug, native release and wasm (FEATURES.md § How to read a row).
 - **A test makes no sound the owner hears and never takes the focus:** it renders offline. A real device runs only
@@ -51,7 +51,8 @@ round a loop near its end, not exact to the sample. Web Audio's `AudioBufferSour
   (`aud-probe-cmd`), the unisolated route (`aud-probe-noiso`, `aud-probe-routes`), the device (`aud-probe-device`) and
   the context (`aud-probe-context`).
 - **Questions for when it comes up:**
-  - the first cut of `audio::` (its modules, and which names are exported);
+  - the first cut of `audio::` (its modules, and which names are exported): decided, 31;
+  - where a call scheduled ahead waits, and whether a frame's calls land together: decided, 32 and 33;
   - whether cosmic-forge's page is isolated, which decides the route it tests first;
   - the loop seam's test: its fixture, and how a seam is compared.
 - **Done:**

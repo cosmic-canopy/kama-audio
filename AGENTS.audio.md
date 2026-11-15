@@ -24,7 +24,8 @@ It is the audio half of kyoten's rule that each engine module is built on a gene
 ## Where things stand
 
 **Seeded on 2026-11-13 with `kama seed` on kama 0.9.938+g94365be5 (kyoten's pin). The design pass is done
-(2026-11-15): areas 1 to 5 are decided (§ Decided, 1 to 30), and the first slice's first question too (31),** on the
+(2026-11-15): areas 1 to 5 are decided (§ Decided, 1 to 30), and so are the first slice's module cut (31) and its
+command protocol's timing (32 and 33),** on the
 evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This repository's documents, each to one purpose:
 - [FEATURES.md](FEATURES.md) is every feature the library will have, with its rungs, status, example, test and budget
   (decision 27);
@@ -391,6 +392,8 @@ Those questions stay in kyoten's `audio.md`.
        only the page's thread can use it.
      - A page that cannot be isolated still gets each frame's commands within 2.4 quanta of the best case, and kama
        builds the worklet's instance with no gap.
+   - **Amended on 2026-11-15:** decision 32 says what the stamp is (a call's own time, which its node keeps), and
+     decision 33 says that a flush lands whole.
 8. **Decided on 2026-11-13: overflow never drops and never blocks** (area 2, the real-time model). The owner took the
    recommendation.
    - **The backlog.** Commands that do not fit the ring wait in order in a backlog on the program's side, flushed
@@ -401,6 +404,8 @@ Those questions stay in kyoten's `audio.md`.
    - **The audio side** only ever sees whole commands, in order, and never waits.
    - **Why:** the peers drop and count, which loses a stop (a stuck note) or a release (a leaked slot). A DAW cannot
      accept that, and the program could not see it at the call.
+   - **Amended on 2026-11-15:** every call waits in the backlog until a flush (decision 33), and a late command is one
+     whose own time has passed when it lands (decision 32).
 9. **Decided on 2026-11-13: the way back is a ring of events and snapshots of levels** (area 2, the real-time model).
    The owner took the recommendation.
    - **Events go on a second ring:** a sound's end, a slot freed, an error, and a buffer or processor handed back to
@@ -884,6 +889,47 @@ Those questions stay in kyoten's `audio.md`.
       - the DAW and speech packages are built on this package's public API only (decisions 29 and 30), and move data
         between a real-time thread and the program's the same way;
       - kama's `internal` visibility would hide it from both.
+32. **Decided on 2026-11-15: a call scheduled ahead waits in its node, as in Web Audio** (AUD-29, the command
+    protocol). Decisions 3, 7 and 8 had left this open: the audio side drains the ring once a quantum, so something
+    has to hold a `src.start(when: 2.0)` for the 750 quanta until its time comes. The owner took the recommendation.
+    - **A command applies in the quantum it lands in.** The audio side drains the ring at the top of each quantum and
+      applies every command there, in order. A call with no time of its own takes effect in that quantum, as Web
+      Audio's control messages do: a node made, a `connect()`, a property set.
+    - **A call's time travels inside its command,** as the int64 frame decision 3 converts it to (a source's start
+      also carries its sub-frame fraction). That is decision 7's stamp, and the node keeps it:
+      - a source keeps its start and stop frames in its slot;
+      - a parameter keeps its events in its timeline. The timeline's capacity is declared per parameter (decision 6),
+        and a full timeline is an error at the call. The program's side knows every event it added, and from the
+        playhead (decision 9) which ones have passed. So its count never says fewer than the audio side holds;
+      - the render splits a quantum at each frame that falls inside it.
+    - **A time that has already passed when its command lands** follows Web Audio's rule: a start begins at once, and
+      an automation event takes effect at once. The command is counted as late (decision 8).
+    - **Nothing queues on the audio side but the nodes' own state,** so its memory is the slots and the timelines, and
+      both are declared.
+    - **Why:**
+      - A ramp has to reach the audio side before its end time. `linearRampToValueAtTime(value: 1, endTime: 2.0)`
+        ramps from the event before it, so the timeline must live in the node either way.
+      - Holding every command until its own frame would take a pending table on the audio side, a third limit. It
+        would also add a lead to every untimed call, to make a `connect()` exact to the sample when Web Audio gives a
+        `connect()` no time at all.
+      - Web Audio's model is decision 3's, so MDN documents the lower tier's timing as well as its names.
+    - **For replay** (decision 7), a run made in real time also needs the quantum each flush landed in. The way back
+      can report it. How is decided when replay is built (the `session` example).
+33. **Decided on 2026-11-15: a flush lands whole, in one quantum** (AUD-29, the command protocol). The owner took the
+    recommendation.
+    - **Calls collect in the program side's backlog** (decision 8), in order. The context's `update()` flushes it
+      (decision 10), and so does an offline render before it starts:
+      - as many calls as the ring has room for move into it;
+      - one release store publishes them, so the audio side sees all of them in the same quantum, or none.
+    - **What does not fit waits,** in order, and goes first on the next flush (decision 8). Only then can a frame's
+      calls split across quanta, and the backlog's counts show it.
+    - **Both web routes behave the same.** The page route already sends one transferred `ArrayBuffer` a flush
+      (decision 12), and the worklet's instance applies it between quanta.
+    - **Why:**
+      - a crossfade made of two `.value` sets cannot land a quantum apart;
+      - the shared route and the page route apply a frame's calls alike;
+      - a call waits only until the end of its frame's `update()`, which is where the upper tier makes its calls
+        (decision 10).
 
 ## Where the truth is
 

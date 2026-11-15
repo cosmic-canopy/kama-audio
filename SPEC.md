@@ -6,7 +6,7 @@ tested.
 - The decided design and the library's departures from kama's are [AGENTS.audio.md](AGENTS.audio.md).
 - Its history is the git log and [CHANGELOG.md](CHANGELOG.md).
 
-**Where it stands** (2026-11-15, kama 0.9.956): the first slice, AUD-29 (a sample-exact loop), is under way. Its first
+**Where it stands** (2026-11-15, kama 0.9.960): the first slice, AUD-29 (a sample-exact loop), is under way. Its first
 part is built, the ring the command protocol runs on (AUD-1), and it is tested natively in debug and release and on
 wasm under node. Nothing makes a sound yet. Not published.
 

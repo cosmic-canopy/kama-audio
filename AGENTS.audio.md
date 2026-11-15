@@ -54,15 +54,17 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
   - then an `OfflineAudioContext` rendering in the declared block (AUD-9), and the first golden.
 - **Read first:** § Decided, ROADMAP_DETAIL.md § AUD-29, and the probes it starts from (`aud-probe-cmd` for the
   commands and the way back).
-- **The pin is 0.9.956 (`df5a6edf`) on both machines.**
-  - The Windows box bumped kyoten's `.kama-version` to it on 2026-11-14, at the owner's word.
-  - The Mac rebuilt it from a clean clone on 2026-11-15, and kyoten's `tools/test.sh` is green on it there.
+- **The pin is 0.9.960 (`b39fbaab`) on both machines.**
+  - The Windows box bumped kyoten's `.kama-version` to it on 2026-11-15, at the owner's word. It was 0.9.956 before.
+  - The Mac rebuilt it from a clean clone the same day. kyoten's `tools/test.sh` and this package's are green on it
+    there.
+  - The 0.9.956 pin is kept in kyoten's `.scratch/kama-pin-0.9.956`.
   - P5 to P9 ran on 0.9.945, kept in kyoten's `.scratch/kama-pin-0.9.945`.
   - **KAUD-4 is fixed on the pin** (0.9.953, `54b44d61`, KR-390) and retired. A library's own flag is now its
     consumer's, so a build switch such as the worklet instance's can live in the library, with no re-declaration in
     the program. That removes one of KAUD-5's three causes. The other two remain: one build makes one artifact, and
     KR-327's shared-memory flag is still open.
-  - On 0.9.956, KAUD-2 and KAUD-6 reproduce, and KAUD-1, KAUD-3 and KAUD-4 are retired.
+  - On 0.9.960, KAUD-2 and KAUD-6 reproduce, and KAUD-1, KAUD-3 and KAUD-4 are retired.
 - **What area 4 taught, which the build rows need:**
   - **kama's wasm release is `-Oz`, which no program can change (KAUD-6).** A kernel is an `unsafe fn` over raw
     pointers. Each wasm cost is measured at `-Oz` and at `-O3` through `.scratch/area4/tools/emcc`, which swaps the

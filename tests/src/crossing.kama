@@ -1,0 +1,151 @@
+// The tests' second thread. A consumer on it drains a ring while this thread produces, as the audio thread drains the
+// command ring while the program's side flushes into it: a pthread natively, a Wasm Worker on wasm (csrc/thr.c).
+// - The consumer stops at the first wrong command and says so, and the producer stops on seeing it. So a broken ring
+//   fails the case at once instead of running on.
+// - With a batch above one, each time the consumer finds the ring empty it must have seen a whole number of batches:
+//   what is published together is seen together (decision 33).
+// - The consumer publishes how far it has got, and the producer gives up after 5 s in which that does not move. The
+//   consumer stops on seeing that. So a ring that never delivers fails the case instead of hanging the gate.
+
+import { Tally, audio::rt::Ring, audio::rt::RingError, std::concurrent::Atomic, std::concurrent::MemoryOrder };
+
+export { Probe, Crossing, Produce, crossing, COUNT };
+
+extern "thr.h";
+
+@foreignEntry @noheap fnptr int32 DrainCb(UnsafePtr user);
+extern fn int32 thr_start(DrainCb cb, UnsafePtr user);
+extern fn void thr_join();
+extern fn int64 thr_now_ns();
+
+// A stand-in for a stamped command: flat, with a check that a torn or reordered copy would break.
+type value Probe {
+    public int64 seq;
+    public int64 frame;
+    public int64 check;
+    public ctor make(int64 seq) { this.seq = seq; this.frame = seq * 128; this.check = seq * 31 + 7; }
+    public const fn bool whole() { return this.frame == this.seq * 128 && this.check == this.seq * 31 + 7; }
+}
+
+comptime int64 COUNT = 1000000;
+
+// Both sides' state: the ring between them, and what the consumer has seen.
+type resource Crossing {
+    Ring<Probe> ring;
+    Atomic<int32> stopped;
+    Atomic<int32> gaveUp;
+    Atomic<int64> seenSoFar;
+    int64 batch = 1;
+    int64 expected = 0;
+    int64 torn = 0;
+    int64 partial = 0;
+
+    public ctor make(Ring<Probe> ring, int64 batch) {
+        this.ring = give ring;
+        this.stopped = Atomic.make(value: 0);
+        this.gaveUp = Atomic.make(value: 0);
+        this.seenSoFar = Atomic.make(value: 0);
+        this.batch = batch;
+    }
+
+    // ---- the producer's side ----
+
+    public fn bool push(Probe item) { return this.ring.push(item: item); }
+    public fn bool stage(Probe item) { return this.ring.stage(item: item); }
+    public fn void publish() { this.ring.publish(); }
+    public const fn int64 batchSize() { return this.batch; }
+
+    public fn bool stoppedEarly() { return this.stopped.loadExplicit(order: MemoryOrder::Acquire) != 0; }
+
+    public fn void giveUp() { this.gaveUp.storeExplicit(value: 1, order: MemoryOrder::Release); }
+
+    public fn int64 progress() { return this.seenSoFar.loadExplicit(order: MemoryOrder::Acquire); }
+
+    // ---- the consumer's side ----
+
+    // One call of the consumer's loop: drains what is there. 0 once every command has been seen, or at a wrong one.
+    @noheap public fn int32 drainSome() {
+        bool more = true;
+        while (more) {
+            Optional<Probe> got = this.ring.pop();
+            match (got) {
+                case Some(value: p): {
+                    if (p.seq != this.expected || !p.whole()) {
+                        this.torn = this.torn + 1;
+                        this.stopped.storeExplicit(value: 1, order: MemoryOrder::Release);
+                        return 0;
+                    }
+                    this.expected = p.seq + 1;
+                }
+                case None: { more = false; }
+            };
+        }
+        if (this.expected % this.batch != 0) {
+            this.partial = this.partial + 1;
+            this.stopped.storeExplicit(value: 1, order: MemoryOrder::Release);
+            return 0;
+        }
+        this.seenSoFar.storeExplicit(value: this.expected, order: MemoryOrder::Release);
+        if (this.gaveUp.loadExplicit(order: MemoryOrder::Acquire) != 0) { return 0; }
+        return this.expected >= COUNT ? 0 : 1;
+    }
+
+    // After the join: what went wrong, or "".
+    public const fn string verdict() {
+        int64 seen = this.expected;
+        if (this.torn > 0) { return "stopped at seq ${seen} of ${COUNT}: a command torn or out of order"; }
+        if (this.partial > 0) { return "found the ring empty at seq ${seen}, partway through a batch published whole"; }
+        if (seen != COUNT) { return "stopped at seq ${seen} of ${COUNT}: nothing more arrived in 5 s"; }
+        return "";
+    }
+}
+
+@noheap @onPanic(recover: 0)
+unsafe fn int32 drain(UnsafePtr user) {
+    UnsafePtr<Crossing> c = cast<UnsafePtr<Crossing>>(user);
+    return c[0].drainSome();
+}
+
+// One step of the producer: it sends what it can from `next` on, and answers the next seq it has yet to take. It is
+// called until the consumer has seen every command, so a step past COUNT still sends what it holds.
+fnptr int64 Produce(ref Crossing c, int64 next);
+
+// COUNT commands cross from this thread to the other through a ring of 256, sent by `step`.
+unsafe fn void crossing(ref Tally t, const ref string name, int64 batch, Produce step) {
+    Result<Ring<Probe>, RingError> made = Ring::<Probe>.withCapacity(capacity: 256);
+    match (give made) {
+        case Ok(value: r): {
+            Crossing c = Crossing.make(ring: give r, batch: batch);
+            if (thr_start(cb: drain, user: cast<UnsafePtr>(addr(of: c))) != 0) {
+                t.verdict(name: name, why: "no second thread");
+                return;
+            }
+            int64 seq = 0;
+            int64 lastSeen = -1;
+            int64 lastChange = thr_now_ns();
+            bool stalled = false;
+            while (c.progress() < COUNT && !c.stoppedEarly() && !stalled) {
+                int64 before = seq;
+                seq = step(c: c, next: seq);
+                if (seq == before || seq % 4096 == 0) {
+                    int64 now = thr_now_ns();
+                    int64 seenNow = c.progress();
+                    if (seenNow != lastSeen) {
+                        lastSeen = seenNow;
+                        lastChange = now;
+                    } else if (now - lastChange > 5000000000) {
+                        stalled = true;
+                    }
+                }
+            }
+            if (stalled) { c.giveUp(); }
+            thr_join();
+            string why = c.verdict();
+            t.verdict(name: name, why: why);
+        }
+        case Err(error: e): {
+            string m = e.message();
+            t.verdict(name: name, why: "the ring was not made: ${m}");
+        }
+    };
+}

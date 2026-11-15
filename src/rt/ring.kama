@@ -1,6 +1,6 @@
 // audio::rt::Ring: one producer, one consumer, and nothing between them that waits (AUD-1; AGENTS.audio.md
-// decisions 5 to 8). The command protocol is built on it: the program's side pushes stamped commands, and the audio
-// side drains them at the top of each quantum. It is public because a program's own DSP, and the packages built on
+// decisions 5 to 8, 33). The command protocol is built on it: the program's side flushes its commands into it, and the
+// audio side drains them at the top of each quantum. It is public because a program's own DSP, and the packages built on
 // this one's public API, move data between those two threads the same way (decision 31).
 //
 // - **Its capacity is declared** (decision 6): fixed when it is made, never grown.
@@ -8,8 +8,12 @@
 //   on the program's side, and given back when the ring drops. The audio side never allocates (decision 5).
 // - **A full ring refuses a push and keeps what it holds.** What does not fit waits in the program's side's backlog
 //   (decision 8), so nothing is dropped and nothing blocks.
+// - **What is staged is published at once.** The producer may stage several items, then publish them with one release
+//   store, so the consumer sees all of them or none: a flush lands whole (decision 33). A push is one item staged and
+//   published.
 // - **Its counters are monotonic,** masked only at the array, so a capacity need not be a power of two.
-// - **Each counter sits on its own 128-byte line** (the M4's line), so the two threads never share one. A release store
+// - **Each counter sits on its own 128-byte line** (the M4's line), and so does the producer's count of what it has
+//   staged, so the two threads never share one. A release store
 //   publishes each side's counter, and an acquire load reads the other's: RESEARCH.md § 6.1 found the M4 tearing
 //   commands when the pair was relaxed.
 //
@@ -34,6 +38,8 @@ type enum RingError implements Error {
 type resource Ring<T: value, A: Allocator = GlobalAllocator> {
     Atomic<int64> head;
     InlineArray<uint8>#(120) padHead;
+    int64 staged = 0;   // the producer's alone: written past `head`, not yet published
+    InlineArray<uint8>#(120) padStaged;
     Atomic<int64> tail;
     InlineArray<uint8>#(120) padTail;
     UnsafePtr<T> slots = null;
@@ -44,6 +50,8 @@ type resource Ring<T: value, A: Allocator = GlobalAllocator> {
     private unsafe ctor adopt(UnsafePtr<T> slots, int64 capacity, A allocator) {
         this.head = Atomic.make(value: 0);
         this.padHead = [0; (120)];
+        this.staged = 0;
+        this.padStaged = [0; (120)];
         this.tail = Atomic.make(value: 0);
         this.padTail = [0; (120)];
         this.slots = slots;
@@ -69,15 +77,32 @@ type resource Ring<T: value, A: Allocator = GlobalAllocator> {
         };
     }
 
-    // The producer's side. False when the ring is full, and then nothing is written. `unsafe` marks the body, which
-    // indexes the raw storage; a caller needs no `unsafe` of its own.
-    public unsafe fn bool push(T item) {
-        int64 h = this.head.loadExplicit(order: MemoryOrder::Relaxed);
+    // The producer's side, one item: staged and published at once, with anything staged before it. False when the ring
+    // is full, counting what is staged, and then nothing is written and nothing is published.
+    public fn bool push(T item) {
+        if (!this.stage(item: item)) { return false; }
+        this.publish();
+        return true;
+    }
+
+    // The producer's side, a batch: writes `item` where the consumer cannot see it until `publish()`. False when the
+    // ring is full, counting what is staged, and then nothing is written. `unsafe` marks the body, which indexes the raw
+    // storage; a caller needs no `unsafe` of its own.
+    public unsafe fn bool stage(T item) {
+        int64 h = this.head.loadExplicit(order: MemoryOrder::Relaxed) + this.staged;
         int64 t = this.tail.loadExplicit(order: MemoryOrder::Acquire);
         if (h - t >= this.cap) { return false; }
         this.slots[cast<isize>(h % this.cap)] = item;
-        this.head.storeExplicit(value: h + 1, order: MemoryOrder::Release);
+        this.staged = this.staged + 1;
         return true;
+    }
+
+    // Makes everything staged visible to the consumer, with one release store.
+    public fn void publish() {
+        if (this.staged == 0) { return; }
+        int64 h = this.head.loadExplicit(order: MemoryOrder::Relaxed);
+        this.head.storeExplicit(value: h + this.staged, order: MemoryOrder::Release);
+        this.staged = 0;
     }
 
     // The consumer's side. `None` when the ring is empty. It allocates nothing and never waits.

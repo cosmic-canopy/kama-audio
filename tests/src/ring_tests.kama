@@ -1,28 +1,14 @@
 // command-ring: audio::rt::Ring, the single-producer, single-consumer ring under the command protocol (AUD-1;
-// AGENTS.audio.md decisions 5 to 8). The program's side pushes, the audio side pops each quantum.
+// AGENTS.audio.md decisions 5 to 8, 33). The program's side pushes, the audio side pops each quantum.
 // - Its capacity is declared, and its storage comes from the allocator the program hands it (decision 6).
 // - A full ring refuses a push and keeps what it holds: the backlog in front of it is the program's side's (decision 8).
-// - Its pop allocates nothing and never waits (decision 5): the drain below is `@noheap`, called from another thread.
+// - What is staged is published with one store, so the consumer sees a flush whole or not at all (decision 33).
+// - Its pop allocates nothing and never waits (decision 5): the drain is `@noheap`, called from another thread
+//   (crossing.kama).
 
-import { Tally, audio::rt::Ring, audio::rt::RingError, std::concurrent::Atomic, std::concurrent::MemoryOrder };
+import { Tally, Probe, Crossing, crossing, COUNT, audio::rt::Ring, audio::rt::RingError };
 
 export { ringTests };
-
-extern "thr.h";
-
-@foreignEntry @noheap fnptr int32 DrainCb(UnsafePtr user);
-extern fn int32 thr_start(DrainCb cb, UnsafePtr user);
-extern fn void thr_join();
-extern fn int64 thr_now_ns();
-
-// A stand-in for a stamped command: flat, with a check that a torn or reordered copy would break.
-type value Probe {
-    public int64 seq;
-    public int64 frame;
-    public int64 check;
-    public ctor make(int64 seq) { this.seq = seq; this.frame = seq * 128; this.check = seq * 31 + 7; }
-    public const fn bool whole() { return this.frame == this.seq * 128 && this.check == this.seq * 31 + 7; }
-}
 
 fnptr string RingCase(ref Ring<Probe> r);
 
@@ -205,111 +191,88 @@ unsafe fn void noRoom(ref Tally t) {
     t.verdict(name: "command-ring: an allocator with no room refuses the ring as OutOfMemory, and none is made", why: why);
 }
 
+// ---- staged, then published -------------------------------------------------------------------------------------
+
+fn string stagedUnseen(ref Ring<Probe> r) {
+    int64 i = 0;
+    while (i < 3) {
+        if (!r.stage(item: Probe.make(seq: i))) { return "stage ${i} of 3 was refused by an empty ring of 8"; }
+        i = i + 1;
+    }
+    string hidden = expectEmpty(r: r);
+    if (!hidden.isEmpty()) { return "before publish(): ${hidden}"; }
+    r.publish();
+    i = 0;
+    while (i < 3) {
+        string why = expectSeq(r: r, seq: i);
+        if (!why.isEmpty()) { return why; }
+        i = i + 1;
+    }
+    string after = expectEmpty(r: r);
+    if (!after.isEmpty()) { return after; }
+    // A second batch: what was staged starts again from none.
+    if (!r.stage(item: Probe.make(seq: 3)) || !r.stage(item: Probe.make(seq: 4))) { return "a second batch was refused"; }
+    string hiddenAgain = expectEmpty(r: r);
+    if (!hiddenAgain.isEmpty()) { return "before the second publish(): ${hiddenAgain}"; }
+    r.publish();
+    string third = expectSeq(r: r, seq: 3);
+    if (!third.isEmpty()) { return third; }
+    string fourth = expectSeq(r: r, seq: 4);
+    if (!fourth.isEmpty()) { return fourth; }
+    return expectEmpty(r: r);
+}
+
+// A ring of 4 holding one published and three staged is full, and frees room only as the consumer pops.
+fn string stagedCounts(ref Ring<Probe> r) {
+    if (!r.push(item: Probe.make(seq: 0))) { return "a push onto an empty ring of 4 was refused"; }
+    int64 i = 1;
+    while (i < 4) {
+        if (!r.stage(item: Probe.make(seq: i))) { return "stage ${i} was refused with ${i} held of 4"; }
+        i = i + 1;
+    }
+    if (r.stage(item: Probe.make(seq: 99))) { return "a ring holding one and staging three took a fifth"; }
+    if (r.push(item: Probe.make(seq: 98))) { return "a push onto a ring full of staged items was taken"; }
+    string first = expectSeq(r: r, seq: 0);
+    if (!first.isEmpty()) { return first; }
+    string hidden = expectEmpty(r: r);
+    if (!hidden.isEmpty()) { return "a refused push published what was staged: ${hidden}"; }
+    if (!r.stage(item: Probe.make(seq: 4))) { return "the room the pop freed was not offered to a stage"; }
+    if (r.stage(item: Probe.make(seq: 97))) { return "a stage past the capacity was taken after a pop"; }
+    r.publish();
+    i = 1;
+    while (i < 5) {
+        string why = expectSeq(r: r, seq: i);
+        if (!why.isEmpty()) { return why; }
+        i = i + 1;
+    }
+    return expectEmpty(r: r);
+}
+
+fn string pushPublishesStaged(ref Ring<Probe> r) {
+    if (!r.stage(item: Probe.make(seq: 0))) { return "a stage onto an empty ring was refused"; }
+    if (!r.push(item: Probe.make(seq: 1))) { return "a push after a stage was refused"; }
+    string first = expectSeq(r: r, seq: 0);
+    if (!first.isEmpty()) { return first; }
+    string second = expectSeq(r: r, seq: 1);
+    if (!second.isEmpty()) { return second; }
+    r.publish();
+    return expectEmpty(r: r);
+}
+
 // ---- across threads -----------------------------------------------------------------------------------------------
 
-comptime int64 COUNT = 1000000;
-
-// Both sides' state. The consumer stops at the first wrong command and says so, and the producer stops on seeing it,
-// so a broken ring fails the case at once instead of running on. The consumer publishes how far it has got, and the
-// producer gives up after 5 s in which that does not move, while pushing or while waiting for the rest; the consumer
-// stops on seeing that. So a ring that never delivers fails the case instead of hanging the gate.
-type resource Crossing {
-    Ring<Probe> ring;
-    Atomic<int32> stopped;
-    Atomic<int32> gaveUp;
-    Atomic<int64> seenSoFar;
-    int64 expected = 0;
-    int64 bad = 0;
-
-    public ctor make(Ring<Probe> ring) {
-        this.ring = give ring;
-        this.stopped = Atomic.make(value: 0);
-        this.gaveUp = Atomic.make(value: 0);
-        this.seenSoFar = Atomic.make(value: 0);
-    }
-
-    public fn bool push(Probe item) { return this.ring.push(item: item); }
-
-    public fn bool stoppedEarly() { return this.stopped.loadExplicit(order: MemoryOrder::Acquire) != 0; }
-
-    public fn void giveUp() { this.gaveUp.storeExplicit(value: 1, order: MemoryOrder::Release); }
-
-    public fn int64 progress() { return this.seenSoFar.loadExplicit(order: MemoryOrder::Acquire); }
-
-    // One call of the consumer's loop: drains what is there; 0 once every command has been seen, or at a wrong one.
-    @noheap public fn int32 drainSome() {
-        bool more = true;
-        while (more) {
-            Optional<Probe> got = this.ring.pop();
-            match (got) {
-                case Some(value: p): {
-                    if (p.seq != this.expected || !p.whole()) {
-                        this.bad = this.bad + 1;
-                        this.stopped.storeExplicit(value: 1, order: MemoryOrder::Release);
-                        return 0;
-                    }
-                    this.expected = p.seq + 1;
-                }
-                case None: { more = false; }
-            };
-        }
-        this.seenSoFar.storeExplicit(value: this.expected, order: MemoryOrder::Release);
-        if (this.gaveUp.loadExplicit(order: MemoryOrder::Acquire) != 0) { return 0; }
-        return this.expected >= COUNT ? 0 : 1;
-    }
-
-    public const fn int64 seen() { return this.expected; }
-    public const fn int64 wrong() { return this.bad; }
+fn int64 pushOne(ref Crossing c, int64 next) {
+    if (next >= COUNT) { return next; }
+    return c.push(item: Probe.make(seq: next)) ? next + 1 : next;
 }
 
-@noheap @onPanic(recover: 0)
-unsafe fn int32 drain(UnsafePtr user) {
-    UnsafePtr<Crossing> c = cast<UnsafePtr<Crossing>>(user);
-    return c[0].drainSome();
-}
-
-unsafe fn void acrossThreads(ref Tally t) {
-    string name = "command-ring: a million commands cross to another thread whole and in order";
-    Result<Ring<Probe>, RingError> made = Ring::<Probe>.withCapacity(capacity: 256);
-    match (give made) {
-        case Ok(value: r): {
-            Crossing c = Crossing.make(ring: give r);
-            if (thr_start(cb: drain, user: cast<UnsafePtr>(addr(of: c))) != 0) {
-                t.verdict(name: name, why: "no second thread");
-                return;
-            }
-            int64 seq = 0;
-            int64 lastSeen = -1;
-            int64 lastChange = thr_now_ns();
-            bool stalled = false;
-            // Push them all, then wait for the consumer to see them all.
-            while (c.progress() < COUNT && !c.stoppedEarly() && !stalled) {
-                bool pushed = false;
-                if (seq < COUNT) { pushed = c.push(item: Probe.make(seq: seq)); }
-                if (pushed) { seq = seq + 1; }
-                if (!pushed || seq % 4096 == 0) {
-                    int64 now = thr_now_ns();
-                    int64 seenNow = c.progress();
-                    if (seenNow != lastSeen) {
-                        lastSeen = seenNow;
-                        lastChange = now;
-                    } else if (now - lastChange > 5000000000) {
-                        stalled = true;
-                    }
-                }
-            }
-            if (stalled) { c.giveUp(); }
-            thr_join();
-            int64 seen = c.seen();
-            int64 wrong = c.wrong();
-            string why = seen == COUNT && wrong == 0 ? "" : "stopped at seq ${seen} of ${COUNT}: a command torn or out of order";
-            t.verdict(name: name, why: why);
-        }
-        case Err(error: e): {
-            string m = e.message();
-            t.verdict(name: name, why: "the ring was not made: ${m}");
-        }
-    };
+// Stages one at a time, and publishes each time a batch is complete.
+fn int64 stageInBatches(ref Crossing c, int64 next) {
+    if (next >= COUNT) { return next; }
+    if (!c.stage(item: Probe.make(seq: next))) { return next; }
+    int64 b = c.batchSize();
+    if ((next + 1) % b == 0) { c.publish(); }
+    return next + 1;
 }
 
 unsafe fn void ringTests(ref Tally t) {
@@ -320,5 +283,13 @@ unsafe fn void ringTests(ref Tally t) {
     badCapacity(t: t);
     fromTheAllocator(t: t);
     noRoom(t: t);
-    acrossThreads(t: t);
+    withRing(t: t, name: "command-ring: a staged item is not popped until it is published, then in order", capacity: 8,
+             body: stagedUnseen);
+    withRing(t: t, name: "command-ring: what is staged counts against the capacity, and staging past it is refused",
+             capacity: 4, body: stagedCounts);
+    withRing(t: t, name: "command-ring: a push publishes what was staged before it", capacity: 4, body: pushPublishesStaged);
+    crossing(t: t, name: "command-ring: a million commands cross to another thread whole and in order", batch: 1,
+             step: pushOne);
+    crossing(t: t, name: "command-ring: a million commands staged in batches of 5 cross to another thread, each batch whole",
+             batch: 5, step: stageInBatches);
 }

@@ -23,22 +23,17 @@ It is the audio half of kyoten's rule that each engine module is built on a gene
 
 ## Where things stand
 
-**Seeded on 2026-11-13 with `kama seed` on kama 0.9.938+g94365be5 (kyoten's pin). Nothing is built.** A design pass
-comes before any code, as `@kama/graphics`' did. **Its research is done and measured ([RESEARCH.md](RESEARCH.md)).
-Areas 1 to 4 are decided (§ Decided, 1 to 26),** and their rows are in [ROADMAP.md](ROADMAP.md), AUD-1 to AUD-28.
-Area 4 finished on 2026-11-14 with streaming (25, after P8) and a long convolution reverb (26, after P9).
+**Seeded on 2026-11-13 with `kama seed` on kama 0.9.938+g94365be5 (kyoten's pin). The design pass is done
+(2026-11-15): areas 1 to 5 are decided (§ Decided, 1 to 30),** on the evidence in [RESEARCH.md](RESEARCH.md), measured
+where it could be. This repository's documents, each to one purpose:
+- [FEATURES.md](FEATURES.md) is every feature the library will have, with its rungs, status, example, test and budget
+  (decision 27);
+- [ROADMAP.md](ROADMAP.md) is the order, by example (decision 28), and [ROADMAP_DETAIL.md](ROADMAP_DETAIL.md) its
+  reasoning;
+- [SPEC.md](SPEC.md) is what is built, and is empty until the first slice lands.
 
-**The next session is area 5: the feature map and the order of work** (§ The design pass, 5):
-- a `FEATURES.md` drawn from Web Audio, the game middleware (FMOD, Wwise) and the DAW engines;
-- the `ROADMAP.md` put in order by example: a sample-exact loop (cosmic-forge's CF-24), a game's sounds, voice chat, a
-  synth on MIDI, a multitrack session with automation and bounce, and spatial sound on a headset;
-- whether a DAW's engine is a tier here or a package of its own;
-- speech, for kyoten's accessibility (KYR-76).
-
-It is mostly a survey and an ordering, with no probe planned. Each question is still asked in full (the problem, an
-example, the options, the production answer). Then the first rows are built, test-first.
-- **Read first:** § Decided, § The design pass, 5, [ROADMAP.md](ROADMAP.md), and kyoten's `docs/design/audio.md` and
-  `docs/design/accessibility.md` (its questions 4 and 5 are speech's).
+**Now: AUD-29, a sample-exact loop, the first slice,** built test-first, depth-first, on the web and natively.
+- **Read first:** § Decided, ROADMAP_DETAIL.md § AUD-29, and the probes it starts from.
 - **The pin is 0.9.956 (`df5a6edf`) on both machines.**
   - The Windows box bumped kyoten's `.kama-version` to it on 2026-11-14, at the owner's word.
   - The Mac rebuilt it from a clean clone on 2026-11-15, and kyoten's `tools/test.sh` is green on it there.
@@ -223,16 +218,15 @@ The areas, each asked in full in turn (area 1 first):
           come from the platform's `sinf`, which differs from 2,048 points up;
         - uniform partitions cost 10 to 30 times more;
         - the kama FFT cannot carry the long stages at `-Oz` (KAUD-6).
-5. **The feature map and the order of work:** a `FEATURES.md` from Web Audio, the middleware and the DAW engines, and a
-   `ROADMAP.md` by example: a sample-exact loop (cosmic-forge's CF-24), a game's sounds, voice chat, a synth on MIDI, a
-   multitrack session with automation and bounce, and spatial sound on a headset. Whether a DAW's engine (transport,
-   tracks, clips, plugin hosting through CLAP natively and WebCLAP on the web, delay compensation) is a tier here or a
-   package of its own.
-   - **Speech, for kyoten's accessibility** (KYR-76, the owner, 2026-11-14: "Speach to text, text to speach"):
-     whether text to speech renders into this engine on every leg (a local voice model) or comes from the platform
-     (Web Speech's synthesis, which bypasses Web Audio, or the OS's), and whether speech to text runs on this
-     package's input node or in a speech package of its own. Its questions are in kyoten's
-     `docs/design/accessibility.md` (4 and 5); the audio half is answered here.
+5. **The feature map and the order of work.** **Decided (§ Decided, 27 to 30)** after a survey of Web Audio 1.1, the
+   game middleware, the DAW engines and speech (RESEARCH.md § 10):
+   - **The map:** [FEATURES.md](FEATURES.md), one row per feature, naming features only, each with golden samples as
+     its test and three measured numbers as its budget.
+   - **The order, by example:** a sample-exact loop, a game's sounds, adaptive music, voice chat, spatial sound on a
+     headset, a synth on MIDI, and a multitrack session.
+   - **A DAW's own engine** is a package of its own, on this one's public API.
+   - **Speech, for kyoten's accessibility** (KYR-76), is a package of its own too. This package's half is a tap, a
+     source the program feeds, and the output as a media stream.
 
 What stays kyoten's, not this package's: how kyoten's frame phases schedule sound (Output, timestamps a little ahead),
 its components, and its DAW tool (KYR-35). This package must be able to serve a DAW; the DAW tool itself is kyoten's.
@@ -286,8 +280,8 @@ Those questions stay in kyoten's `audio.md`.
        and the same wasm anyway.
      - The split is FMOD's: its Core API is channels and a DSP graph, and its Studio API adds events, buses and snapshots
        on top. It is also `@kama/graphics`', a flat core with a scene graph on it.
-   - **Still open, in area 5:** whether a DAW's own engine (transport, clips, plugin hosting, delay compensation) is a
-     tier here or a package of its own.
+   - **Decided in area 5 (decision 29):** a DAW's own engine (transport, clips, plugin hosting) is a package of its
+     own, on this one's public API. Delay compensation and the other properties of the graph stay here.
 
 3. **Decided on 2026-11-13: the lower tier keeps Web Audio's names and units** (area 2, the names). The owner took the
    recommendation.
@@ -735,8 +729,136 @@ Those questions stay in kyoten's `audio.md`.
       - Natively the tail on a worker took 70% off the audio thread with no late block. On one thread it already held
         32.
 
+27. **Decided on 2026-11-15: the feature map is [FEATURES.md](FEATURES.md), one row per feature, naming only features**
+    (area 5, question 1). The owner: "I think yes as drafted... I'm not sure if we should be listing production names
+    though. Can we just focus on the features?" So the draft's column of the middleware's and the DAWs' names was
+    removed.
+    - **A row says:**
+      - the feature, and its Web Audio name, which is the lower tier's own (decision 3);
+      - its rungs from cheap to best, with what each needs;
+      - its status (`planned`, `partial` or `built`);
+      - the example that first needs it, or `asked`;
+      - its test and its budget.
+    - **No other product is named in the map.**
+      - It names features, Web Audio's names, and the standards a feature meets (SOFA, MIDI, BS.1770).
+      - A rung names its technique. Which library implements it is a decision here.
+      - The products the survey read stay in RESEARCH.md § 10, as the evidence.
+    - **Its test is golden samples.**
+      - An offline render is hashed, and the hash must be the same in native debug, native release and wasm, and equal
+        to the golden.
+      - When a golden is made or changed, its render is compared with a reference within a stated dB: a float64
+        implementation, the spec's formula or a reference library. Only an explicit command changes a golden.
+      - The platform's own samples (AAC) are compared in dB instead.
+    - **Its budget is three measurements,** and never limits what is built:
+      - the wasm a feature adds (KB, brotli);
+      - its render cost, in ms of a core per second of audio for one instance, natively and in wasm at `-Oz`, with
+        `-O3` noted while KAUD-6 is open;
+      - its memory for one instance (decision 6).
+    - **Two guards hold it,** ported from `@kama/graphics`': `tools/check-features.sh` and `tools/check-roadmap.sh`.
+      Each of their 27 failure cases was seen to fail, for its own reason, on a mutated copy
+      (`.scratch/area5/mutate_guards.py`).
+    - **Why:**
+      - It is `@kama/graphics`' reason (kyoten's `rendering.md`, 2026-11-11): one list says what is built, what each
+        example needs and what each costs, so the order cannot drift and nothing lands untested.
+      - A hash that holds on every leg is audio's golden image. It is possible because decision 14 makes the samples
+        identical.
+      - The reference check keeps a wrong first render from becoming the golden.
+28. **Decided on 2026-11-15: the order is by example** (area 5, question 2). The owner: "option 1 sounds good to me so
+    far."
+    - **Seven slices,** each what one of the library's examples needs, built end to end on the web and natively, each
+      example a test (ROADMAP.md, AUD-29 to AUD-35):
+      1. a sample-exact loop (cosmic-forge's CF-24), the first slice through every part;
+      2. a game's sounds;
+      3. adaptive music;
+      4. voice chat;
+      5. spatial sound on a standalone headset;
+      6. a synth on MIDI;
+      7. a multitrack session.
+    - **Then the state of the art, as programs ask:**
+      - SOFA at run time (AUD-19);
+      - geometric acoustics (AUD-20);
+      - audio objects (AUD-36) and haptics (AUD-37);
+      - kama in place of the vendored C (AUD-38).
+
+      The first publish runs alongside (AUD-39).
+    - **The 28 parts that areas 2 to 4 decided keep their ids,** and each is built by the first slice that needs it
+      (ROADMAP.md § The parts).
+    - **The headset slice moves earlier** as soon as kama's Android app (kyoten's KY-2) and an XR package (kyoten's
+      KYR-31) land.
+    - **Why:**
+      - The games come first. kyoten's audio module (KYR-15) binds the game's-sounds slice for its fps example (KYR-65),
+        and the DAW (KYR-35) is later on kyoten's roadmap.
+      - The loop is first because it is the smallest slice through every part, and a real user is waiting on it.
+      - The survey added adaptive music, which all the game middleware has (RESEARCH.md § 10.1).
+29. **Decided on 2026-11-15: a DAW's own engine is a package of its own, on this package's public API** (area 5,
+    question 3, and decision 2's open question). The owner took the recommendation.
+    - **That package holds what is a DAW's alone:**
+      - editing the tempo and meter map, and positions in beats;
+      - tracks and clips, with fades, crossfades and warping;
+      - punch and loop recording, takes and comping;
+      - plugin hosting (CLAP natively and WebCLAP on the web), with process isolation natively;
+      - sync by MIDI clock and MTC;
+      - the project document and its undo.
+
+      It is built when kyoten's DAW tool (KYR-35) or another DAW asks for it, and named then.
+    - **This package keeps what a game also uses:**
+      - sample-accurate automation;
+      - latency reported and compensated;
+      - sidechain inputs, buses and sends;
+      - an offline bounce, and render workers;
+      - metering and loudness, and recording to a file;
+      - the tempo map as a function from beats to frames, which adaptive music needs too.
+
+      The multitrack session slice (AUD-35) proves the graph carries a DAW before that package exists.
+    - **It uses only the public API,** as the upper tier uses the graph's (decision 2), so nothing it needs is out of
+      another program's reach.
+    - **Why** (RESEARCH.md § 10.2):
+      - Plugin hosting loads a third party's code at run time. Natively that is a binary called on the audio thread or
+        in a sandbox process, and on the web a third party's wasm instantiated in the worklet. A game never ships it,
+        and a console's platform may not allow it.
+      - The project document and its undo are an application's.
+      - The engines that split them show the line: one DAW engine ships its graph as a layer usable without its
+        session model, and a widely used plugin framework keeps its graph apart from any session.
+      - The mature DAW engines are GPL or AGPL, as are Rubber Band and Ableton Link, so they are references, never
+        dependencies.
+30. **Decided on 2026-11-15: speech is a package of its own, on this package's public API** (area 5, question 4, for
+    kyoten's KYR-76). The owner took the recommendation.
+    - **Its two ladders:**
+      - **text to speech:**
+        - the platform's voice played by the platform. On the web it is the only rung with no model, and the engine
+          ducks the mix around it;
+        - the platform's voice as samples into the mix (Apple, Windows and Android);
+        - a local voice model rendering into the mix on every leg;
+      - **speech to text:**
+        - the platform's recognizer on the device, fed the engine's frames: Chrome and Firefox through a
+          `MediaStreamTrack`, Apple and Android through buffers;
+        - a local model on every leg, downloaded only when a player turns it on.
+    - **This package's half is three lower-tier features, built by the voice-chat slice (AUD-32):**
+      - frames tapped from any node to the program's thread;
+      - a source the program feeds;
+      - on the web, the output as a media stream.
+
+      None of them is speech's alone: voice chat's encoder and the network use them too.
+    - **Wherever the platform or a model gives samples, the voice renders into the mix,** so it can be placed, ducked
+      and sent over voice chat. One accessibility guideline sends a player's typed chat as speech on the voice channel.
+    - **Which rung each leg defaults to, and what may leave the device,** are that package's and kyoten's to decide
+      (kyoten's `accessibility.md`, questions 4 and 5).
+    - **Why** (RESEARCH.md § 10.3):
+      - Web Speech's synthesis never reaches Web Audio: measured in Chrome 157 and Firefox 160, and its proposal has
+        had no activity since 2019.
+      - Natively, three of the four OSes hand back samples; Linux's does not.
+      - The models are tens of MB and need an inference runtime, which an audio engine does not.
+      - The platforms' speech services are bindings of their own.
+      - Recognition runs off the audio thread anyway.
+
 ## Where the truth is
 
+- **This repository's documents, each to one purpose:**
+  - [FEATURES.md](FEATURES.md) is every feature and where it stands;
+  - [ROADMAP.md](ROADMAP.md) is the order of work, with [ROADMAP_DETAIL.md](ROADMAP_DETAIL.md) its reasoning;
+  - [SPEC.md](SPEC.md) is what is built;
+  - [RESEARCH.md](RESEARCH.md) is the design pass's evidence;
+  - this file is the brief and the record of decisions.
 - **kyoten's decisions on it:** `../kyoten/docs/design/audio.md` § Decided, and `architecture.md` § Decided
   (the library pattern and the `@kama/<noun>` name).
 - **The sibling packages show the shape to follow:** `../kama-gpu` and `../kama-window` (a `SPEC.md` of what is built,
@@ -776,6 +898,8 @@ I think we focus on the audio tickets"). Offer one when it blocks something; aud
 ## Build
 
     kama check kama.json
+    tools/check-features.sh   # FEATURES.md stays complete: statuses, examples, tests and budgets
+    tools/check-roadmap.sh    # ROADMAP.md stays short, its ids valid and every detail section scheduled
 
 kyoten builds with its own pinned kama (`../kyoten/.kama-version` names the commit, and its `AGENTS.kyoten.md` § Build
 says how to make the pin from a clean clone, with the Mac's steps). Run it as `../kyoten/tools/kama`. A web build needs

@@ -1,0 +1,324 @@
+// command-ring: audio::rt::Ring, the single-producer, single-consumer ring under the command protocol (AUD-1;
+// AGENTS.audio.md decisions 5 to 8). The program's side pushes, the audio side pops each quantum.
+// - Its capacity is declared, and its storage comes from the allocator the program hands it (decision 6).
+// - A full ring refuses a push and keeps what it holds: the backlog in front of it is the program's side's (decision 8).
+// - Its pop allocates nothing and never waits (decision 5): the drain below is `@noheap`, called from another thread.
+
+import { Tally, audio::rt::Ring, audio::rt::RingError, std::concurrent::Atomic, std::concurrent::MemoryOrder };
+
+export { ringTests };
+
+extern "thr.h";
+
+@foreignEntry @noheap fnptr int32 DrainCb(UnsafePtr user);
+extern fn int32 thr_start(DrainCb cb, UnsafePtr user);
+extern fn void thr_join();
+extern fn int64 thr_now_ns();
+
+// A stand-in for a stamped command: flat, with a check that a torn or reordered copy would break.
+type value Probe {
+    public int64 seq;
+    public int64 frame;
+    public int64 check;
+    public ctor make(int64 seq) { this.seq = seq; this.frame = seq * 128; this.check = seq * 31 + 7; }
+    public const fn bool whole() { return this.frame == this.seq * 128 && this.check == this.seq * 31 + 7; }
+}
+
+fnptr string RingCase(ref Ring<Probe> r);
+
+fn void withRing(ref Tally t, const ref string name, isize capacity, RingCase body) {
+    Result<Ring<Probe>, RingError> made = Ring::<Probe>.withCapacity(capacity: capacity);
+    match (give made) {
+        case Ok(value: r): {
+            Ring<Probe> ring = give r;
+            string why = body(r: ring);
+            t.verdict(name: name, why: why);
+        }
+        case Err(error: e): {
+            string m = e.message();
+            t.verdict(name: name, why: "the ring was not made: ${m}");
+        }
+    };
+}
+
+// Pops one and says what is wrong with it, or "" when it is `seq` and whole.
+fn string expectSeq(ref Ring<Probe> r, int64 seq) {
+    Optional<Probe> got = r.pop();
+    return match (got) {
+        case Some(value: p): p.seq == seq && p.whole() ? "" : "popped seq ${p.seq} where ${seq} was due";
+        case None: "the ring was empty where seq ${seq} was due";
+    };
+}
+
+fn string expectEmpty(ref Ring<Probe> r) {
+    Optional<Probe> got = r.pop();
+    return match (got) { case Some(value: p): "popped seq ${p.seq} from a ring that should be empty"; case None: ""; };
+}
+
+fn string freshIsEmpty(ref Ring<Probe> r) {
+    isize cap = r.capacity();
+    if (cap != 4) { return "its capacity is ${cap}, not the 4 declared"; }
+    return expectEmpty(r: r);
+}
+
+fn string inOrder(ref Ring<Probe> r) {
+    int64 i = 0;
+    while (i < 8) {
+        if (!r.push(item: Probe.make(seq: i))) { return "push ${i} of 8 was refused by a ring of 8"; }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 8) {
+        string why = expectSeq(r: r, seq: i);
+        if (!why.isEmpty()) { return why; }
+        i = i + 1;
+    }
+    return expectEmpty(r: r);
+}
+
+fn string fullRefuses(ref Ring<Probe> r) {
+    int64 i = 0;
+    while (i < 4) {
+        if (!r.push(item: Probe.make(seq: i))) { return "push ${i} of 4 was refused by a ring of 4"; }
+        i = i + 1;
+    }
+    if (r.push(item: Probe.make(seq: 99))) { return "a full ring took a fifth push"; }
+    i = 0;
+    while (i < 4) {
+        string why = expectSeq(r: r, seq: i);
+        if (!why.isEmpty()) { return why; }
+        i = i + 1;
+    }
+    string after = expectEmpty(r: r);
+    if (!after.isEmpty()) { return after; }
+    if (!r.push(item: Probe.make(seq: 4))) { return "a ring emptied after it was full refused a push"; }
+    return expectSeq(r: r, seq: 4);
+}
+
+// A capacity of 3 is not a power of two, and 3,000 commands take the counters a thousand times round it.
+fn string wraps(ref Ring<Probe> r) {
+    int64 next = 0;
+    int64 due = 0;
+    int32 round = 0;
+    while (round < 1000) {
+        if (!r.push(item: Probe.make(seq: next))) { return "push ${next} refused with one held"; }
+        next = next + 1;
+        if (!r.push(item: Probe.make(seq: next))) { return "push ${next} refused with two held"; }
+        next = next + 1;
+        if (!r.push(item: Probe.make(seq: next))) { return "push ${next} refused with three free"; }
+        next = next + 1;
+        if (r.push(item: Probe.make(seq: -1))) { return "a full ring took a push in round ${round}"; }
+        int32 k = 0;
+        while (k < 3) {
+            string why = expectSeq(r: r, seq: due);
+            if (!why.isEmpty()) { return why; }
+            due = due + 1;
+            k = k + 1;
+        }
+        round = round + 1;
+    }
+    return expectEmpty(r: r);
+}
+
+fn void badCapacity(ref Tally t) {
+    Result<Ring<Probe>, RingError> zero = Ring::<Probe>.withCapacity(capacity: 0);
+    Result<Ring<Probe>, RingError> negative = Ring::<Probe>.withCapacity(capacity: -1);
+    bool zeroRefused = match (zero) { case Ok(value: r): false; case Err(error: e): e == RingError::BadCapacity; };
+    bool negativeRefused = match (negative) { case Ok(value: r): false; case Err(error: e): e == RingError::BadCapacity; };
+    string why = zeroRefused && negativeRefused ? "" : "zero refused: ${zeroRefused}, -1 refused: ${negativeRefused}";
+    t.verdict(name: "command-ring: a capacity below one is refused as BadCapacity", why: why);
+}
+
+// ---- the injected allocator ---------------------------------------------------------------------------------------
+
+// Counts what passes through it into five cells the test owns: allocations, bytes allocated, frees, bytes freed,
+// reallocations. With `room` false it has none, as an exhausted arena has none.
+type value Counting implements Allocator {
+    UnsafePtr<int64> cells;
+    bool room;
+
+    public unsafe ctor make(UnsafePtr<int64> cells, bool room) { this.cells = cells; this.room = room; }
+
+    public unsafe fn Optional<UnsafePtr> allocate(usize bytes, usize align) {
+        if (!this.room) { return Optional::None; }
+        this.cells[0] = this.cells[0] + 1;
+        this.cells[1] = this.cells[1] + cast<int64>(bytes);
+        return GlobalAllocator.make().allocate(bytes: bytes, align: align);
+    }
+
+    public unsafe fn Optional<UnsafePtr> reallocate(UnsafePtr pointer, usize bytes, usize newBytes, usize align) {
+        this.cells[4] = this.cells[4] + 1;
+        return GlobalAllocator.make().reallocate(pointer: pointer, bytes: bytes, newBytes: newBytes, align: align);
+    }
+
+    public unsafe fn void deallocate(UnsafePtr pointer, usize bytes, usize align) {
+        this.cells[2] = this.cells[2] + 1;
+        this.cells[3] = this.cells[3] + cast<int64>(bytes);
+        GlobalAllocator.make().deallocate(pointer: pointer, bytes: bytes, align: align);
+    }
+}
+
+// Makes a ring of 16 through `a`, uses it, and drops it when it returns. "" when it was made and used.
+unsafe fn string useRingFrom(Counting a) {
+    Result<Ring<Probe, Counting>, RingError> made = Ring::<Probe, Counting>.withCapacityAndAllocator(allocator: a, capacity: 16);
+    return match (give made) {
+        case Ok(value: r): {
+            Ring<Probe, Counting> ring = give r;
+            bool pushed = ring.push(item: Probe.make(seq: 5));
+            Optional<Probe> got = ring.pop();
+            bool popped = match (got) { case Some(value: p): p.seq == 5; case None: false; };
+            return pushed && popped ? "" : "a push and a pop through it failed";
+        }
+        case Err(error: e): {
+            string m = e.message();
+            return "the ring was not made: ${m}";
+        }
+    };
+}
+
+unsafe fn void fromTheAllocator(ref Tally t) {
+    InlineArray<int64>#(5) cells = [0; (5)];
+    Counting a = Counting.make(cells: addr(of: cells[0]), room: true);
+    string used = useRingFrom(a: a);
+    int64 want = 16 * cast<int64>(sizeof(Probe));
+    string why = give used;
+    if (why.isEmpty() && (cells[0] != 1 || cells[1] != want)) {
+        int64 n = cells[0];
+        int64 b = cells[1];
+        why = "${n} allocations of ${b} bytes, not one of ${want}";
+    }
+    if (why.isEmpty() && (cells[2] != 1 || cells[3] != want)) {
+        int64 n = cells[2];
+        int64 b = cells[3];
+        why = "${n} frees of ${b} bytes after the drop, not one of ${want}";
+    }
+    if (why.isEmpty() && cells[4] != 0) { why = "it reallocated, and a ring never grows"; }
+    t.verdict(name: "command-ring: its storage comes from the injected allocator, once, and goes back to it at the drop", why: why);
+}
+
+unsafe fn void noRoom(ref Tally t) {
+    InlineArray<int64>#(5) cells = [0; (5)];
+    Counting a = Counting.make(cells: addr(of: cells[0]), room: false);
+    Result<Ring<Probe, Counting>, RingError> made = Ring::<Probe, Counting>.withCapacityAndAllocator(allocator: a, capacity: 16);
+    bool refused = match (made) { case Ok(value: r): false; case Err(error: e): e == RingError::OutOfMemory; };
+    string why = refused ? "" : "a ring was made with no memory to hold it";
+    t.verdict(name: "command-ring: an allocator with no room refuses the ring as OutOfMemory, and none is made", why: why);
+}
+
+// ---- across threads -----------------------------------------------------------------------------------------------
+
+comptime int64 COUNT = 1000000;
+
+// Both sides' state. The consumer stops at the first wrong command and says so, and the producer stops on seeing it,
+// so a broken ring fails the case at once instead of running on. The consumer publishes how far it has got, and the
+// producer gives up after 5 s in which that does not move, while pushing or while waiting for the rest; the consumer
+// stops on seeing that. So a ring that never delivers fails the case instead of hanging the gate.
+type resource Crossing {
+    Ring<Probe> ring;
+    Atomic<int32> stopped;
+    Atomic<int32> gaveUp;
+    Atomic<int64> seenSoFar;
+    int64 expected = 0;
+    int64 bad = 0;
+
+    public ctor make(Ring<Probe> ring) {
+        this.ring = give ring;
+        this.stopped = Atomic.make(value: 0);
+        this.gaveUp = Atomic.make(value: 0);
+        this.seenSoFar = Atomic.make(value: 0);
+    }
+
+    public fn bool push(Probe item) { return this.ring.push(item: item); }
+
+    public fn bool stoppedEarly() { return this.stopped.loadExplicit(order: MemoryOrder::Acquire) != 0; }
+
+    public fn void giveUp() { this.gaveUp.storeExplicit(value: 1, order: MemoryOrder::Release); }
+
+    public fn int64 progress() { return this.seenSoFar.loadExplicit(order: MemoryOrder::Acquire); }
+
+    // One call of the consumer's loop: drains what is there; 0 once every command has been seen, or at a wrong one.
+    @noheap public fn int32 drainSome() {
+        bool more = true;
+        while (more) {
+            Optional<Probe> got = this.ring.pop();
+            match (got) {
+                case Some(value: p): {
+                    if (p.seq != this.expected || !p.whole()) {
+                        this.bad = this.bad + 1;
+                        this.stopped.storeExplicit(value: 1, order: MemoryOrder::Release);
+                        return 0;
+                    }
+                    this.expected = p.seq + 1;
+                }
+                case None: { more = false; }
+            };
+        }
+        this.seenSoFar.storeExplicit(value: this.expected, order: MemoryOrder::Release);
+        if (this.gaveUp.loadExplicit(order: MemoryOrder::Acquire) != 0) { return 0; }
+        return this.expected >= COUNT ? 0 : 1;
+    }
+
+    public const fn int64 seen() { return this.expected; }
+    public const fn int64 wrong() { return this.bad; }
+}
+
+@noheap @onPanic(recover: 0)
+unsafe fn int32 drain(UnsafePtr user) {
+    UnsafePtr<Crossing> c = cast<UnsafePtr<Crossing>>(user);
+    return c[0].drainSome();
+}
+
+unsafe fn void acrossThreads(ref Tally t) {
+    string name = "command-ring: a million commands cross to another thread whole and in order";
+    Result<Ring<Probe>, RingError> made = Ring::<Probe>.withCapacity(capacity: 256);
+    match (give made) {
+        case Ok(value: r): {
+            Crossing c = Crossing.make(ring: give r);
+            if (thr_start(cb: drain, user: cast<UnsafePtr>(addr(of: c))) != 0) {
+                t.verdict(name: name, why: "no second thread");
+                return;
+            }
+            int64 seq = 0;
+            int64 lastSeen = -1;
+            int64 lastChange = thr_now_ns();
+            bool stalled = false;
+            // Push them all, then wait for the consumer to see them all.
+            while (c.progress() < COUNT && !c.stoppedEarly() && !stalled) {
+                bool pushed = false;
+                if (seq < COUNT) { pushed = c.push(item: Probe.make(seq: seq)); }
+                if (pushed) { seq = seq + 1; }
+                if (!pushed || seq % 4096 == 0) {
+                    int64 now = thr_now_ns();
+                    int64 seenNow = c.progress();
+                    if (seenNow != lastSeen) {
+                        lastSeen = seenNow;
+                        lastChange = now;
+                    } else if (now - lastChange > 5000000000) {
+                        stalled = true;
+                    }
+                }
+            }
+            if (stalled) { c.giveUp(); }
+            thr_join();
+            int64 seen = c.seen();
+            int64 wrong = c.wrong();
+            string why = seen == COUNT && wrong == 0 ? "" : "stopped at seq ${seen} of ${COUNT}: a command torn or out of order";
+            t.verdict(name: name, why: why);
+        }
+        case Err(error: e): {
+            string m = e.message();
+            t.verdict(name: name, why: "the ring was not made: ${m}");
+        }
+    };
+}
+
+unsafe fn void ringTests(ref Tally t) {
+    withRing(t: t, name: "command-ring: a fresh ring is empty, at its declared capacity", capacity: 4, body: freshIsEmpty);
+    withRing(t: t, name: "command-ring: what is pushed is popped in order", capacity: 8, body: inOrder);
+    withRing(t: t, name: "command-ring: a full ring refuses a push and keeps what it holds", capacity: 4, body: fullRefuses);
+    withRing(t: t, name: "command-ring: its counters wrap past a capacity of 3, in order", capacity: 3, body: wraps);
+    badCapacity(t: t);
+    fromTheAllocator(t: t);
+    noRoom(t: t);
+    acrossThreads(t: t);
+}

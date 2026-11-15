@@ -1,0 +1,102 @@
+// audio::rt::Ring: one producer, one consumer, and nothing between them that waits (AUD-1; AGENTS.audio.md
+// decisions 5 to 8). The command protocol is built on it: the program's side pushes stamped commands, and the audio
+// side drains them at the top of each quantum. It is public because a program's own DSP, and the packages built on
+// this one's public API, move data between those two threads the same way (decision 31).
+//
+// - **Its capacity is declared** (decision 6): fixed when it is made, never grown.
+// - **Its storage comes from the allocator it is handed** (decision 6), the global heap by default. It is taken once,
+//   on the program's side, and given back when the ring drops. The audio side never allocates (decision 5).
+// - **A full ring refuses a push and keeps what it holds.** What does not fit waits in the program's side's backlog
+//   (decision 8), so nothing is dropped and nothing blocks.
+// - **Its counters are monotonic,** masked only at the array, so a capacity need not be a power of two.
+// - **Each counter sits on its own 128-byte line** (the M4's line), so the two threads never share one. A release store
+//   publishes each side's counter, and an acquire load reads the other's: RESEARCH.md § 6.1 found the M4 tearing
+//   commands when the pair was relaxed.
+//
+// An element is a `value`: flat bytes, with no destructor, so the audio side never drops what it pops.
+
+import { std::concurrent::Atomic, std::concurrent::MemoryOrder };
+
+export { Ring, RingError };
+
+// Why a ring was not made.
+type enum RingError implements Error {
+    BadCapacity, OutOfMemory;
+
+    public const fn string message() {
+        return match (this) {
+            case BadCapacity: "a ring's capacity must be at least one";
+            case OutOfMemory: "the ring's allocator had no room for its storage";
+        };
+    }
+}
+
+type resource Ring<T: value, A: Allocator = GlobalAllocator> {
+    Atomic<int64> head;
+    InlineArray<uint8>#(120) padHead;
+    Atomic<int64> tail;
+    InlineArray<uint8>#(120) padTail;
+    UnsafePtr<T> slots = null;
+    int64 cap = 0;
+    A alloc;
+
+    // Adopts storage already taken from `allocator`: `slots` holds `capacity` elements.
+    private unsafe ctor adopt(UnsafePtr<T> slots, int64 capacity, A allocator) {
+        this.head = Atomic.make(value: 0);
+        this.padHead = [0; (120)];
+        this.tail = Atomic.make(value: 0);
+        this.padTail = [0; (120)];
+        this.slots = slots;
+        this.cap = capacity;
+        this.alloc = allocator;
+    }
+
+    // A ring of `capacity` elements on the global heap.
+    public ctor Result<Ring<T, A>, RingError> withCapacity(isize capacity) when [A: default] {
+        A allocator = A.default();
+        return Ring::<T, A>.withCapacityAndAllocator(allocator: allocator, capacity: capacity);
+    }
+
+    // A ring of `capacity` elements whose storage comes from `allocator`, an `Arena`'s handle or the program's own.
+    public unsafe ctor Result<Ring<T, A>, RingError> withCapacityAndAllocator(A allocator, isize capacity) {
+        if (capacity < 1) { return Result::Err(error: RingError::BadCapacity); }
+        usize bytes = cast<usize>(capacity) * sizeof(T);
+        Optional<UnsafePtr> got = allocator.allocate(bytes: bytes, align: alignof(T));
+        return match (got) {
+            case Some(value: p): Result::Ok(value: Ring::<T, A>.adopt(slots: cast<UnsafePtr<T>>(p), capacity: cast<int64>(capacity),
+                                                               allocator: allocator));
+            case None: Result::Err(error: RingError::OutOfMemory);
+        };
+    }
+
+    // The producer's side. False when the ring is full, and then nothing is written. `unsafe` marks the body, which
+    // indexes the raw storage; a caller needs no `unsafe` of its own.
+    public unsafe fn bool push(T item) {
+        int64 h = this.head.loadExplicit(order: MemoryOrder::Relaxed);
+        int64 t = this.tail.loadExplicit(order: MemoryOrder::Acquire);
+        if (h - t >= this.cap) { return false; }
+        this.slots[cast<isize>(h % this.cap)] = item;
+        this.head.storeExplicit(value: h + 1, order: MemoryOrder::Release);
+        return true;
+    }
+
+    // The consumer's side. `None` when the ring is empty. It allocates nothing and never waits.
+    @noheap public unsafe fn Optional<T> pop() {
+        int64 t = this.tail.loadExplicit(order: MemoryOrder::Relaxed);
+        int64 h = this.head.loadExplicit(order: MemoryOrder::Acquire);
+        if (t == h) { return Optional::None; }
+        T item = this.slots[cast<isize>(t % this.cap)];
+        this.tail.storeExplicit(value: t + 1, order: MemoryOrder::Release);
+        return Optional::Some(value: item);
+    }
+
+    // The capacity it was made with.
+    public const fn isize capacity() { return cast<isize>(this.cap); }
+
+    unsafe ~Ring() {
+        if (this.slots != null) {
+            this.alloc.deallocate(pointer: cast<UnsafePtr>(this.slots), bytes: cast<usize>(this.cap) * sizeof(T),
+                                  align: alignof(T));
+        }
+    }
+}

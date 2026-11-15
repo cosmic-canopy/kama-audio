@@ -24,16 +24,36 @@ It is the audio half of kyoten's rule that each engine module is built on a gene
 ## Where things stand
 
 **Seeded on 2026-11-13 with `kama seed` on kama 0.9.938+g94365be5 (kyoten's pin). The design pass is done
-(2026-11-15): areas 1 to 5 are decided (§ Decided, 1 to 30),** on the evidence in [RESEARCH.md](RESEARCH.md), measured
-where it could be. This repository's documents, each to one purpose:
+(2026-11-15): areas 1 to 5 are decided (§ Decided, 1 to 30), and the first slice's first question too (31),** on the
+evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This repository's documents, each to one purpose:
 - [FEATURES.md](FEATURES.md) is every feature the library will have, with its rungs, status, example, test and budget
   (decision 27);
 - [ROADMAP.md](ROADMAP.md) is the order, by example (decision 28), and [ROADMAP_DETAIL.md](ROADMAP_DETAIL.md) its
   reasoning;
-- [SPEC.md](SPEC.md) is what is built, and is empty until the first slice lands.
+- [SPEC.md](SPEC.md) is what is built.
 
 **Now: AUD-29, a sample-exact loop, the first slice,** built test-first, depth-first, on the web and natively.
-- **Read first:** § Decided, ROADMAP_DETAIL.md § AUD-29, and the probes it starts from.
+- **Built on 2026-11-15** ([SPEC.md](SPEC.md)):
+  - the modules' first cut (decision 31);
+  - AUD-1's ring, `audio::rt::Ring`;
+  - the tests program (`tests/`, one program);
+  - the gate, `tools/test.sh`: the guards, `kama check`, then the tests natively in debug and release and on wasm
+    under node.
+
+  8 cases, green on every leg.
+- **The ring is proved by mutation** (`.scratch/aud29/mutate_ring.py`, through the whole gate): 13 of 14 mutations
+  are caught, none by a hang, since the thread case has a deadline.
+  - **The 14th is the publish made relaxed.** That is a weak-memory race, and no deterministic test holds it: with the
+    head's store relaxed, 0 of 10 release runs on the M4 were red, and with the store and its load relaxed, 1 of 10.
+  - So the release and acquire pair is held by review, and the comment on the ring says why. RESEARCH.md § 6.1 found
+    that ThreadSanitizer is not the evidence either.
+- **Next:**
+  - the command protocol on the ring: flat, typed commands stamped with an int64 frame, the backlog in front of the
+    ring with its declared bound, late commands counted (the rest of AUD-1);
+  - then the slots (AUD-2), the way back (AUD-3) and the context's options and memory (AUD-4);
+  - then an `OfflineAudioContext` rendering in the declared block (AUD-9), and the first golden.
+- **Read first:** § Decided, ROADMAP_DETAIL.md § AUD-29, and the probes it starts from (`aud-probe-cmd` for the
+  commands and the way back).
 - **The pin is 0.9.956 (`df5a6edf`) on both machines.**
   - The Windows box bumped kyoten's `.kama-version` to it on 2026-11-14, at the owner's word.
   - The Mac rebuilt it from a clean clone on 2026-11-15, and kyoten's `tools/test.sh` is green on it there.
@@ -850,6 +870,18 @@ Those questions stay in kyoten's `audio.md`.
       - The models are tens of MB and need an inference runtime, which an audio engine does not.
       - The platforms' speech services are bindings of their own.
       - Recognition runs off the audio thread anyway.
+31. **Decided on 2026-11-15: the package's first cut of modules** (AUD-29's first question). The owner took the
+    recommendation.
+    - **`audio`** is the lower tier, Web Audio's graph under Web Audio's names (decision 3).
+    - **`audio::sound`** is the upper tier: `Sound`, `Voice`, `Bus`, `Snapshot` and `Emitter` (decision 3's proposal).
+    - **`audio::rt` is public,** and holds the real-time primitives that the engine and a program's own DSP share. The
+      first is the lock-free ring the command protocol runs on (AUD-1), and the tap's and the fed source's rings of
+      frames follow.
+    - **Why `audio::rt` is public:**
+      - the tests program is a package of its own, and reaches only public modules;
+      - the DAW and speech packages are built on this package's public API only (decisions 29 and 30), and move data
+        between a real-time thread and the program's the same way;
+      - kama's `internal` visibility would hide it from both.
 
 ## Where the truth is
 

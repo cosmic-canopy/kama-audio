@@ -1,0 +1,19 @@
+{
+  "name": "audiotests",
+  "version": "0.1.0",
+  "license": "MIT OR Apache-2.0",
+  "kind": "executable",
+  "kama": ">=0.9.956",
+  "description": "@kama/audio's tests, one program: each case prints ok or FAIL with its name, and the exit status is 1 when any failed",
+  "entry": "src/main.kama",
+  "reproducible-float": true,
+  "cincludes": ["csrc"],
+  "csources": ["csrc/thr.c"],
+  "emSettings": { "WASM_WORKERS": 1 },
+  "modules": {
+    ".": { "visibility": "internal" }
+  },
+  "dependencies": {
+    "@kama/audio": { "path": ".." }
+  }
+}

@@ -156,7 +156,7 @@ The areas, each asked in full in turn (area 1 first):
    - **Input:** Web Audio's model on both legs.
    - **Cores:** declared render workers natively, one thread on the web.
 4. **The ladders: spatial sound, decoding, resampling and streaming.** Planned on 2026-11-13, and its parts are staged
-   and smoke-tested (RESEARCH.md § 8). **Questions 1 to 4 are decided; 5 and 6 are open.** A ladder is a feature in
+   and smoke-tested (RESEARCH.md § 8). **Decided (§ Decided, 20 to 26).** A ladder is a feature in
    rungs from cheap to best. A program picks a rung per sound, and each rung is the same on every leg. Each question
    below is measured first, then asked in full.
    1. **Where a sound seems to come from.** **Decided (§ Decided, 20 and 21)** after P5 (`aud-probe-spatial/`,
@@ -173,7 +173,8 @@ The areas, each asked in full in turn (area 1 first):
       through the platform.
    4. **Changing a sound's rate, and its pitch.** **Decided (§ Decided, 24)** after P7 (`aud-probe-resample/`,
       RESEARCH.md § 9.4): our ladder in kama for every voice, and libsamplerate's best for converting a whole buffer.
-   5. **Playing a long sound without loading it whole.**
+   5. **Playing a long sound without loading it whole.** **Decided (§ Decided, 25):** our decoders on a decode thread on
+      every leg, exact seeks, streams started on stamped frames.
       - *The problem:* 10 minutes of stereo at 48 kHz is 230 MB as floats. Music and dialogue are decoded a little
         ahead, off the audio thread, and the audio thread must never wait for the decoder.
       - *The options, per leg:*
@@ -191,8 +192,8 @@ The areas, each asked in full in turn (area 1 first):
           targets), which costs about 1 ms;
         - WebCodecs works on the page route, but its samples are not native's, and Firefox's takes 150 to 200 ms to
           start.
-        **Asked of the owner on 2026-11-14.**
-   6. **A long convolution reverb: the one built-in node in question** (decision 1).
+   6. **A long convolution reverb: the one built-in node in question** (decision 1). **Decided (§ Decided, 26):** our
+      non-uniform partitioned convolver on every leg, and no `ConvolverNode`.
       - *The problem:* a concert hall's reverb is a 2 to 4 s impulse response, a heavy convolution. The browser's
         `ConvolverNode` may run part of it off the audio thread, which one worklet cannot.
       - **Measured by P9** (`aud-probe-convolver/`, RESEARCH.md § 9.6):
@@ -203,7 +204,6 @@ The areas, each asked in full in turn (area 1 first):
           come from the platform's `sinf`, which differs from 2,048 points up;
         - uniform partitions cost 10 to 30 times more;
         - the kama FFT cannot carry the long stages at `-Oz` (KAUD-6).
-        **Asked of the owner on 2026-11-14.**
 5. **The feature map and the order of work:** a `FEATURES.md` from Web Audio, the middleware and the DAW engines, and a
    `ROADMAP.md` by example: a sample-exact loop (cosmic-forge's CF-24), a game's sounds, voice chat, a synth on MIDI, a
    multitrack session with automation and bounce, and spatial sound on a headset. Whether a DAW's engine (transport,
@@ -649,6 +649,72 @@ Those questions stay in kyoten's `audio.md`.
       - libsamplerate's best (140 dB SINAD) is the highest quality that makes the same samples on every leg.
         r8brain reaches 152 dB, but its NEON path makes different samples in wasm.
       - Ours is not yet optimized: at equal quality libsamplerate is cheaper today.
+25. **Decided on 2026-11-14: a stream is our decoders on a decode thread, on every leg** (area 4, question 5). The
+    owner took the recommendation.
+    - **One decode step, the same on every leg, fills each stream's ring of frames a little ahead, off the audio
+      thread:**
+      - natively, on a decode thread the package starts: a declared count, 1 by default, like decision 19's render
+        workers. It is the second kind of thread the package starts natively;
+      - on the shared route, in a Wasm Worker, into the ring in shared memory;
+      - on the page route, in a decode Worker, the program's own instance. It transfers buffers of frames straight to
+        the worklet's instance through a `MessagePort` the loader hands both, and the worklet hands back its read
+        count. No more is in flight than the ring holds, and the main thread is never in the path. That is decision
+        7's second route, carrying frames. It is a third artifact of the program, which kama cannot yet build for a
+        library (KAUD-5).
+    - **Each stream's ring is a declared capacity** (decision 5), 16,384 frames by default: 341 ms, or 128 KB for
+      stereo.
+    - **A stream is prepared, then started on a stamped frame.** Preparing opens it and fills its ring. A start, a
+      stop and a hand-off from one stream to the next each fall on a stamped frame (decision 7), so the seams between
+      sections are gapless.
+    - **Seeks are exact.** A seek decodes from 1 s before its target and discards that, so the samples it plays are
+      the file's own. It is a second stream prepared at the target and handed off on a stamped frame. Each codec's
+      pre-roll is measured when its row is built.
+    - **Loops:**
+      - a loop back to the file's start is exact for free: the decoder restarts with its own pre-skip;
+      - a loop point mid-file seeks exactly;
+      - a short sample-exact loop is still a buffer (decision 5).
+    - **AAC streams through the platform's decoder in the same decode step** (decision 23): WebCodecs on the web,
+      AudioToolbox and Media Foundation natively.
+    - **A stream reads its compressed bytes through the package's source:** whole in memory, as P8 measured, or read in
+      chunks (a file natively, a fetch's body on the web) through each decoder's callbacks, which its row measures.
+    - **Why** (RESEARCH.md § 9.5):
+      - No stream ran dry on any leg, at any ring size from 85 ms, idle or loaded. That held natively, on the shared
+        route and on the page route.
+      - A stream's first frames were decoded 1 to 5 ms after it was asked for, from about 120 KB of decoder state. A
+        stream is 0.3 MB, against 230 MB for 10 min decoded whole.
+      - The samples are the same on every leg, the loop's seam and the end's trim included.
+      - opusfile's own seek converges over half a second. 0.8 s more pre-roll made all 200 of 200 targets exact, for
+        about 1 ms of decoding.
+      - WebCodecs decodes 138 to 143 dB from ours and needs its end trimmed. Firefox's takes 150 to 200 ms to start,
+        and Safari's fails FLAC and Vorbis (§ 3).
+26. **Decided on 2026-11-14: a convolution reverb is our own convolver on every leg, and no `ConvolverNode`** (area 4,
+    question 6). The owner took the recommendation. So decision 1 holds with no exception: every node is ours.
+    - **A non-uniform partitioned convolution in kama:**
+      - a 128-frame head, computed every quantum;
+      - then longer stages. For a 3 s hall that is 16 partitions of 128 frames, 14 of 1,024 and 16 of 8,192;
+      - each stage starts twice its block into the response, so its work for a block can take the whole next block.
+        Its forward transform, its multiply-adds and its inverse are spread over the quanta before its output is due,
+        and the stages' transforms are staggered so no quantum carries two;
+      - the layout is chosen from the impulse response's length when it is loaded;
+      - each output channel is convolved with its own channel of the response, as `ConvolverNode`'s stereo rule is.
+        More channels (true stereo, decision 20's Ambisonic reflection slot) take the same code.
+    - **pffft is its transform and its multiply-add** (decision 21), with its spectra left in its own order. **The
+      vendored pffft computes its twiddles in double, rounded once to float.** As shipped, its setup takes them from
+      the platform's `sinf`, so from 2,048 points up its bits differ between legs.
+    - **Natively, the tail may run on a render worker** (decision 19): a stage's block is handed to a worker joined to
+      the device's workgroup, and its output is due a block later.
+    - **Why** (RESEARCH.md § 9.6):
+      - In Chrome's worklet, at kama's `-Oz`, 32 halls ran with no underrun. Chrome's own `ConvolverNode` collapsed
+        between 24 and 32.
+      - A hall costs the worklet about 10 µs of its 2.67 ms (10.9 ms of a core per second offline at `-Oz`, 6.8
+        natively), against 19 to 39 for a `ConvolverNode`.
+      - Ours and the browsers' sound the same: all are float32 convolutions, about 130 dB from float64 and from each
+        other. Ours makes the same samples on every leg, and `ConvolverNode`'s are its own.
+      - Uniform partitions cost 10 to 30 times more.
+      - The kama FFT's 16,384-point transform alone exceeds a quantum at `-Oz` (KAUD-6). So the long stages need
+        pffft, as decision 21 has it.
+      - Natively the tail on a worker took 70% off the audio thread with no late block. On one thread it already held
+        32.
 
 ## Where the truth is
 

@@ -6,11 +6,11 @@
 > **`AUD-<n>` is a permanent id, not a position.** It is assigned once, from the counter below, which the same edit
 > bumps. It is never reused or renumbered, and a shipped row's id retires with it.
 
-**Next id: AUD-25**
+**Next id: AUD-29**
 
 ## NOW: the design pass
 
-Areas 4 and 5 of [AGENTS.audio.md](AGENTS.audio.md#the-design-pass-what-is-open). Nothing is built before the
+Area 5 of [AGENTS.audio.md](AGENTS.audio.md#the-design-pass-what-is-open). Nothing is built before the
 decisions it depends on are recorded. Area 5 puts the rows below in order, by example.
 
 ## LATER: what areas 2 to 4 decided, unordered until area 5
@@ -32,7 +32,7 @@ decisions it depends on are recorded. Area 5 puts the rows below in order, by ex
 | AUD-13 | **Render workers natively**: a declared count, real-time threads joined to the device's workgroup (MMCSS, rtkit elsewhere), woken by a semaphore, summed in a fixed order | [decision 19](AGENTS.audio.md#decided) |
 | AUD-14 | **`reproducible-float` is the program's**: the package's tests program sets it, and its docs say what it buys (the same samples between builds) | [decision 14](AGENTS.audio.md#decided) |
 | AUD-15 | **Spatial sound's core, in kama on both legs**: equal-power panning; HRTF binaural (the grid's four nearest HRIRs blended, minimum phase with each ear's onset as a fractional delay, partitioned FFT convolution, a crossfade when the filters change); Ambisonics (encode, rotate by the head's pose, decode binaurally once); and the room's inputs (distance, air absorption, occlusion and transmission filters, reverb sends, a slot for a reflection impulse response) | [decision 20](AGENTS.audio.md#decided) |
-| AUD-16 | **pffft vendored through the C seam** as the core's FFT, its FFTPACK notice in the package's notices, built with `-ffp-contract=off`; its x86-64 SSE path compared with NEON's and wasm's on the Windows box before it ships | [decision 21](AGENTS.audio.md#decided) |
+| AUD-16 | **pffft vendored through the C seam** as the core's FFT, its FFTPACK notice in the package's notices, built with `-ffp-contract=off`, its twiddles computed in double and rounded once to float (as shipped they come from the platform's `sinf`, and differ between legs from 2,048 points); its x86-64 SSE path compared with NEON's and wasm's on the Windows box before it ships | [decisions 21, 26](AGENTS.audio.md#decided) |
 | AUD-17 | **The HRTF converter**, the package's build tool: any SOFA set to the compact table (the regular grid, minimum phase with onsets, MagLS SH HRIRs), another grid resampled onto one | [decision 22](AGENTS.audio.md#decided) |
 | AUD-18 | **The default HRTF set**: SADIE II's D1 (KU100) at 2°, 64 taps and float16, about 1 MB, its citation in the package's notices | [decision 22](AGENTS.audio.md#decided) |
 | AUD-19 | **Reading SOFA at run time**, a module a program opts into, natively and on the web: libmysofa, converted in memory into the same table | [decision 22](AGENTS.audio.md#decided) |
@@ -41,3 +41,7 @@ decisions it depends on are recorded. Area 5 puts the rows below in order, by ex
 | AUD-22 | **AAC through the platform**: WebCodecs on the web, fed by the package's MP4 reader, which trims the edit list's priming; AudioToolbox and Media Foundation natively. Documented as the one codec whose samples differ between legs | [decision 23](AGENTS.audio.md#decided) |
 | AUD-23 | **The voices' resampling ladder, in kama**: linear, cubic, and band-limited interpolation at 8, 16 and 32 zero crossings (the cutoff following the pitch), a fractional read position and a ratio per frame; a polyphase bank and SIMD | [decision 24](AGENTS.audio.md#decided) |
 | AUD-24 | **libsamplerate's best vendored behind the package's seam** for converting a whole buffer (at load, in a bounce); replaceable by a kama rung measured at 140 dB or better | [decision 24](AGENTS.audio.md#decided) |
+| AUD-25 | **Streams**: one decode step for our decoders, on a decode thread natively (a declared count, 1 by default), in a Wasm Worker on the shared route, and in a decode Worker on the page route, which transfers frames through a `MessagePort` to the worklet's instance and is paced by its read count; each stream's ring a declared capacity (16,384 frames by default); a stream prepared, then started, stopped and handed off on stamped frames | [decision 25](AGENTS.audio.md#decided) |
+| AUD-26 | **Exact seeks and loops**: each codec's pre-roll measured and decoded before the target (Opus: 1 s), a seek as a second stream handed off on a stamped frame; a loop back to the start exact, a loop point mid-file by the exact seek | [decision 25](AGENTS.audio.md#decided) |
+| AUD-27 | **A stream's bytes and AAC streams**: the compressed bytes through the package's source, whole in memory or read in chunks (a file natively, a fetch's body on the web) through each decoder's callbacks; AAC streams through the platform's decoder in the same decode step (WebCodecs, AudioToolbox, Media Foundation) | [decisions 23, 25](AGENTS.audio.md#decided) |
+| AUD-28 | **The convolution reverb**: a non-uniform partitioned convolution in kama on every leg, with a 128-frame head and longer stages whose transforms and multiply-adds are spread over the quanta before they are due, staggered; the layout chosen from the response's length; one channel of the response per output channel, and more channels by the same code; natively the tail optionally on render workers (AUD-13) | [decision 26](AGENTS.audio.md#decided) |

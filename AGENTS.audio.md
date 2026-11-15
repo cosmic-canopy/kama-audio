@@ -181,54 +181,29 @@ The areas, each asked in full in turn (area 1 first):
         - on the web's shared route, a Worker decodes (wasm or WebCodecs) into the shared ring;
         - on the page route, the Worker posts transferred buffers.
       - *Also:* sample-exact loops and seams between streamed sections, seeking, and starting a stream with no gap.
-      - **P8** (`aud-probe-stream/`): `long_48000.opus` streamed through a decode worker into the engine, natively
-        and on both web routes. It measures:
-        - underruns, idle and loaded;
-        - memory, and the time to the first sample;
-        - a seek's accuracy, and a loop's seam.
-
-        *Built from* (planned 2026-11-14, from what P6 left):
-        - the engine and both routes of `aud-probe-routes/` (`WEB_SHARED`, and `WEB_PAGE` with `WEB_WORKLET`);
-        - natively, `aud-probe-device/`'s miniaudio, writing zeros to the device while the stream is consumed and
-          hashed, so nothing is heard (the browsers run muted, as `browsers.sh` starts them);
-        - the decoder: opusfile, built as P6's `cdec.c` was, in a decode thread or Worker. On the web, WebCodecs too,
-          fed by P6's `demux.c` packets. It drops Opus's pre-skip itself, and the program trims the end's padding to
-          the container's total (RESEARCH.md § 9.3);
-        - the stream's ring of decoded frames: area 2's single-producer ring, in shared memory natively and on the
-          shared route. On the page route, transferred buffers to the worklet's instance (decision 7's second route).
-
-        *How:*
-        - the load is a main thread burning 50 ms a frame and a second busy Worker;
-        - an underrun is a quantum the engine fills with silence because the ring ran dry, beside Chrome's
-          `playbackStats`;
-        - a seek is checked against P6's whole decode (`aud-probe-decode/out/native/long_48000.opus.c.f32`);
-        - the seam is `loop_48000.opus` streamed as a loop, checked against its own whole decode.
+      - **Measured by P8** (`aud-probe-stream/`, RESEARCH.md § 9.5), on area 4's real-time harness
+        (`.scratch/area4/rt/`):
+        - no stream ran dry on any leg, at any ring size from 85 ms, idle or loaded. That held natively, on the shared
+          route (a Wasm Worker into the shared ring) and on the page route (a decode Worker transferring buffers
+          through a `MessagePort` straight to the worklet's instance);
+        - the same samples on every leg, the loop's seam and the end's trim exact;
+        - a seek lands on its frame but is exact only with 0.8 s more pre-roll than opusfile's own (200 of 200
+          targets), which costs about 1 ms;
+        - WebCodecs works on the page route, but its samples are not native's, and Firefox's takes 150 to 200 ms to
+          start.
+        **Asked of the owner on 2026-11-14.**
    6. **A long convolution reverb: the one built-in node in question** (decision 1).
       - *The problem:* a concert hall's reverb is a 2 to 4 s impulse response, a heavy convolution. The browser's
         `ConvolverNode` may run part of it off the audio thread, which one worklet cannot.
-      - **P9** (`aud-probe-convolver/`): a 3 s impulse response as a `ConvolverNode`, against a partitioned
-        convolution in the worklet, in Chrome and Firefox, and natively. It measures their cost and underruns, and
-        whether the two sound the same.
-
-        *Built from* (planned 2026-11-14):
-        - the impulse response: `area4/fixtures/ir_hall_48000.wav`, 3 s of stereo decaying noise with a 2.5 s RT60
-          (staged, in `make.sh` and `SHA256SUMS`);
-        - our convolution on area 4's shared DSP (`area4/dsp/`: `Fdl`, `Filter`, `Accum`), its FFT both the kama one
-          and pffft through a C seam (decision 21), the kernels over raw pointers and timed at `-Oz` and `-O3`
-          (KAUD-6);
-        - two partitionings:
-          - uniform, 128-frame partitions: 1,125 a channel, the simple one;
-          - non-uniform: a 128-frame head and longer tail partitions whose work is spread over the quanta before it
-            is due, so no quantum carries a long FFT;
-        - natively, the same code in the device's callback (zeros out), and with render workers for the tail
-          (decision 19).
-
-        *How:*
-        - the browsers' `ConvolverNode` runs with `normalize` off, so both compute the same convolution;
-        - each quantum's cost is kept whole (the mean and the worst, since the worst makes an underrun), idle and
-          under P8's load;
-        - each output is compared, as dB of RMS difference, with the `ConvolverNode`'s and with a direct convolution
-          in float64, offline and natively.
+      - **Measured by P9** (`aud-probe-convolver/`, RESEARCH.md § 9.6):
+        - our non-uniform partitioned convolver with pffft, its work spread over the quanta, ran 32 halls in Chrome's
+          worklet at kama's `-Oz` with no underrun. Chrome's `ConvolverNode` collapsed between 24 and 32;
+        - ours and the browsers' sound the same: all are float32 convolutions, about 130 dB apart;
+        - ours makes the same samples on every leg once pffft's twiddles are computed in double: as vendored, they
+          come from the platform's `sinf`, which differs from 2,048 points up;
+        - uniform partitions cost 10 to 30 times more;
+        - the kama FFT cannot carry the long stages at `-Oz` (KAUD-6).
+        **Asked of the owner on 2026-11-14.**
 5. **The feature map and the order of work:** a `FEATURES.md` from Web Audio, the middleware and the DAW engines, and a
    `ROADMAP.md` by example: a sample-exact loop (cosmic-forge's CF-24), a game's sounds, voice chat, a synth on MIDI, a
    multitrack session with automation and bounce, and spatial sound on a headset. Whether a DAW's engine (transport,

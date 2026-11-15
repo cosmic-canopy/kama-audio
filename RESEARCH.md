@@ -758,7 +758,7 @@ headless and muted. Nothing was audible: every case rendered offline or into mem
 | | native | wasm `-O3` | wasm, kama `-Oz` | same bits on every leg |
 |---|---|---|---|---|
 | area 4's FFT, in kama (radix 2, checked indexing) | 2,701 ns | 2,221 ns | 26,357 ns | yes |
-| pffft (r8brain 7.7's copy), SIMD | 180 ns | 193 ns | | **yes, with `-ffp-contract=off`**: NEON, wasm SIMD and wasm scalar all hash `7303612289528294521`; native with contraction on differs |
+| pffft (r8brain 7.7's copy), SIMD | 180 ns | 193 ns | | **yes, with `-ffp-contract=off`**: NEON, wasm SIMD and wasm scalar all hash `7303612289528294521`; native with contraction on differs. At 2,048 points and above only once its twiddles are computed in double (§ 9.6) |
 | pffft, wasm scalar | | 648 ns | | yes |
 
 - A static voice does one forward and two inverse transforms a block: 1.52 ms a second, 85% of a voice's cost at 16
@@ -934,3 +934,150 @@ project's test matrix at a load of about 10, so the costs are indicative):
 - **Ours is unoptimized:** per-tap table interpolation in float64 positions, no polyphase bank, no SIMD. At equal
   quality, libsamplerate is cheaper today (fastest: 94 dB at 1.9 ms/s, against our sinc 16's 89 dB at 4.8).
   libsamplerate's best (140 dB, 10.4 ms/s) is the best quality that makes the same samples on every leg.
+
+### 9.5 Playing a long sound without loading it whole (`.scratch/aud-probe-stream/`, P8)
+
+**What ran.** One `Stream` type in kama on every leg, on a real-time harness built for P8 and P9
+(`.scratch/area4/rt/`: the device natively and the Wasm Audio Worklet on the web, each callback timed, the device's own
+underruns, a load, workers, a ring of frames; the device always gets zeros):
+- **the decoder:** opusfile over the compressed bytes held in memory: 12.3 MB for 10 min, not 230 MB of floats. It
+  reads up to 1,920 frames a call, and seeks with `op_pcm_seek`;
+- **a decode thread** fills each stream's ring a little ahead, polling every 2 ms. It is a pthread natively and a Wasm
+  Worker on the shared route, each looping on kama's decode step;
+- **the ring:** area 2's single-producer ring, of stereo frames. The audio thread reads it into the output, fills
+  silence when it runs dry, and counts those quanta and frames;
+- **starting and stopping** on a stamped frame, 40 quanta and 5 frames ahead, mid-block.
+
+**The legs:**
+- natively, CoreAudio at 128 frames;
+- the shared route (an isolated page) in Chrome 157 and Firefox 160;
+- the page route (a page that cannot be isolated): the worklet's own instance holds the ring. A decode Worker
+  transfers buffers of frames to it through a `MessagePort` the page hands both, so the main thread is not in the
+  path. The worklet tells the Worker its read count every 8 quanta, and the Worker keeps no more frames in flight than
+  the ring holds. The Worker decodes with our opusfile build, or with WebCodecs.
+
+**One run's timeline:**
+1. stream A, the file from its start, opened and its ring filled, then stamped to start; 20 s are counted;
+2. B, a cold seek to a mid-packet frame (7,200,123), asked and stamped at the same moment;
+3. C, a prepared seek to an Ogg page's boundary (14,447,688);
+4. D, a prepared seek 1.25 s before the end, played to the end.
+
+A loop run streams `loop_48000.opus` for 10 turns, its decoder seeking back to 0 at the end. Every run went at ring
+sizes of 4,096, 16,384 and 65,536 frames (85 ms, 341 ms, 1.37 s), idle and under the load. Natively the load was a
+spinning thread on every core. On the web it was a main thread burning 50 ms each frame with garbage, and one spinning
+Worker. The machine was shared with kama's own test matrix (load average 2 to 16).
+
+**Results** (`results/`, kama 0.9.945; 26 streams a leg on the shared route, 12 runs a decoder on the page route):
+
+| | dry quanta | late starts | asked to first frames (median / worst) | ring full, 341 ms | the decoder's heap | the device |
+|---|---|---|---|---|---|---|
+| native | 0 | 0 | 1.95 / 4.5 ms | 3.3 ms median | 138 KB (the loop's: 130) | no overload |
+| shared route, Chrome | 0 | 0 | 1.6 / 4.9 ms | 3.1 ms | 122 KB (115) | no underrun (`playbackStats`) |
+| shared route, Firefox | 0 | 0 | 1.7 / 4.1 ms | 4.4 ms | 122 KB (115) | the lag holds (no counter) |
+| page route, ours, Chrome and Firefox | 0 | 0 | 0 to 3.6 ms | 1 to 11 ms | 122 KB | no underrun in Chrome |
+| page route, WebCodecs, Chrome | 0 | 0 | 0.5 to 5.6 ms | 1.1 to 7.9 ms | | no underrun |
+| page route, WebCodecs, Firefox | 0 | 0 | **147 to 206 ms** | 154 to 221 ms | | |
+
+- **No stream ran dry, on any leg, at any ring size, idle or loaded,** down to 85 ms of ring. The audio thread's
+  share was a few µs a quantum.
+- **The same samples on every leg.** Stream A's first 10 s hash to P6's whole decode natively, on both routes and in
+  both browsers. So does the loop's 10 turns: a seek to 0 restarts the decoder exactly, pre-skip included. D ends on
+  the container's total, exactly 60,000 frames after its start.
+- **A seek lands on its frame** (offset 0), **but opusfile's own pre-roll leaves it inexact for half a second.** After
+  `op_pcm_seek` (80 ms of pre-roll) the output starts about 0.03 off the whole decode. The difference halves with each
+  20 ms packet, and is gone after 24 to 26 packets (`seekcheck.c`). Over the first second that is 37 to 40 dB of SNR.
+  Decoding more pre-roll before the target and discarding it makes the seek exact:
+
+  | extra pre-roll | 80 ms | 250 ms | 500 ms | 600 ms | 800 ms | 1 s |
+  |---|---|---|---|---|---|---|
+  | of 200 targets, identical over the next 1 s | 0 | 0 | 134 | 190 | **200** | 200 |
+
+  0.8 s of Opus decodes in about 1 ms. Every leg's sought samples were the same as every other's, exact or not.
+- **The cold seek** (asked and stamped 107 ms ahead at once) **was never late:** its first frames were decoded 1 to
+  5 ms after it was asked.
+- **The page route holds up as well as the shared one.** Buffers of about 960 frames, 50 a second, travel from the
+  Worker to the worklet with the main thread loaded. Our decoder costs that Worker 3.5 to 4.7 ms a second of audio.
+- **WebCodecs drops Opus's pre-skip itself** (offset 0, re-proved on the long file) and needs its end trimmed. It
+  decodes 138 to 143 dB from ours, so its samples are not native's. **Firefox's takes 150 to 200 ms to give its first
+  frames,** against 1 to 6 ms for Chrome's and for ours.
+- **Under the load, Firefox's audio callbacks come unevenly** (gaps up to 20 ms) while the lag holds. That is the
+  browser's scheduling of its audio thread, the same for any worklet, not the stream.
+- **Memory:** a stream is its decoder's state (115 to 138 KB) plus its ring (128 KB at 16,384 frames), plus the
+  compressed bytes. That is 0.3 MB against 230 MB for 10 min decoded whole.
+- Not measured here: bytes arriving progressively (a fetch's body, a file read in chunks, through opusfile's
+  callbacks), since a localhost fetch is instant; and the other codecs' seeks, each for its own row (AUD-21).
+
+### 9.6 A long convolution reverb (`.scratch/aud-probe-convolver/`, P9)
+
+**What ran.** A 3 s hall (`ir_hall_48000.wav`, 144,000 taps a channel, 2.5 s RT60) as a partitioned overlap-save
+convolution in kama, the same code on every leg. Each channel is convolved with the IR's same channel, as
+`ConvolverNode` does for a stereo input and a stereo IR:
+- **two transforms:**
+  - area4dsp's kama `Fft`, with the multiply-add over raw pointers (KAUD-6);
+  - pffft through a C seam (decision 21), its spectra left in its own order and multiplied by its own
+    `pffft_zconvolve_accumulate`;
+- **two partitionings:**
+  - **uniform:** 128-frame partitions, 1,125 a channel, every one multiplied every quantum;
+  - **non-uniform:** a 128-frame head of 16 partitions, then 14 of 1,024 frames, then 16 of 8,192. A stage of
+    block n starts 2n into the response, so its work for a block can take the whole next block. Its forward
+    transform, its multiply-adds (one or a few partitions a quantum) and its inverse are spread over the n/128 quanta
+    before its output is due, staggered so no two stages' transforms fall in one quantum. Natively a run may instead
+    give each tail block to a real-time worker joined to the device's workgroup (decision 19).
+- **the input and the reference,** written once natively by `gen.c`: 2 s (an impulse, a noise burst, a log sweep)
+  and its 3 s tail, and the direct convolution in float64.
+
+**Whether they sound the same** (dB of RMS difference over the 5 s; the tail alone is within 1.5 dB of it):
+
+| | against float64 | against Chrome's `ConvolverNode` |
+|---|---|---|
+| ours, uniform (kama FFT or pffft) | −126.4 / −126.6 dB | −125.7 / −125.8 dB |
+| ours, non-uniform, kama FFT | −132.0 dB | −130.0 dB |
+| ours, non-uniform, pffft | −132.9 dB | −130.3 dB |
+| `ConvolverNode`, Chrome 157 / Firefox 160 | −132.7 / −132.7 dB | |
+
+- **Every one is float32's convolution, and they sound the same:** none is more than about 130 dB from the float64
+  reference or from another. None needed an offset, `ConvolverNode` included.
+- **Ours makes the same samples natively and in wasm, at `-Oz` and `-O3`, in every configuration,** once pffft is
+  fixed (next). `ConvolverNode`'s are its own.
+- **pffft makes the same bits on every leg only up to 1,024 points as vendored.** At 2,048 and above, its forward,
+  inverse and multiply-add all differ between NEON and wasm SIMD (`pfbits/`). Its arithmetic is not the cause; its
+  twiddle tables are. Its setup computes them with `cosf` and `sinf` on float angles, and Apple's libm and musl's round
+  some of them differently: one value of 2,048's table is `bf7f6ac7` natively and `bf7f6ac8` in wasm. Computed in
+  double and rounded once to float, they match, and pffft then makes the same bits at every size from 256 to 16,384,
+  natively and in wasm at `-O3` and `-Oz`. P9 runs that patch (`app/csrc/pffft/`).
+
+**The cost offline** (ms of one core per second of audio for one stereo reverb, the median of 3 renders of 5 s;
+load average 10):
+
+| | native | wasm under node, `-Oz` | `-O3` |
+|---|---|---|---|
+| uniform, kama FFT | 104 | 379 | 93 |
+| uniform, pffft | 79 | 100 | 60 |
+| non-uniform, kama FFT | 29 | 180 | 23 |
+| **non-uniform, pffft** | **6.8** | **10.9** | **4.3** |
+| `ConvolverNode` in an `OfflineAudioContext`, one / eight a render | | Chrome 31 / 33 each; Firefox 19 / 39 each | |
+
+Chromium runs a convolver's tail on a background thread only in a real-time context, so its offline time is its whole
+CPU.
+
+**In real time:** a bank of reverbs, each on the same noise, 1 to 32 of them, 6 s each, idle and under the load.
+Natively they ran in the device's callback; on the web in the Wasm Audio Worklet, at kama's `-Oz`. Against them,
+the same count of the browser's `ConvolverNode`s ran on the harness's context, its worklet doing nothing but timing.
+
+| | Chrome: underruns (`playbackStats`) | Firefox: the lag | native |
+|---|---|---|---|
+| **ours, non-uniform, pffft** | **0 at every count to 32, idle and loaded;** 12 µs a quantum for one, 337 for 32 (worst 1.1 ms) | holds to 32, idle and loaded | 8 µs for one, 219 for 32 (worst 0.7 ms); with the tail on a worker, 64 on the audio thread, no late block |
+| `ConvolverNode` | 0 to 24; **at 32, the whole phase underran** (1,126 events in 6 s), idle and loaded | holds to 32 | |
+| ours, uniform, pffft (run to 8 on the web) | 0 to 8 (0.6 ms a quantum at 8) | holds to 8 | 1.8 ms a quantum for 32 |
+| ours, non-uniform, kama FFT | **over the period from one reverb:** its 16,384-point transform alone takes 3.6 ms at `-Oz`; underruns from 8 | runs away from 16 | fails from 24 under load on one thread; holds to 32 with the tail on a worker |
+
+- **Our non-uniform convolver with pffft runs 32 halls in the worklet at kama's `-Oz` with no underrun,** where
+  Chrome's own `ConvolverNode` collapses between 24 and 32. One hall costs the worklet about 10 µs of its 2.67 ms.
+- **Uniform partitions cost 10 to 30 times more** and cap at a few reverbs on the web.
+- **The kama FFT cannot carry the long stages at `-Oz`** (KAUD-6): one 16,384-point transform exceeds a quantum. At
+  `-O3` it costs a fifth as much (23 against 180 ms/s offline).
+- **Natively, the tail on a real-time worker joined to the workgroup** takes 70% off the audio thread with no late
+  block. On one thread it already holds 32.
+- **The web's per-quantum clock is a caveat:** a spinning Wasm Worker at normal priority (§ 7.4). With the machine
+  at a load average of 12 to 14 its readings stall, worst in Firefox (a median of 0 µs beside maxima of 35 ms). So the
+  web's maxima and over-period counts are upper bounds, and the measures are Chrome's underruns and the lag.

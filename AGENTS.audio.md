@@ -39,15 +39,21 @@ It is mostly a survey and an ordering, with no probe planned. Each question is s
 example, the options, the production answer). Then the first rows are built, test-first.
 - **Read first:** § Decided, § The design pass, 5, [ROADMAP.md](ROADMAP.md), and kyoten's `docs/design/audio.md` and
   `docs/design/accessibility.md` (its questions 4 and 5 are speech's).
-- **The pin.** The Mac's pin is still 0.9.945 (`c474b5e9`).
-  - kyoten's `.kama-version` moved to 0.9.949 on the Windows box (`9f1fdaef`, kyoten `55ca3ac`, for KY-56). That
-    commit was not on origin on 2026-11-14, whose `dev` stopped at `48a8e67f`, so the Mac could not rebuild it from a
-    clean clone. P8 and P9 ran on 0.9.945, like P5 to P7.
-  - At the next session's start: pull kama, and if kyoten's pinned commit is on origin, rebuild the Mac's pin there
-    (kyoten's `AGENTS.kyoten.md` § Build).
-  - **KAUD-4's fix** ("a dependency's declared flag is a flag of its consumer's build") is in `../kama`'s local `dev`
-    as its 0.9.949 (`dd7871ab`), not on origin. Re-run KAUD-4's repro once it lands.
-  - On 0.9.945, KAUD-1 and KAUD-3 are retired, and KAUD-2, KAUD-4, KAUD-5 and KAUD-6 reproduce.
+- **The pin.** The Mac's pin is 0.9.949, rebuilt on 2026-11-15 from `948759d8`, origin's 0.9.949. The 0.9.945 binary
+  is kept in kyoten's `.scratch/kama-pin-0.9.945`. P5 to P9 ran on 0.9.945.
+  - kyoten's `.kama-version` pins `9f1fdaef`, the Windows box's 0.9.949, which no clean clone can check out. kama's
+    two sessions' commits were rebased when they were pushed, so that hash is on no branch of origin.
+    `948759d8` is the same compiler: what lies between them is docs, bench and KR-330's roadmap commits (kyoten's
+    `.kama-version`, 2026-11-15).
+  - **`tools/kama` warns about the build hash** (`g948759d8` against `g9f1fdaef`). The warning is expected until the
+    next bump names a commit on origin.
+  - kyoten's `tools/test.sh` is green on it on the Mac.
+  - **KAUD-4 is fixed upstream** in 0.9.953 (`54b44d61`, KR-390). On origin's head, 0.9.956 (`df5a6edf`), its repro
+    builds with no re-declaration, and an undeclared flag's error names its file (KAMA_GAPS.md). Once the pin reaches
+    0.9.953, a library can carry a build switch of its own, so the routes need no re-declared flag. That removes one of
+    KAUD-5's three causes.
+  - On 0.9.949, KAUD-2, KAUD-4, KAUD-5 and KAUD-6 reproduce, and KAUD-1 and KAUD-3 are retired. On 0.9.956, KAUD-2
+    and KAUD-6 still reproduce.
 - **What area 4 taught, which the build rows need:**
   - **kama's wasm release is `-Oz`, which no program can change (KAUD-6).** A kernel is an `unsafe fn` over raw
     pointers. Each wasm cost is measured at `-Oz` and at `-O3` through `.scratch/area4/tools/emcc`, which swaps the
@@ -106,7 +112,7 @@ Waiting, and not area 4's:
   each OS's echo cancellation (decision 18).
 - WASAPI's exclusive and `IAudioClient3` modes, and MMCSS for render workers (decisions 17 and 19), on the Windows box.
 - What `reproducible-float` costs the DSP (decision 14), once there is DSP.
-- KAUD-2, KAUD-4, KAUD-5 and KAUD-6 upstream.
+- KAUD-2, KAUD-5 and KAUD-6 upstream, and KAUD-4's fix (0.9.953) reaching the pin.
 - Area 4's open ends, each for when its row is built:
   - pffft's SSE path compared on the Windows box (decision 21), with its twiddles computed in double;
   - the loop fixture's MP3 that WebCodecs decodes 16 dB from ours (RESEARCH.md § 9.3);

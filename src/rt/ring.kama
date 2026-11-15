@@ -1,37 +1,83 @@
-// audio::rt::Ring: one producer, one consumer, and nothing between them that waits (AUD-1; AGENTS.audio.md
-// decisions 5 to 8, 33). The command protocol is built on it: the program's side flushes its commands into it, and the
-// audio side drains them at the top of each quantum. It is public because a program's own DSP, and the packages built on
-// this one's public API, move data between those two threads the same way (decision 31).
+// audio::rt::Ring and audio::rt::Backlog: the command protocol's two halves (AUD-1; AGENTS.audio.md decisions 5 to 8,
+// 33). Every call's command is added to the backlog on the program's side; a flush moves as many as the ring has room
+// for, and the audio side drains the ring at the top of each quantum. They are public because a program's own DSP, and
+// the packages built on this one's public API, move data between those two threads the same way (decision 31).
 //
+// **The ring: one producer, one consumer, and nothing between them that waits.**
 // - **Its capacity is declared** (decision 6): fixed when it is made, never grown.
 // - **Its storage comes from the allocator it is handed** (decision 6), the global heap by default. It is taken once,
 //   on the program's side, and given back when the ring drops. The audio side never allocates (decision 5).
-// - **A full ring refuses a push and keeps what it holds.** What does not fit waits in the program's side's backlog
-//   (decision 8), so nothing is dropped and nothing blocks.
+// - **A full ring refuses a push and keeps what it holds.** What does not fit waits in the backlog (decision 8), so
+//   nothing is dropped and nothing blocks.
 // - **What is staged is published at once.** The producer may stage several items, then publish them with one release
 //   store, so the consumer sees all of them or none: a flush lands whole (decision 33). A push is one item staged and
 //   published.
 // - **Its counters are monotonic,** masked only at the array, so a capacity need not be a power of two.
 // - **Each counter sits on its own 128-byte line** (the M4's line), and so does the producer's count of what it has
-//   staged, so the two threads never share one. A release store
-//   publishes each side's counter, and an acquire load reads the other's: RESEARCH.md § 6.1 found the M4 tearing
-//   commands when the pair was relaxed.
+//   staged, so the two threads never share one. A release store publishes each side's counter, and an acquire load
+//   reads the other's: RESEARCH.md § 6.1 found the M4 tearing commands when the pair was relaxed.
+//
+// **The backlog: the program's side's alone,** in front of the ring (decisions 8 and 33).
+// - **Its capacity is declared, and its storage is taken the same way.** A full backlog refuses an add and keeps what
+//   it holds, so the call that made the command can return an error, and nothing is lost.
+// - **A flush moves what the ring has room for,** from the front, in order, and publishes it with one store. What is
+//   left waits, in order, and goes first on the next flush.
+// - **It counts its high-water marks:** the most it has held at once, which its capacity must allow, and the most a
+//   flush has left behind, which says by how much the ring was too small.
 //
 // An element is a `value`: flat bytes, with no destructor, so the audio side never drops what it pops.
 
 import { std::concurrent::Atomic, std::concurrent::MemoryOrder };
 
-export { Ring, RingError };
+export { Ring, Backlog, CapacityError };
 
-// Why a ring was not made.
-type enum RingError implements Error {
+// Why a ring or a backlog was not made.
+type enum CapacityError implements Error {
     BadCapacity, OutOfMemory;
 
     public const fn string message() {
         return match (this) {
-            case BadCapacity: "a ring's capacity must be at least one";
-            case OutOfMemory: "the ring's allocator had no room for its storage";
+            case BadCapacity: "a declared capacity must be at least one";
+            case OutOfMemory: "the allocator had no room for the declared capacity";
         };
+    }
+}
+
+// Storage for a declared number of elements, taken once from an allocator and given back to it at the drop. The ring
+// and the backlog hold one each. It is not exported. std's collections cannot serve here, since each traps when its
+// allocator has no room (KAMA_GAPS.md KAUD-7).
+type resource Slots<T: value, A: Allocator> {
+    UnsafePtr<T> data = null;
+    int64 cap = 0;
+    A alloc;
+
+    private unsafe ctor adopt(UnsafePtr<T> data, int64 capacity, A allocator) {
+        this.data = data;
+        this.cap = capacity;
+        this.alloc = allocator;
+    }
+
+    public unsafe ctor Result<Slots<T, A>, CapacityError> take(A allocator, isize capacity) {
+        if (capacity < 1) { return Result::Err(error: CapacityError::BadCapacity); }
+        usize bytes = cast<usize>(capacity) * sizeof(T);
+        Optional<UnsafePtr> got = allocator.allocate(bytes: bytes, align: alignof(T));
+        return match (got) {
+            case Some(value: p): Result::Ok(value: Slots::<T, A>.adopt(data: cast<UnsafePtr<T>>(p), capacity: cast<int64>(capacity),
+                                                                allocator: allocator));
+            case None: Result::Err(error: CapacityError::OutOfMemory);
+        };
+    }
+
+    // The element a monotonic counter `at` names: the counter masked at the array.
+    @noheap public unsafe ref T operator[](int64 at) { return this.data[cast<isize>(at % this.cap)]; }
+
+    public const fn int64 count() { return this.cap; }
+
+    unsafe ~Slots() {
+        if (this.data != null) {
+            this.alloc.deallocate(pointer: cast<UnsafePtr>(this.data), bytes: cast<usize>(this.cap) * sizeof(T),
+                                  align: alignof(T));
+        }
     }
 }
 
@@ -42,38 +88,30 @@ type resource Ring<T: value, A: Allocator = GlobalAllocator> {
     InlineArray<uint8>#(120) padStaged;
     Atomic<int64> tail;
     InlineArray<uint8>#(120) padTail;
-    UnsafePtr<T> slots = null;
-    int64 cap = 0;
-    A alloc;
+    Slots<T, A> slots;
 
-    // Adopts storage already taken from `allocator`: `slots` holds `capacity` elements.
-    private unsafe ctor adopt(UnsafePtr<T> slots, int64 capacity, A allocator) {
+    private ctor adopt(Slots<T, A> slots) {
         this.head = Atomic.make(value: 0);
         this.padHead = [0; (120)];
         this.staged = 0;
         this.padStaged = [0; (120)];
         this.tail = Atomic.make(value: 0);
         this.padTail = [0; (120)];
-        this.slots = slots;
-        this.cap = capacity;
-        this.alloc = allocator;
+        this.slots = give slots;
     }
 
     // A ring of `capacity` elements on the global heap.
-    public ctor Result<Ring<T, A>, RingError> withCapacity(isize capacity) when [A: default] {
+    public ctor Result<Ring<T, A>, CapacityError> withCapacity(isize capacity) when [A: default] {
         A allocator = A.default();
         return Ring::<T, A>.withCapacityAndAllocator(allocator: allocator, capacity: capacity);
     }
 
     // A ring of `capacity` elements whose storage comes from `allocator`, an `Arena`'s handle or the program's own.
-    public unsafe ctor Result<Ring<T, A>, RingError> withCapacityAndAllocator(A allocator, isize capacity) {
-        if (capacity < 1) { return Result::Err(error: RingError::BadCapacity); }
-        usize bytes = cast<usize>(capacity) * sizeof(T);
-        Optional<UnsafePtr> got = allocator.allocate(bytes: bytes, align: alignof(T));
-        return match (got) {
-            case Some(value: p): Result::Ok(value: Ring::<T, A>.adopt(slots: cast<UnsafePtr<T>>(p), capacity: cast<int64>(capacity),
-                                                               allocator: allocator));
-            case None: Result::Err(error: RingError::OutOfMemory);
+    public ctor Result<Ring<T, A>, CapacityError> withCapacityAndAllocator(A allocator, isize capacity) {
+        Result<Slots<T, A>, CapacityError> taken = Slots::<T, A>.take(allocator: allocator, capacity: capacity);
+        return match (give taken) {
+            case Ok(value: s): Result::Ok(value: Ring::<T, A>.adopt(slots: give s));
+            case Err(error: e): Result::Err(error: e);
         };
     }
 
@@ -86,13 +124,12 @@ type resource Ring<T: value, A: Allocator = GlobalAllocator> {
     }
 
     // The producer's side, a batch: writes `item` where the consumer cannot see it until `publish()`. False when the
-    // ring is full, counting what is staged, and then nothing is written. `unsafe` marks the body, which indexes the raw
-    // storage; a caller needs no `unsafe` of its own.
-    public unsafe fn bool stage(T item) {
+    // ring is full, counting what is staged, and then nothing is written.
+    public fn bool stage(T item) {
         int64 h = this.head.loadExplicit(order: MemoryOrder::Relaxed) + this.staged;
         int64 t = this.tail.loadExplicit(order: MemoryOrder::Acquire);
-        if (h - t >= this.cap) { return false; }
-        this.slots[cast<isize>(h % this.cap)] = item;
+        if (h - t >= this.slots.count()) { return false; }
+        this.slots[h] = item;
         this.staged = this.staged + 1;
         return true;
     }
@@ -106,22 +143,80 @@ type resource Ring<T: value, A: Allocator = GlobalAllocator> {
     }
 
     // The consumer's side. `None` when the ring is empty. It allocates nothing and never waits.
-    @noheap public unsafe fn Optional<T> pop() {
+    @noheap public fn Optional<T> pop() {
         int64 t = this.tail.loadExplicit(order: MemoryOrder::Relaxed);
         int64 h = this.head.loadExplicit(order: MemoryOrder::Acquire);
         if (t == h) { return Optional::None; }
-        T item = this.slots[cast<isize>(t % this.cap)];
+        T item = this.slots[t];
         this.tail.storeExplicit(value: t + 1, order: MemoryOrder::Release);
         return Optional::Some(value: item);
     }
 
     // The capacity it was made with.
-    public const fn isize capacity() { return cast<isize>(this.cap); }
+    public const fn isize capacity() { return cast<isize>(this.slots.count()); }
+}
 
-    unsafe ~Ring() {
-        if (this.slots != null) {
-            this.alloc.deallocate(pointer: cast<UnsafePtr>(this.slots), bytes: cast<usize>(this.cap) * sizeof(T),
-                                  align: alignof(T));
-        }
+type resource Backlog<T: value, A: Allocator = GlobalAllocator> {
+    Slots<T, A> slots;
+    int64 front = 0;     // monotonic, like the ring's counters
+    int64 back = 0;
+    int64 mostHeld = 0;
+    int64 mostLeftBehind = 0;
+
+    private ctor adopt(Slots<T, A> slots) { this.slots = give slots; }
+
+    // A backlog of `capacity` commands on the global heap.
+    public ctor Result<Backlog<T, A>, CapacityError> withCapacity(isize capacity) when [A: default] {
+        A allocator = A.default();
+        return Backlog::<T, A>.withCapacityAndAllocator(allocator: allocator, capacity: capacity);
     }
+
+    // A backlog of `capacity` commands whose storage comes from `allocator`.
+    public ctor Result<Backlog<T, A>, CapacityError> withCapacityAndAllocator(A allocator, isize capacity) {
+        Result<Slots<T, A>, CapacityError> taken = Slots::<T, A>.take(allocator: allocator, capacity: capacity);
+        return match (give taken) {
+            case Ok(value: s): Result::Ok(value: Backlog::<T, A>.adopt(slots: give s));
+            case Err(error: e): Result::Err(error: e);
+        };
+    }
+
+    // Adds `item` behind what the backlog holds. False when it is full, and then nothing is written.
+    public fn bool add(T item) {
+        if (this.back - this.front >= this.slots.count()) { return false; }
+        this.slots[this.back] = item;
+        this.back = this.back + 1;
+        int64 held = this.back - this.front;
+        if (held > this.mostHeld) { this.mostHeld = held; }
+        return true;
+    }
+
+    // Moves as many as `ring` has room for, from the front, in order, and publishes them with one release store. Answers
+    // how many moved. What is left waits, in order, ahead of anything added later.
+    public fn isize flushInto(ref Ring<T, A> ring) {
+        int64 moved = 0;
+        bool room = true;
+        while (room && this.front < this.back) {
+            room = ring.stage(item: this.slots[this.front]);
+            if (room) {
+                this.front = this.front + 1;
+                moved = moved + 1;
+            }
+        }
+        ring.publish();
+        int64 left = this.back - this.front;
+        if (left > this.mostLeftBehind) { this.mostLeftBehind = left; }
+        return cast<isize>(moved);
+    }
+
+    // How many it holds now.
+    public const fn isize length() { return cast<isize>(this.back - this.front); }
+
+    // How many it can hold: the capacity it was made with.
+    public const fn isize capacity() { return cast<isize>(this.slots.count()); }
+
+    // The most it has held at once: what its declared capacity must allow.
+    public const fn isize highWater() { return cast<isize>(this.mostHeld); }
+
+    // The most a flush has left behind: by how much the ring was too small.
+    public const fn isize mostLeft() { return cast<isize>(this.mostLeftBehind); }
 }

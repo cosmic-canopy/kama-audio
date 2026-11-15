@@ -1,0 +1,298 @@
+// backlog: audio::rt::Backlog, in front of the command ring on the program's side (AUD-1; AGENTS.audio.md decisions 6,
+// 8 and 33).
+// - Every call's command is added to it, and only a flush moves commands into the ring: as many as the ring has room
+//   for, from the front, in order, published with one store.
+// - What is left waits, in order, and goes first on the next flush.
+// - A full backlog refuses an add and keeps what it holds, so the call can return an error and nothing is lost.
+// - Its capacity is declared, its storage comes from the injected allocator, and its high-water marks are counted.
+
+import { Tally, Probe, Crossing, crossing, Counting, COUNT, expectSeq, expectEmpty,
+         audio::rt::Ring, audio::rt::Backlog, audio::rt::CapacityError };
+
+export { backlogTests };
+
+fnptr string BacklogCase(ref Backlog<Probe> b, ref Ring<Probe> r);
+
+// Runs `body` on a fresh backlog of `backlog` and a fresh ring of `ring`.
+fn void withBoth(ref Tally t, const ref string name, isize backlog, isize ring, BacklogCase body) {
+    Result<Backlog<Probe>, CapacityError> madeB = Backlog::<Probe>.withCapacity(capacity: backlog);
+    match (give madeB) {
+        case Ok(value: b0): {
+            Backlog<Probe> b = give b0;
+            Result<Ring<Probe>, CapacityError> madeR = Ring::<Probe>.withCapacity(capacity: ring);
+            match (give madeR) {
+                case Ok(value: r0): {
+                    Ring<Probe> r = give r0;
+                    string why = body(b: b, r: r);
+                    t.verdict(name: name, why: why);
+                }
+                case Err(error: e): {
+                    string m = e.message();
+                    t.verdict(name: name, why: "the ring was not made: ${m}");
+                }
+            };
+        }
+        case Err(error: e): {
+            string m = e.message();
+            t.verdict(name: name, why: "the backlog was not made: ${m}");
+        }
+    };
+}
+
+// Adds seqs `from` up to `to`; "" when every add was taken.
+fn string addRange(ref Backlog<Probe> b, int64 from, int64 to) {
+    int64 i = from;
+    while (i < to) {
+        if (!b.add(item: Probe.make(seq: i))) {
+            isize n = b.length();
+            return "add ${i} was refused with ${n} held";
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+// Pops seqs `from` up to `to` from the ring, in order.
+fn string popRange(ref Ring<Probe> r, int64 from, int64 to) {
+    int64 i = from;
+    while (i < to) {
+        string why = expectSeq(r: r, seq: i);
+        if (!why.isEmpty()) { return why; }
+        i = i + 1;
+    }
+    return "";
+}
+
+fn string flushMoves(ref Backlog<Probe> b, ref Ring<Probe> r, isize want) {
+    isize moved = b.flushInto(ring: r);
+    return moved == want ? "" : "a flush moved ${moved}, where ${want} was due";
+}
+
+fn string holds(ref Backlog<Probe> b, isize want) {
+    isize n = b.length();
+    return n == want ? "" : "the backlog holds ${n}, where ${want} was due";
+}
+
+// Each step answers "" or what went wrong; the first that goes wrong is the case's verdict.
+fn string first(const ref string a, const ref string b) { return a.isEmpty() ? copy b : copy a; }
+
+fn string freshIsEmpty(ref Backlog<Probe> b, ref Ring<Probe> r) {
+    isize cap = b.capacity();
+    isize n = b.length();
+    isize hw = b.highWater();
+    isize ml = b.mostLeft();
+    if (cap != 4 || n != 0 || hw != 0 || ml != 0) {
+        return "a fresh backlog of 4: capacity ${cap}, holding ${n}, high water ${hw}, most left behind ${ml}";
+    }
+    string why = flushMoves(b: b, r: r, want: 0);
+    if (!why.isEmpty()) { return why; }
+    return expectEmpty(r: r);
+}
+
+fn string onlyAtAFlush(ref Backlog<Probe> b, ref Ring<Probe> r) {
+    string why = addRange(b: b, from: 0, to: 5);
+    if (!why.isEmpty()) { return why; }
+    string early = expectEmpty(r: r);
+    if (!early.isEmpty()) { return "before the flush: ${early}"; }
+    why = first(a: flushMoves(b: b, r: r, want: 5), b: holds(b: b, want: 0));
+    if (!why.isEmpty()) { return why; }
+    why = popRange(r: r, from: 0, to: 5);
+    if (!why.isEmpty()) { return why; }
+    return expectEmpty(r: r);
+}
+
+// A ring of 4 takes four of seven; the three left go ahead of the two added after, and the ring frees room as it pops.
+fn string leftGoesFirst(ref Backlog<Probe> b, ref Ring<Probe> r) {
+    string why = addRange(b: b, from: 0, to: 7);
+    if (!why.isEmpty()) { return why; }
+    why = first(a: flushMoves(b: b, r: r, want: 4), b: holds(b: b, want: 3));
+    if (!why.isEmpty()) { return why; }
+    why = addRange(b: b, from: 7, to: 9);
+    if (!why.isEmpty()) { return why; }
+    why = popRange(r: r, from: 0, to: 2);
+    if (!why.isEmpty()) { return why; }
+    why = first(a: flushMoves(b: b, r: r, want: 2), b: holds(b: b, want: 3));
+    if (!why.isEmpty()) { return why; }
+    why = popRange(r: r, from: 2, to: 6);
+    if (!why.isEmpty()) { return why; }
+    string drained = expectEmpty(r: r);
+    if (!drained.isEmpty()) { return drained; }
+    why = first(a: flushMoves(b: b, r: r, want: 3), b: holds(b: b, want: 0));
+    if (!why.isEmpty()) { return why; }
+    why = popRange(r: r, from: 6, to: 9);
+    if (!why.isEmpty()) { return why; }
+    return expectEmpty(r: r);
+}
+
+fn string fullRefuses(ref Backlog<Probe> b, ref Ring<Probe> r) {
+    string why = addRange(b: b, from: 0, to: 3);
+    if (!why.isEmpty()) { return why; }
+    if (b.add(item: Probe.make(seq: 99))) { return "a full backlog of 3 took a fourth"; }
+    why = first(a: holds(b: b, want: 3), b: flushMoves(b: b, r: r, want: 3));
+    if (!why.isEmpty()) { return why; }
+    why = popRange(r: r, from: 0, to: 3);
+    if (!why.isEmpty()) { return why; }
+    string drained = expectEmpty(r: r);
+    if (!drained.isEmpty()) { return drained; }
+    if (!b.add(item: Probe.make(seq: 3))) { return "a backlog emptied by a flush refused an add"; }
+    why = flushMoves(b: b, r: r, want: 1);
+    if (!why.isEmpty()) { return why; }
+    return expectSeq(r: r, seq: 3);
+}
+
+// A ring that is already full takes nothing, and the backlog keeps its order until the ring has room.
+fn string fullRing(ref Backlog<Probe> b, ref Ring<Probe> r) {
+    if (!r.push(item: Probe.make(seq: 100)) || !r.push(item: Probe.make(seq: 101))) { return "a ring of 2 refused two pushes"; }
+    string why = addRange(b: b, from: 0, to: 3);
+    if (!why.isEmpty()) { return why; }
+    why = first(a: flushMoves(b: b, r: r, want: 0), b: holds(b: b, want: 3));
+    if (!why.isEmpty()) { return why; }
+    why = first(a: expectSeq(r: r, seq: 100), b: expectSeq(r: r, seq: 101));
+    if (!why.isEmpty()) { return why; }
+    why = first(a: flushMoves(b: b, r: r, want: 2), b: popRange(r: r, from: 0, to: 2));
+    if (!why.isEmpty()) { return why; }
+    why = first(a: flushMoves(b: b, r: r, want: 1), b: expectSeq(r: r, seq: 2));
+    if (!why.isEmpty()) { return why; }
+    return expectEmpty(r: r);
+}
+
+fn string marks(ref Backlog<Probe> b, isize held, isize left) {
+    isize hw = b.highWater();
+    isize ml = b.mostLeft();
+    return hw == held && ml == left ? "" : "high water ${hw} and most left behind ${ml}, where ${held} and ${left} were due";
+}
+
+// Through a ring of 2: five held at once, then three left behind by a flush, and neither mark falls when less follows.
+fn string highWaterMarks(ref Backlog<Probe> b, ref Ring<Probe> r) {
+    string why = first(a: addRange(b: b, from: 0, to: 5), b: marks(b: b, held: 5, left: 0));
+    if (!why.isEmpty()) { return why; }
+    why = first(a: flushMoves(b: b, r: r, want: 2), b: marks(b: b, held: 5, left: 3));
+    if (!why.isEmpty()) { return why; }
+    why = first(a: popRange(r: r, from: 0, to: 2), b: flushMoves(b: b, r: r, want: 2));
+    if (!why.isEmpty()) { return why; }
+    why = first(a: marks(b: b, held: 5, left: 3), b: addRange(b: b, from: 5, to: 6));
+    if (!why.isEmpty()) { return why; }
+    why = first(a: marks(b: b, held: 5, left: 3), b: popRange(r: r, from: 2, to: 4));
+    if (!why.isEmpty()) { return why; }
+    why = first(a: flushMoves(b: b, r: r, want: 2), b: marks(b: b, held: 5, left: 3));
+    if (!why.isEmpty()) { return why; }
+    why = popRange(r: r, from: 4, to: 6);
+    if (!why.isEmpty()) { return why; }
+    return expectEmpty(r: r);
+}
+
+fn void badCapacity(ref Tally t) {
+    Result<Backlog<Probe>, CapacityError> zero = Backlog::<Probe>.withCapacity(capacity: 0);
+    Result<Backlog<Probe>, CapacityError> negative = Backlog::<Probe>.withCapacity(capacity: -1);
+    bool zeroRefused = match (zero) { case Ok(value: b): false; case Err(error: e): e == CapacityError::BadCapacity; };
+    bool negativeRefused = match (negative) { case Ok(value: b): false; case Err(error: e): e == CapacityError::BadCapacity; };
+    string why = zeroRefused && negativeRefused ? "" : "zero refused: ${zeroRefused}, -1 refused: ${negativeRefused}";
+    t.verdict(name: "backlog: a capacity below one is refused as BadCapacity", why: why);
+}
+
+// ---- the injected allocator ---------------------------------------------------------------------------------------
+
+// Makes a backlog of 16 through `a` and a ring through `ringAlloc`, sends one command through both, and drops them.
+unsafe fn string useBacklogFrom(Counting a, Counting ringAlloc) {
+    Result<Backlog<Probe, Counting>, CapacityError> madeB = Backlog::<Probe, Counting>.withCapacityAndAllocator(allocator: a, capacity: 16);
+    Result<Ring<Probe, Counting>, CapacityError> madeR = Ring::<Probe, Counting>.withCapacityAndAllocator(allocator: ringAlloc, capacity: 4);
+    return match (give madeB) {
+        case Ok(value: b0): {
+            Backlog<Probe, Counting> b = give b0;
+            return match (give madeR) {
+                case Ok(value: r0): {
+                    Ring<Probe, Counting> r = give r0;
+                    bool added = b.add(item: Probe.make(seq: 5));
+                    isize moved = b.flushInto(ring: r);
+                    Optional<Probe> got = r.pop();
+                    bool popped = match (got) { case Some(value: p): p.seq == 5; case None: false; };
+                    return added && moved == 1 && popped ? "" : "an add, a flush and a pop through it failed";
+                }
+                case Err(error: e): {
+                    string m = e.message();
+                    return "the ring was not made: ${m}";
+                }
+            };
+        }
+        case Err(error: e): {
+            string m = e.message();
+            return "the backlog was not made: ${m}";
+        }
+    };
+}
+
+unsafe fn void fromTheAllocator(ref Tally t) {
+    InlineArray<int64>#(5) cells = [0; (5)];
+    InlineArray<int64>#(5) ringCells = [0; (5)];
+    Counting a = Counting.make(cells: addr(of: cells[0]), room: true);
+    Counting ra = Counting.make(cells: addr(of: ringCells[0]), room: true);
+    string used = useBacklogFrom(a: a, ringAlloc: ra);
+    int64 want = 16 * cast<int64>(sizeof(Probe));
+    string why = give used;
+    if (why.isEmpty() && (cells[0] != 1 || cells[1] != want)) {
+        int64 n = cells[0];
+        int64 b = cells[1];
+        why = "${n} allocations of ${b} bytes, not one of ${want}";
+    }
+    if (why.isEmpty() && (cells[2] != 1 || cells[3] != want)) {
+        int64 n = cells[2];
+        int64 b = cells[3];
+        why = "${n} frees of ${b} bytes after the drop, not one of ${want}";
+    }
+    if (why.isEmpty() && cells[4] != 0) { why = "it reallocated, and a backlog never grows"; }
+    t.verdict(name: "backlog: its storage comes from the injected allocator, once, and goes back to it at the drop", why: why);
+}
+
+unsafe fn void noRoom(ref Tally t) {
+    InlineArray<int64>#(5) cells = [0; (5)];
+    Counting a = Counting.make(cells: addr(of: cells[0]), room: false);
+    Result<Backlog<Probe, Counting>, CapacityError> made = Backlog::<Probe, Counting>.withCapacityAndAllocator(allocator: a, capacity: 16);
+    bool refused = match (made) { case Ok(value: b): false; case Err(error: e): e == CapacityError::OutOfMemory; };
+    string why = refused ? "" : "a backlog was made with no memory to hold it";
+    t.verdict(name: "backlog: an allocator with no room refuses the backlog as OutOfMemory, and none is made", why: why);
+}
+
+// ---- across threads -----------------------------------------------------------------------------------------------
+
+// Adds a batch while the backlog is empty, and flushes it once the ring surely has room for all of it. Such a flush
+// must move the whole batch, and the consumer must see it whole.
+fn int64 flushInBatches(ref Crossing c, int64 next) {
+    int64 b = c.batchSize();
+    isize held = c.held();
+    if (held == 0) {
+        if (next >= COUNT) { return next; }
+        int64 i = 0;
+        while (i < b) {
+            if (!c.add(item: Probe.make(seq: next + i))) {
+                c.fail();
+                return next + i;
+            }
+            i = i + 1;
+        }
+        return next + b;
+    }
+    if (c.roomFor(n: cast<int64>(held))) {
+        isize moved = c.flush();
+        if (moved != held) { c.fail(); }
+    }
+    return next;
+}
+
+unsafe fn void backlogTests(ref Tally t) {
+    withBoth(t: t, name: "backlog: a fresh backlog is empty, at its declared capacity", backlog: 4, ring: 8, body: freshIsEmpty);
+    withBoth(t: t, name: "backlog: what is added reaches the ring only at a flush, in order", backlog: 8, ring: 8,
+             body: onlyAtAFlush);
+    withBoth(t: t, name: "backlog: a flush moves what the ring has room for, and what is left goes first on the next",
+             backlog: 16, ring: 4, body: leftGoesFirst);
+    withBoth(t: t, name: "backlog: a full backlog refuses an add and keeps what it holds", backlog: 3, ring: 8,
+             body: fullRefuses);
+    withBoth(t: t, name: "backlog: a flush into a full ring moves nothing and keeps the order", backlog: 4, ring: 2,
+             body: fullRing);
+    withBoth(t: t, name: "backlog: it counts the most held at once and the most a flush left behind", backlog: 8, ring: 2,
+             body: highWaterMarks);
+    badCapacity(t: t);
+    fromTheAllocator(t: t);
+    noRoom(t: t);
+    crossing(t: t, name: "backlog: a million commands flushed in batches of 5 cross to another thread, each flush whole",
+             batch: 5, step: flushInBatches);
+}

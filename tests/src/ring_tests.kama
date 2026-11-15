@@ -6,14 +6,14 @@
 // - Its pop allocates nothing and never waits (decision 5): the drain is `@noheap`, called from another thread
 //   (crossing.kama).
 
-import { Tally, Probe, Crossing, crossing, COUNT, audio::rt::Ring, audio::rt::RingError };
+import { Tally, Probe, Crossing, Counting, crossing, COUNT, audio::rt::Ring, audio::rt::CapacityError };
 
-export { ringTests };
+export { ringTests, expectSeq, expectEmpty };
 
 fnptr string RingCase(ref Ring<Probe> r);
 
 fn void withRing(ref Tally t, const ref string name, isize capacity, RingCase body) {
-    Result<Ring<Probe>, RingError> made = Ring::<Probe>.withCapacity(capacity: capacity);
+    Result<Ring<Probe>, CapacityError> made = Ring::<Probe>.withCapacity(capacity: capacity);
     match (give made) {
         case Ok(value: r): {
             Ring<Probe> ring = give r;
@@ -107,46 +107,19 @@ fn string wraps(ref Ring<Probe> r) {
 }
 
 fn void badCapacity(ref Tally t) {
-    Result<Ring<Probe>, RingError> zero = Ring::<Probe>.withCapacity(capacity: 0);
-    Result<Ring<Probe>, RingError> negative = Ring::<Probe>.withCapacity(capacity: -1);
-    bool zeroRefused = match (zero) { case Ok(value: r): false; case Err(error: e): e == RingError::BadCapacity; };
-    bool negativeRefused = match (negative) { case Ok(value: r): false; case Err(error: e): e == RingError::BadCapacity; };
+    Result<Ring<Probe>, CapacityError> zero = Ring::<Probe>.withCapacity(capacity: 0);
+    Result<Ring<Probe>, CapacityError> negative = Ring::<Probe>.withCapacity(capacity: -1);
+    bool zeroRefused = match (zero) { case Ok(value: r): false; case Err(error: e): e == CapacityError::BadCapacity; };
+    bool negativeRefused = match (negative) { case Ok(value: r): false; case Err(error: e): e == CapacityError::BadCapacity; };
     string why = zeroRefused && negativeRefused ? "" : "zero refused: ${zeroRefused}, -1 refused: ${negativeRefused}";
     t.verdict(name: "command-ring: a capacity below one is refused as BadCapacity", why: why);
 }
 
 // ---- the injected allocator ---------------------------------------------------------------------------------------
 
-// Counts what passes through it into five cells the test owns: allocations, bytes allocated, frees, bytes freed,
-// reallocations. With `room` false it has none, as an exhausted arena has none.
-type value Counting implements Allocator {
-    UnsafePtr<int64> cells;
-    bool room;
-
-    public unsafe ctor make(UnsafePtr<int64> cells, bool room) { this.cells = cells; this.room = room; }
-
-    public unsafe fn Optional<UnsafePtr> allocate(usize bytes, usize align) {
-        if (!this.room) { return Optional::None; }
-        this.cells[0] = this.cells[0] + 1;
-        this.cells[1] = this.cells[1] + cast<int64>(bytes);
-        return GlobalAllocator.make().allocate(bytes: bytes, align: align);
-    }
-
-    public unsafe fn Optional<UnsafePtr> reallocate(UnsafePtr pointer, usize bytes, usize newBytes, usize align) {
-        this.cells[4] = this.cells[4] + 1;
-        return GlobalAllocator.make().reallocate(pointer: pointer, bytes: bytes, newBytes: newBytes, align: align);
-    }
-
-    public unsafe fn void deallocate(UnsafePtr pointer, usize bytes, usize align) {
-        this.cells[2] = this.cells[2] + 1;
-        this.cells[3] = this.cells[3] + cast<int64>(bytes);
-        GlobalAllocator.make().deallocate(pointer: pointer, bytes: bytes, align: align);
-    }
-}
-
 // Makes a ring of 16 through `a`, uses it, and drops it when it returns. "" when it was made and used.
 unsafe fn string useRingFrom(Counting a) {
-    Result<Ring<Probe, Counting>, RingError> made = Ring::<Probe, Counting>.withCapacityAndAllocator(allocator: a, capacity: 16);
+    Result<Ring<Probe, Counting>, CapacityError> made = Ring::<Probe, Counting>.withCapacityAndAllocator(allocator: a, capacity: 16);
     return match (give made) {
         case Ok(value: r): {
             Ring<Probe, Counting> ring = give r;
@@ -185,8 +158,8 @@ unsafe fn void fromTheAllocator(ref Tally t) {
 unsafe fn void noRoom(ref Tally t) {
     InlineArray<int64>#(5) cells = [0; (5)];
     Counting a = Counting.make(cells: addr(of: cells[0]), room: false);
-    Result<Ring<Probe, Counting>, RingError> made = Ring::<Probe, Counting>.withCapacityAndAllocator(allocator: a, capacity: 16);
-    bool refused = match (made) { case Ok(value: r): false; case Err(error: e): e == RingError::OutOfMemory; };
+    Result<Ring<Probe, Counting>, CapacityError> made = Ring::<Probe, Counting>.withCapacityAndAllocator(allocator: a, capacity: 16);
+    bool refused = match (made) { case Ok(value: r): false; case Err(error: e): e == CapacityError::OutOfMemory; };
     string why = refused ? "" : "a ring was made with no memory to hold it";
     t.verdict(name: "command-ring: an allocator with no room refuses the ring as OutOfMemory, and none is made", why: why);
 }

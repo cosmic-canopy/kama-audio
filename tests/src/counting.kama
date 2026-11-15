@@ -1,0 +1,31 @@
+// A test allocator that counts what passes through it, so a case can see a declared capacity taken once from the
+// allocator it was handed and given back at the drop (decision 6).
+
+export { Counting };
+
+// Counts what passes through it into five cells the test owns: allocations, bytes allocated, frees, bytes freed,
+// reallocations. With `room` false it has none, as an exhausted arena has none.
+type value Counting implements Allocator {
+    UnsafePtr<int64> cells;
+    bool room;
+
+    public unsafe ctor make(UnsafePtr<int64> cells, bool room) { this.cells = cells; this.room = room; }
+
+    public unsafe fn Optional<UnsafePtr> allocate(usize bytes, usize align) {
+        if (!this.room) { return Optional::None; }
+        this.cells[0] = this.cells[0] + 1;
+        this.cells[1] = this.cells[1] + cast<int64>(bytes);
+        return GlobalAllocator.make().allocate(bytes: bytes, align: align);
+    }
+
+    public unsafe fn Optional<UnsafePtr> reallocate(UnsafePtr pointer, usize bytes, usize newBytes, usize align) {
+        this.cells[4] = this.cells[4] + 1;
+        return GlobalAllocator.make().reallocate(pointer: pointer, bytes: bytes, newBytes: newBytes, align: align);
+    }
+
+    public unsafe fn void deallocate(UnsafePtr pointer, usize bytes, usize align) {
+        this.cells[2] = this.cells[2] + 1;
+        this.cells[3] = this.cells[3] + cast<int64>(bytes);
+        GlobalAllocator.make().deallocate(pointer: pointer, bytes: bytes, align: align);
+    }
+}

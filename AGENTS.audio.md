@@ -36,25 +36,40 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
 **Now: AUD-29, a sample-exact loop, the first slice,** built test-first, depth-first, on the web and natively.
 - **Built on 2026-11-15** ([SPEC.md](SPEC.md)):
   - the modules' first cut (decision 31);
-  - AUD-1's ring, `audio::rt::Ring`;
-  - the tests program (`tests/`, one program);
+  - AUD-1's two halves:
+    - `audio::rt::Ring`, which publishes a batch with one release store (`stage`, `publish`);
+    - `audio::rt::Backlog` in front of it, which flushes what the ring has room for and counts its two high-water
+      marks;
+    - both refuse a make with `audio::rt::CapacityError` (it was `RingError`);
+  - the tests program (`tests/`, one program), with its second-thread harness in `tests/src/crossing.kama`;
   - the gate, `tools/test.sh`: the guards, `kama check`, then the tests natively in debug and release and on wasm
     under node.
 
-  8 cases, green on every leg.
-- **The ring is proved by mutation** (`.scratch/aud29/mutate_ring.py`, through the whole gate): 13 of 14 mutations
-  are caught, none by a hang, since the thread case has a deadline.
-  - **The 14th is the publish made relaxed.** That is a weak-memory race, and no deterministic test holds it: with the
-    head's store relaxed, 0 of 10 release runs on the M4 were red, and with the store and its load relaxed, 1 of 10.
-  - So the release and acquire pair is held by review, and the comment on the ring says why. RESEARCH.md § 6.1 found
-    that ThreadSanitizer is not the evidence either.
+  22 cases, green on every leg.
+- **Proved by mutation** (`.scratch/aud29/mutate_ring.py`, through the whole gate): 38 of 39 mutations of
+  `src/rt/ring.kama` are caught, none by a hang.
+  - **The miss is the publish made relaxed,** a weak-memory race, as before: caught in one run, missed in the next. So
+    the release and acquire pair is held by review. RESEARCH.md § 6.1 found that ThreadSanitizer is not the evidence
+    either.
+  - **A flush publishing each item on its own** is visible only from another thread. The backlog's thread case catches
+    it on every leg in 5 of 5 runs.
+- **Decided on the way:** where a call scheduled ahead waits (32, in its node, as in Web Audio) and that a flush lands
+  whole (33).
+- **Found on the way: KAUD-7.** std's collections trap when their allocator has no room, so every declared capacity
+  takes its storage as the ring's does, through the private `Slots` in `src/rt/ring.kama`.
 - **Next:**
-  - the command protocol on the ring: flat, typed commands stamped with an int64 frame, the backlog in front of the
-    ring with its declared bound, late commands counted (the rest of AUD-1);
-  - then the slots (AUD-2), the way back (AUD-3) and the context's options and memory (AUD-4);
+  - **the slots (AUD-2).** Its questions come first:
+    - how a node's count is kept: a `Shared` per node, drawn from the injected allocator by `new(allocator:)` as
+      `@kama/gpu`'s handles are, or a count in the program side's slot table, with no allocation per node;
+    - the generation's width;
+    - the table's own storage, since KAUD-7 rules out std's `SlotMap`;
+  - **then the first commands, in `audio`:** a flat command type naming slots (a node made, a `connect()`, a start
+    with its frame, a parameter's event, a release), and the late count, which is a node's rule (decision 32). AUD-1's
+    row closes with them;
+  - then the way back (AUD-3) and the context's options and memory (AUD-4);
   - then an `OfflineAudioContext` rendering in the declared block (AUD-9), and the first golden.
-- **Read first:** § Decided, ROADMAP_DETAIL.md § AUD-29, and the probes it starts from (`aud-probe-cmd` for the
-  commands and the way back).
+- **Read first:** § Decided (4, 6, 9, 32 and 33 above all), ROADMAP_DETAIL.md § AUD-29, and the probes it starts from
+  (`aud-probe-cmd` for the commands and the way back, `aud-probe-routes` for slots and a block split at a frame).
 - **The pin is 0.9.960 (`b39fbaab`) on both machines.**
   - The Windows box bumped kyoten's `.kama-version` to it on 2026-11-15, at the owner's word. It was 0.9.956 before.
   - The Mac rebuilt it from a clean clone the same day. kyoten's `tools/test.sh` and this package's are green on it

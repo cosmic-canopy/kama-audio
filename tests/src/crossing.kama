@@ -3,11 +3,13 @@
 // - The consumer stops at the first wrong command and says so, and the producer stops on seeing it. So a broken ring
 //   fails the case at once instead of running on.
 // - With a batch above one, each time the consumer finds the ring empty it must have seen a whole number of batches:
-//   what is published together is seen together (decision 33).
+//   what is published together is seen together (decision 33). The producer sends a batch by staging it into the ring
+//   and publishing it, or through a backlog, flushed once the ring surely has room for all of it.
 // - The consumer publishes how far it has got, and the producer gives up after 5 s in which that does not move. The
 //   consumer stops on seeing that. So a ring that never delivers fails the case instead of hanging the gate.
 
-import { Tally, audio::rt::Ring, audio::rt::RingError, std::concurrent::Atomic, std::concurrent::MemoryOrder };
+import { Tally, audio::rt::Ring, audio::rt::Backlog, audio::rt::CapacityError, std::concurrent::Atomic,
+         std::concurrent::MemoryOrder };
 
 export { Probe, Crossing, Produce, crossing, COUNT };
 
@@ -29,9 +31,10 @@ type value Probe {
 
 comptime int64 COUNT = 1000000;
 
-// Both sides' state: the ring between them, and what the consumer has seen.
+// Both sides' state: the ring between them, the producer's backlog, and what the consumer has seen.
 type resource Crossing {
     Ring<Probe> ring;
+    Backlog<Probe> backlog;
     Atomic<int32> stopped;
     Atomic<int32> gaveUp;
     Atomic<int64> seenSoFar;
@@ -39,9 +42,12 @@ type resource Crossing {
     int64 expected = 0;
     int64 torn = 0;
     int64 partial = 0;
+    int64 sent = 0;      // the producer's: how many its flushes have published
+    int64 faults = 0;    // the producer's: a flush or an add that should have been whole and was not
 
-    public ctor make(Ring<Probe> ring, int64 batch) {
+    public ctor make(Ring<Probe> ring, Backlog<Probe> backlog, int64 batch) {
         this.ring = give ring;
+        this.backlog = give backlog;
         this.stopped = Atomic.make(value: 0);
         this.gaveUp = Atomic.make(value: 0);
         this.seenSoFar = Atomic.make(value: 0);
@@ -54,6 +60,29 @@ type resource Crossing {
     public fn bool stage(Probe item) { return this.ring.stage(item: item); }
     public fn void publish() { this.ring.publish(); }
     public const fn int64 batchSize() { return this.batch; }
+
+    public fn bool add(Probe item) { return this.backlog.add(item: item); }
+    public const fn isize held() { return this.backlog.length(); }
+
+    public fn isize flush() {
+        isize moved = this.backlog.flushInto(ring: this.ring);
+        this.sent = this.sent + cast<int64>(moved);
+        return moved;
+    }
+
+    // True when the ring surely has room for `n` more: what is in it is at most what was sent less what the consumer
+    // has said it saw.
+    public fn bool roomFor(int64 n) {
+        int64 inRing = this.sent - this.progress();
+        return cast<int64>(this.ring.capacity()) - inRing >= n;
+    }
+
+    // The producer saw something wrong: the case fails, and both sides stop.
+    public fn void fail() {
+        this.faults = this.faults + 1;
+        this.stopped.storeExplicit(value: 1, order: MemoryOrder::Release);
+        this.giveUp();
+    }
 
     public fn bool stoppedEarly() { return this.stopped.loadExplicit(order: MemoryOrder::Acquire) != 0; }
 
@@ -93,6 +122,7 @@ type resource Crossing {
     // After the join: what went wrong, or "".
     public const fn string verdict() {
         int64 seen = this.expected;
+        if (this.faults > 0) { return "a flush or an add with room for a whole batch took only part of it, at seq ${seen}"; }
         if (this.torn > 0) { return "stopped at seq ${seen} of ${COUNT}: a command torn or out of order"; }
         if (this.partial > 0) { return "found the ring empty at seq ${seen}, partway through a batch published whole"; }
         if (seen != COUNT) { return "stopped at seq ${seen} of ${COUNT}: nothing more arrived in 5 s"; }
@@ -110,12 +140,24 @@ unsafe fn int32 drain(UnsafePtr user) {
 // called until the consumer has seen every command, so a step past COUNT still sends what it holds.
 fnptr int64 Produce(ref Crossing c, int64 next);
 
-// COUNT commands cross from this thread to the other through a ring of 256, sent by `step`.
+// COUNT commands cross from this thread to the other through a ring of 256, sent by `step`, with a backlog of 16 in
+// front of it.
 unsafe fn void crossing(ref Tally t, const ref string name, int64 batch, Produce step) {
-    Result<Ring<Probe>, RingError> made = Ring::<Probe>.withCapacity(capacity: 256);
+    Result<Backlog<Probe>, CapacityError> madeBacklog = Backlog::<Probe>.withCapacity(capacity: 16);
+    match (give madeBacklog) {
+        case Ok(value: b): { crossThrough(t: t, name: name, batch: batch, step: step, backlog: give b); }
+        case Err(error: e): {
+            string m = e.message();
+            t.verdict(name: name, why: "the backlog was not made: ${m}");
+        }
+    };
+}
+
+unsafe fn void crossThrough(ref Tally t, const ref string name, int64 batch, Produce step, Backlog<Probe> backlog) {
+    Result<Ring<Probe>, CapacityError> made = Ring::<Probe>.withCapacity(capacity: 256);
     match (give made) {
         case Ok(value: r): {
-            Crossing c = Crossing.make(ring: give r, batch: batch);
+            Crossing c = Crossing.make(ring: give r, backlog: give backlog, batch: batch);
             if (thr_start(cb: drain, user: cast<UnsafePtr>(addr(of: c))) != 0) {
                 t.verdict(name: name, why: "no second thread");
                 return;
@@ -144,6 +186,7 @@ unsafe fn void crossing(ref Tally t, const ref string name, int64 batch, Produce
             t.verdict(name: name, why: why);
         }
         case Err(error: e): {
+            Backlog<Probe> unused = give backlog;
             string m = e.message();
             t.verdict(name: name, why: "the ring was not made: ${m}");
         }

@@ -845,7 +845,7 @@ WebCodecs):
 |---|---|---|---|---|
 | FLAC 24 bit, WAV float | exact | exact | exact (FLAC) | equal |
 | FLAC 16 bit, WAV 16 bit | **half an LSB apart** (93 dB, at most 1.5e-5) | exact | exact (FLAC) | equal |
-| Opus (Ogg) | 136 to 143 dB | 134 to 137 dB | as each browser's dAD | dAD equal; WC keeps the pre-skip and the end (+312 and +336) |
+| Opus (Ogg) | 136 to 143 dB | 134 to 137 dB | as each browser's dAD | dAD equal; WC drops the pre-skip itself (from OpusHead, its description) and keeps the end (+648) |
 | Opus (WebM) | **24 frames short at the start** (479,976 of 480,000) | equal | as above | as above |
 | Vorbis | 135 to 136 dB | 143 to 145 dB | as dAD | dAD equal; WC keeps the end (+256 or +320) |
 | MP3 | 83 to 91 dB (at most 4.6e-5) | 79 to 85 dB (6.1e-5) | as dAD, but see below | dAD equal; WC keeps LAME's delay (+2,257 with the Info frame) |
@@ -858,8 +858,11 @@ WebCodecs):
 - **Gapless:**
   - `decodeAudioData` trims the priming and the padding for every codec, in both browsers, except Chrome's WebM Opus
     (24 frames).
-  - **WebCodecs trims nothing.** The container's priming and padding are the program's to remove: Opus's pre-skip,
-    LAME's delay, MP4's edit list.
+  - **WebCodecs trims no padding, and no priming but Opus's.** The end's padding is the program's to remove for
+    every codec, and so is the priming of MP3 (LAME's delay, aligned at +2,257) and AAC (MP4's edit list, +2,112).
+    Given OpusHead as its description, it drops Opus's 312-frame pre-skip itself: in both browsers its output aligns
+    with ours at offset 0 for every Opus fixture, Ogg and WebM. P6's search tried 0 and the pre-skip, and 0 won at 134
+    to 143 dB. The 648 frames it adds are all at the end.
   - Our decoders trim from the container: the 2 s loop decodes to exactly 96,000 frames from FLAC, MP3 (LAME's tag,
     even as ffmpeg writes it, with "Lavc" for "LAME"), Vorbis, Ogg Opus and WebM Opus.
   - Two fixtures carry their encoder's own counts:

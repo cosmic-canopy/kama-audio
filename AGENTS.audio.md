@@ -57,7 +57,8 @@ order of work. **Both are ready to run:**
   - **Inputs that must be identical on every leg are written once natively** (`aud-probe-resample/gen.c`), since a
     C `sin` differs between legs.
   - **P8 reuses P6's readers** (`aud-probe-decode/cdec.c` and `demux.c`): opusfile for `long_48000.opus`, and
-    WebCodecs needs the program's own priming trim.
+    WebCodecs, which drops Opus's pre-skip itself (given OpusHead as its description) and leaves the end's padding
+    for the program to trim to the container's total (RESEARCH.md § 9.3).
 - **Staged in `.scratch/area4/`:**
   - `third_party/` holds every candidate at a pinned tag, nestegg and minimp4 included, and its `README.md` lists
     them;
@@ -191,7 +192,8 @@ The areas, each asked in full in turn (area 1 first):
         - natively, `aud-probe-device/`'s miniaudio, writing zeros to the device while the stream is consumed and
           hashed, so nothing is heard (the browsers run muted, as `browsers.sh` starts them);
         - the decoder: opusfile, built as P6's `cdec.c` was, in a decode thread or Worker. On the web, WebCodecs too,
-          fed by P6's `demux.c` packets, the program trimming the pre-skip itself (decision 23);
+          fed by P6's `demux.c` packets. It drops Opus's pre-skip itself, and the program trims the end's padding to
+          the container's total (RESEARCH.md § 9.3);
         - the stream's ring of decoded frames: area 2's single-producer ring, in shared memory natively and on the
           shared route. On the page route, transferred buffers to the worklet's instance (decision 7's second route).
 
@@ -652,7 +654,7 @@ Those questions stay in kyoten's `audio.md`.
       - In wasm they decode as fast as the browsers' own (10 min of Opus: 848 ms against Chrome's 838).
       - The browsers differ from ours and from each other. Chrome's `decodeAudioData` turns 16-bit PCM half an LSB
         from its own WebCodecs and drops 24 frames of WebM Opus, and the lossy codecs differ by 79 to 145 dB.
-      - WebCodecs trims no priming, and Safari fails FLAC and Vorbis.
+      - WebCodecs trims no padding and no priming but Opus's pre-skip, and Safari fails FLAC and Vorbis.
 24. **Decided on 2026-11-14: our resampling ladder in kama for every voice; libsamplerate's best for converting a whole
     buffer** (area 4, question 4). The owner asked: "what is the best quality production answer? is that option 1? I
     assume if we choose option 1 we can later write it all in kama in the future?" Told yes to both, the owner took it.

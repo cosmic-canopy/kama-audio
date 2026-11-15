@@ -1081,3 +1081,278 @@ the same count of the browser's `ConvolverNode`s ran on the harness's context, i
 - **The web's per-quantum clock is a caveat:** a spinning Wasm Worker at normal priority (§ 7.4). With the machine
   at a load average of 12 to 14 its readings stall, worst in Firefox (a median of 0 µs beside maxima of 35 ms). So the
   web's maxima and over-period counts are upper bounds, and the measures are Chrome's underruns and the lag.
+
+## 10. Area 5, surveyed
+
+**What ran** (2026-11-15). Three research agents read the primary sources: W3C's Web Audio 1.1 Working Draft
+(2026-09-22), WPT's `webaudio.idl` and MDN's compatibility data; FMOD 2.03's own manuals; Audiokinetic's pages; the
+DAW engines' docs, repositories and licence files; the speech specs, the vendors' docs and the models' licence files.
+- audiokinetic.com refused automated fetches, so Wwise's rows rest on its own pages as a search index shows them, and
+  anything seen in none of them is *(unchecked)*.
+- fcc.gov refused too, so the FCC's guide is quoted from the search index.
+- *Measured* marks what ran in the pinned browsers here.
+
+**Nothing here is a decision.** It is the evidence for area 5's feature map ([FEATURES.md](FEATURES.md)), its order,
+the DAW's question and speech's.
+
+### 10.1 Web Audio 1.1 and the game middleware
+
+**Web Audio 1.1 as the browsers ship it** (MDN's compatibility data). Every 1.0 node ships in Chrome and Firefox,
+except:
+- Firefox lacks `AudioParam.automationRate`, `cancelAndHoldAtTime`, `AudioListener`'s `AudioParam`s (it keeps
+  `setPosition` and `setOrientation`), `OfflineAudioContext.suspend` and `latencyHint`;
+- Chrome lacks `MediaStreamTrackAudioSourceNode`, which Firefox has had since 68.
+
+What 1.1 adds over 1.0, and who ships it:
+
+| 1.1's addition | Chrome | Firefox |
+|---|---|---|
+| `setSinkId`, `sinkId`, `onsinkchange`, `AudioSinkOptions { type: "none" }` | 110 | no |
+| `onerror` | 128 | no |
+| the `"interrupted"` state | 136 | no |
+| `playbackStats` (`AudioPlaybackStats`) | 146 | no |
+| `renderSizeHint` and `renderQuantumSize` | 153 | no |
+| `OfflineAudioContext.close()` | 158 | no |
+| `AudioWorkletGlobalScope.port` | no | 138 |
+
+1.1 also has an offline render of open length, rendered in chunks (`length: null`, `startRendering(chunkSize)`), with
+support not checked. The editor's draft adds a `makeupGain` parameter to `DynamicsCompressorNode`. 1.1 has no render
+capacity API.
+
+**What Web Audio has that the middleware has not:**
+- `ConstantSourceNode`;
+- `IIRFilterNode` with arbitrary coefficients;
+- a parameter driven at audio rate by a node (`connect(param)`, `computedValue`).
+
+**What the middleware has that Web Audio has not.** This is the upper tier's ground (decision 2):
+- **The voice model:**
+  - virtual voices with a behaviour when inaudible (FMOD's `VIRTUAL_PLAYFROMSTART`; Wwise's continue, kill, virtual,
+    or kill if finite, and on return from the start or the elapsed time);
+  - priority;
+  - limits per event, per bus and per sound group, with stealing by oldest, furthest, quietest or none, and FMOD's
+    cooldown;
+  - Wwise's HDR window, which moves the volume threshold with the loudest sound.
+- **Events and parameters:**
+  - continuous, discrete and labelled parameters, local or global (Wwise's RTPCs, its switches per object and its
+    states globally);
+  - built-in parameters: distance, direction, elevation, speed, cone angle, and Wwise's obstruction, occlusion,
+    diffraction and transmission;
+  - FMOD's timeline with logic markers, and callbacks on markers and beats.
+- **Variations:**
+  - FMOD's multi instruments (shuffle, random, sequential) and scatterers (spawn rate, distance, random pitch and
+    volume);
+  - Wwise's random, sequence, switch and blend containers;
+  - Godot's `AudioStreamRandomizer` (random without repeats, weights, random pitch and volume).
+- **Interactive music:**
+  - a tempo and bar grid (FMOD's tempo markers, Wwise's grid and cues, Unreal's Quartz clock);
+  - quantized transitions (now, next beat, next bar, next cue, exit cue) with fades or a transition segment;
+  - horizontal sequences (Wwise's playlists, Godot's `AudioStreamPlaylist`);
+  - vertical layers (Godot's `AudioStreamSynchronized`, FMOD's tracks under parameters);
+  - stingers.
+
+  Unreal's Quartz is the clearest form: a clock with a tempo and meter, `PlayQuantized` on a boundary, and
+  notifications on each.
+- **Mixing:**
+  - buses (FMOD's channel groups, Wwise's busses, Unreal's submixes);
+  - sends and returns, before or after the fader;
+  - sidechains (FMOD's sidechain connection and effect, Wwise's meter to a parameter, Godot's compressor);
+  - VCAs, which scale volumes and are not in the signal path;
+  - snapshots, overriding or blending by intensity (FMOD) or states on bus properties (Wwise);
+  - Wwise's auto-ducking.
+- **Dialogue and localization:**
+  - a sound chosen by key at play (FMOD's programmer sounds and audio tables, Wwise's external sources);
+  - Wwise's dialogue events over switch paths;
+  - per-language sets and banks.
+- **Spatial,** beyond decision 20's rungs:
+  - FMOD's five rolloffs and custom curves, and Wwise's curves for volume, sends, filters, spread and focus;
+  - Doppler, which Web Audio lacks;
+  - spread and extent, a 2D-to-3D blend, head-relative sounds, several listeners, and emitter clustering;
+  - rooms, portals and diffraction (Wwise Spatial Audio), and FMOD's geometry for occlusion.
+- **Analysis:**
+  - FMOD's FFT, spectral centroid and metering info;
+  - loudness meters to BS.1770 and R 128 (FMOD's DSP and Studio meter, Wwise's view);
+  - Wwise's loudness normalization per source (−23 LUFS by default).
+
+  Published game targets are about −24 LUFS ±2 LU for a console and at most −1 dBTP (Audiokinetic's summary of
+  PlayStation's guidance; ASWG-R001's own text was not found).
+- **Output:**
+  - audio objects and 7.1.4 beds (FMOD's object panner and Windows Sonic, Dolby Atmos and PHASE outputs, and Wwise's
+    audio objects through its System Audio Device);
+  - ports for a controller's speaker, a personal channel and vibration;
+  - haptics (Wwise Motion, with Meta Quest through OpenXR since 2025.1.6; FMOD's haptics instrument and vibration
+    ports).
+- **Tools:**
+  - banks of sound data, loaded whole or with samples on demand;
+  - live update from the authoring tool;
+  - profilers that capture CPU, memory, voices and levels;
+  - FMOD's API capture with command replay, and Wwise's capture log and voice inspector.
+
+**Built-in effects in at least two of FMOD, Wwise, Unreal and Godot:**
+- gain and delay;
+- parametric EQ and filters;
+- distortion;
+- compressor, expander, limiter and multiband dynamics;
+- algorithmic reverb (FMOD's I3DL2 SFX reverb, Wwise's RoomVerb and Matrix Reverb) and convolution;
+- chorus, flanger, phaser and tremolo;
+- pitch shift and time stretch;
+- channel routing, stereo panning, and recording;
+- an analyser and meters.
+
+### 10.2 The DAW engines
+
+**What a DAW's engine does, and who does it.** Tracktion Engine (TE, GPLv3 or commercial, on JUCE), Ardour's libardour
+(GPLv2+), REAPER, Bitwig Studio and Ableton Live (closed), and JUCE's `AudioProcessorGraph` (AGPLv3 or commercial):
+- **The transport and the tempo map:** a piecewise function from beats to samples, with tempo curves and meter changes
+  (TE's tempo sequence, Ardour's tempo and meter map, REAPER's envelope). Musical material is kept in beats and
+  converted every block, and a plugin is handed the position (CLAP's transport event, VST3's `ProcessContext`). JUCE
+  has no map, only a plugin's `AudioPlayHead`.
+- **Clips on tracks:** audio and MIDI clips with loop points, fades, crossfades where they overlap, and gain (TE's
+  clips, Ardour's regions in playlists, REAPER's items holding takes, Live's and Bitwig's arranger and launcher). A
+  reader streams each clip from a disk thread and applies its fades as curves.
+- **Sample-accurate automation:** curves with shapes (TE's Bezier curves and modulators such as an LFO or an envelope
+  follower; REAPER's point shapes; Bitwig 6's loopable automation clips, March 2026). Done by timestamped events inside
+  a block (CLAP's events, VST3's parameter queues) or by splitting the block at a breakpoint. JUCE 9's "AudioProcessor
+  v2", in preview in May 2026, is its first step there.
+- **Plugin delay compensation:** every engine relies on each node reporting its own latency. TE's nodes report
+  `latencyNumSamples`, and the graph inserts delays at every sum point when it is built. Ardour 6 compensates along
+  every path, sends, inserts and sidechains included, and aligns capture with the ports' latencies. Live delays every
+  track to the longest. JUCE's graph inserts delays but does not report its total. CLAP lets a plugin change its
+  latency only while it is deactivated (`request_restart`).
+- **Sidechain:** a second input bus fed by a tap on another track (REAPER: any plugin; JUCE: an auxiliary bus in
+  `BusesLayout`). The ordering and the compensation must both respect that edge.
+- **Buses, sends, folders and VCAs:** weighted edges, tapped before or after the fader.
+- **Recording:** the audio thread pushes into a FIFO and a disk thread writes it; a take is placed at its capture time
+  minus the round trip. Punch and loop ranges, and take lanes with comping (REAPER 7, 2023; Bitwig 4, 2021; Live 11,
+  2021; TE's `CompManager`).
+- **Freeze, bounce and render:** the same graph without the device's clock, as fast as the CPU allows, each plugin told
+  it is offline (JUCE's `setNonRealtime`, CLAP's `render` extension). Freeze is a bounce of a subgraph.
+- **MIDI:** note expression and MPE (TE, Live 11, Bitwig's per-note expressions). CLAP's note dialects are its own,
+  MIDI 1, MPE and MIDI 2. VST3 3.8 added MIDI 2.0 interfaces.
+- **Sync:** Ableton Link (GPLv2+ or proprietary), MIDI clock, MTC and LTC.
+- **Warping:** clips stretched and pitched through élastique (commercial), Rubber Band (GPL) or SoundTouch (LGPL), and
+  in TE also Signalsmith Stretch (MIT).
+- **Undo and the project:** TE's edit is a `ValueTree` with an `UndoManager`; Ardour keeps memento commands in a
+  history file, so undo survives reopening. CLAP's undo extension is a draft.
+- **Rendering on many cores:** TE's `tracktion_graph`, usable without the engine, has a lock-free multi-threaded player
+  with a thread pool. Ardour runs its process graph on N DSP threads woken by a semaphore, with a separate disk
+  thread. REAPER's anticipative FX renders plugin chains about 200 ms ahead on workers, synchronously for a track being
+  monitored.
+- **Plugin hosting and crashes:** Bitwig hosts plugins in separate processes in five modes, from all in Bitwig's own to
+  each plugin alone, and reloads a crashed one. REAPER can run each plugin in its own process. Ardour hosts in its own
+  process by policy: a sandbox costs two context switches of about 30 µs per call, at 256 to 768 calls a block. TE and
+  JUCE host in their own process; JUCE hosts no CLAP.
+
+**Which of these are properties of the graph, which a game also uses:**
+- sample-accurate automation and timestamped events;
+- each node's reported latency and tail, with compensation at the sum points. A game's lookahead limiter, its
+  convolution and its HRTF all have latency;
+- sidechain inputs, which is how the middleware ducks;
+- buses and sends;
+- an offline render faster than real time: a bounce, a deterministic test, a cinematic, or baking;
+- a DAG rendered across cores, with a pool a processor may borrow (CLAP's `thread-pool`);
+- the device's input and output latency, as the platform reports it;
+- a beat clock for quantized transitions. FMOD's and Wwise's interactive music both have one (§ 10.1), so a tempo and
+  a bar clock belong to the middleware, and only an editable tempo and meter map is a DAW's alone.
+
+**What is a DAW's alone:** the editable tempo and meter map with positions in beats; clips on tracks with fades,
+crossfades and warp markers; punch and loop recording, takes and comping; plugin hosting (CLAP, VST3, WebCLAP), plugin
+state and process isolation; sync to other machines; stem export; the undo history and the project document.
+
+**Precedent for the split:** TE ships `tracktion_graph` as a layer usable without the engine, and JUCE keeps
+`AudioProcessorGraph` apart from any session model. libardour fuses the two.
+
+**The plugin standards:**
+- **CLAP** (MIT), 1.2.10. Its stable extensions include audio ports (with surround and Ambisonics), note ports,
+  latency, tail, state, params (with modulation per note, key, channel and port), render, voice info, thread pool,
+  remote controls and presets.
+- **WebCLAP (WCLAP):** CLAP's ABI exported from a wasm module. The module exports `clap_entry` and a growable function
+  table, and its threads are instances sharing one memory, which needs an isolated page. In a browser the plugin is
+  wrapped as an `AudioWorkletNode`. It started with Signalsmith Audio (CLAP issue #416, 2024; a WAC 2025 talk), and
+  openDAW has hosted WCLAPs since 8 October 2026. Its C++ host is MIT, and its bridge, which presents a WCLAP to a
+  native DAW, is BSL-1.0.
+- **VST3** has been MIT since 3.8.0 (October 2025). **LV2** is 0BSD, and Apple's AudioUnitSDK Apache-2.0.
+- **Web Audio Modules 2.0** (MIT, still alpha) is a JavaScript plugin API whose processor runs in the AudioWorklet.
+  WCLAP is a C ABI in wasm, so one binary serves a native host (through the bridge) and the web.
+
+**Time-stretching, by licence:** Signalsmith Stretch (MIT, polyphonic, best between 0.75× and 1.5×, with a wasm build)
+is the only permissive one fit for music. Rubber Band is GPL-2.0+ or commercial, Bungee MPL-2.0, SoundTouch LGPL-2.1,
+and élastique commercial. Sonic (Apache-2.0) is for speech.
+
+**Metering and finishing:** ITU-R BS.1770-5 (2023) and EBU R 128 (2023): K-weighting, momentary (400 ms), short-term
+(3 s) and gated integrated loudness, loudness range, and true peak by 4× oversampling (target −23 LUFS, at most
+−1 dBTP). libebur128 is MIT, in portable C. Dither is TPDF with optional noise shaping, applied last, after any rate
+conversion.
+
+**MIDI:**
+- **On the web,** Web MIDI is in Chrome (behind a permission prompt since 124) and Firefox (since 108, behind a site
+  permission). Safari has none (WebKit bug 107250).
+- **MIDI 2.0** is in no browser and no spec. Natively it is in CoreMIDI (`MIDIEventList`), Windows MIDI Services
+  (Windows 11, from February 2026), ALSA (kernel 6.5) and Android 13.
+
+**Licences that fence the package** (MIT OR Apache-2.0): TE, JUCE, Ardour, Rubber Band and Ableton Link can be studied
+but not linked.
+
+### 10.3 Speech
+
+The facts kyoten's `docs/design/accessibility.md` questions 4 and 5 marked *not checked*, checked against the
+specs, the vendors' documentation and the projects' licence files. *Measured* rows ran in the pinned browsers
+(`.scratch/aud-probe-speech/`, which reads the API's surface and speaks nothing).
+
+**Text to speech:**
+- **Web Speech's synthesis is in every browser and cannot reach Web Audio.**
+  - *Measured:* in Chrome 157 and Firefox 160, `speechSynthesis` has only `speak`, `cancel`, `pause`, `resume`,
+    `getVoices`, its three states and `onvoiceschanged`. There is no stream, node or sink.
+  - The proposal to add a `MediaStreamTrack` output (WICG issue #69) has had no activity since 2019.
+  - So the engine cannot place, mix or send the platform's voice. It can only duck its own mix on the utterance's
+    `start` and `end` events.
+  - Chrome's "Google" voices and Edge's "Online (Natural)" voices send the text to a server; the OS's voices are local.
+- **Natively, three of four OSes hand back samples:**
+  - Apple: `AVSpeechSynthesizer.write(_:toBufferCallback:)` gives `AVAudioPCMBuffer`s, on iOS 13 and macOS 10.15.
+  - Windows: WinRT's `SynthesizeTextToStreamAsync` gives audio in memory, and SAPI's `SetOutput` writes to a stream.
+  - Android: `synthesizeToFile`, with PCM chunks through `onAudioAvailable` (API 24).
+  - Linux: Speech Dispatcher plays the audio itself, and its protocol returns none. An engine called directly does
+    (espeak-ng's callback, GPL-3).
+- **Local voice models, which give samples on every leg the web included:**
+  - **Kokoro-82M:** code and weights Apache-2.0, 82 to 88 MB at 8 bits. It runs in a browser through ONNX in wasm or
+    WebGPU. Its JS port's phonemizer wraps espeak-ng (GPL-3), which a build must avoid.
+  - **Kitten TTS 2:** nano and pico, 17 MB and 8 MB a language, Apache-2.0.
+  - **Piper:** the original is MIT and archived, and development moved to a GPL-3 fork. Each voice's licence follows
+    its dataset's chain, which must be walked.
+  - **sherpa-onnx** (Apache-2.0) runs Piper, Kokoro and Kitten natively and in wasm.
+- **Xbox's guideline 119** has a player's typed chat "synthesized … and broadcast on the voice channel". That needs the
+  voice as samples on every platform; on the web only a model gives them. XAG is guidance, not a certification gate.
+
+**Speech to text:**
+- **Web Speech's recognition now takes the page's own audio, and can stay on the device:**
+  - *Measured:* Chrome 157 and Firefox 160 both have `SpeechRecognition` with `processLocally`, `available()` and
+    `install()`. For en-US on the device, `available()` answered `downloading` in Chrome and `downloadable` in
+    Firefox.
+  - `start(track)` takes a `MediaStreamTrack` in Chrome 135+ and Firefox 160 (Mozilla's intent to ship). So the
+    engine's output, through a media-stream destination, can feed it. The track argument could not be told from the
+    surface; it is the vendors' word.
+  - Firefox's recognition, new in 160 (10 November 2026), is on the device only, and desktop only.
+  - Chrome sends audio to a server unless `processLocally` is set.
+  - Safari has only `webkitSpeechRecognition`, with no track input, on the device only where the locale has a model.
+- **Natively:**
+  - Apple's `SFSpeechAudioBufferRecognitionRequest` (with `requiresOnDeviceRecognition`) and, on 26, `SpeechAnalyzer`
+    take the app's own buffers.
+  - Android 13's `EXTRA_AUDIO_SOURCE` feeds an on-device recognizer the app's audio, though a recognizer may ignore it.
+  - Windows has no production API that takes the app's frames on the device: its dictation is a web service, and its
+    on-device model is experimental. Linux has no service.
+- **Local models, on every leg:**
+  - **Moonshine:** MIT code and English models. It streams, Tiny is 26M parameters, and it runs in wasm.
+  - **whisper.cpp:** MIT code and weights. tiny is 31 MB at 5 bits and runs 2 to 3 times real time in a browser,
+    but it does not stream.
+  - **sherpa-onnx's streaming Zipformer:** Apache-2.0, 41 MB.
+  - **Vosk:** a 40 MB English model, Apache-2.0.
+  - **Silero VAD** (MIT, about 2 MB) or libfvad (BSD-3, no model) find where speech starts.
+
+**The law:** the US CVAA has applied to games' voice and text chat since 1 January 2019. It asks for a mode that needs
+no hearing and one that needs no speech, and names no technology. The FCC's guide gives text to speech for chat and
+captions of voice chat as ways to comply. This is a reading of the text, not legal advice.
+
+**What both directions need from the audio engine:**
+- frames tapped from any node, the microphone's or a remote voice's, carried to the program's thread for a recognizer
+  or an encoder;
+- a source the program feeds with samples, from a voice model, the OS's synthesis or a decoded remote voice;
+- on the web, the engine's output as a `MediaStreamTrack`, for the browser's recognizer and for WebRTC.

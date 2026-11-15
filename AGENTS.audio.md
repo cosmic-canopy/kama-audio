@@ -25,60 +25,75 @@ It is the audio half of kyoten's rule that each engine module is built on a gene
 
 **Seeded on 2026-11-13 with `kama seed` on kama 0.9.938+g94365be5 (kyoten's pin). Nothing is built.** A design pass
 comes before any code, as `@kama/graphics`' did. **Its research is done and measured ([RESEARCH.md](RESEARCH.md)).
-Areas 1 to 3 are decided (§ Decided, 1 to 19), and area 4's questions 1 to 4 (§ Decided, 20 to 24),** and their rows
-are in [ROADMAP.md](ROADMAP.md).
+Areas 1 to 4 are decided (§ Decided, 1 to 26),** and their rows are in [ROADMAP.md](ROADMAP.md), AUD-1 to AUD-28.
+Area 4 finished on 2026-11-14 with streaming (25, after P8) and a long convolution reverb (26, after P9).
 
-**The next session finishes area 4: question 5, streaming (P8), and question 6, a long convolution reverb (P9).**
-Both are planned in § The design pass, 4. Unlike P5 to P7, both need real-time runs: underruns in running contexts,
-idle and under load, on both web routes and natively. So they build on area 3's harness (`aud-probe-routes/` for the
-two routes, `aud-probe-device/` and `aud-probe-parallel/` for native real time). Then area 5, the feature map and the
-order of work. **Both are ready to run:**
-- their plans are in § The design pass, 4, items 5 and 6 (*Built from*, *How*);
-- P9's impulse response is staged (`area4/fixtures/ir_hall_48000.wav`);
-- area 3's harness was re-run on 0.9.945 on 2026-11-14 and matches § 7. The routes made the same hashes on both
-  routes in both browsers and natively, and the device probe made the same cases, periods and panic recoveries.
-  Each probe's 0.9.943 results are kept beside it as `results-0.9.943/`.
-- **The Mac's pin is kyoten's 0.9.945 (`c474b5e9`),** taken from the Mac on 2026-11-13 at the owner's word (kyoten
-  `9b679c5`, every suite with 0.9.943's results). It is built from a clean clone of `../kama`, kama's working clone on
-  this Mac (once `../cstar`, renamed on 2026-11-14). On it:
-  - KAUD-1 and KAUD-3 are fixed and retired, so a program checks by any path;
-  - KAUD-2, KAUD-4, KAUD-5 and KAUD-6 reproduce.
-- **Read first:** § Decided (20 to 24 above all), § The design pass, 4, and [RESEARCH.md](RESEARCH.md) § 9.
-- **What area 4 has taught so far, which P8 and P9 build on:**
-  - **kama's wasm release is `-Oz`, which no program can change (KAUD-6).** It makes view-indexed DSP 4 to 44 times
-    slower. So a kernel is an `unsafe fn` over raw pointers (`dataPtr()`, `dataPtrMut()`), and each wasm cost is
-    measured twice: at kama's `-Oz`, and at `-O3` through `.scratch/area4/tools/emcc`, which swaps the flag and
-    nothing else (`KAMA_REAL_EMCC`, `KAMA_WASM_OPT`).
-  - **`.scratch/area4/dsp/` is the shared DSP:** a real FFT and a uniformly partitioned convolver in kama (`Fft`,
-    `Filter`, `Fdl`, `Accum`), and `kernels/`, KAUD-6's repro and the FFT's timing. P9's partitioned reverb starts
-    from it. The core's FFT is pffft (decision 21), which P9 may measure beside it (`area4/dsp/fftref/`).
-  - **Every leg makes the same samples with `reproducible-float`**, and each probe proves it by hashes. A C library
-    makes them only with `-ffp-contract=off`, which the flag gives a C seam.
-  - **Inputs that must be identical on every leg are written once natively** (`aud-probe-resample/gen.c`), since a
-    C `sin` differs between legs.
-  - **P8 reuses P6's readers** (`aud-probe-decode/cdec.c` and `demux.c`): opusfile for `long_48000.opus`, and
-    WebCodecs, which drops Opus's pre-skip itself (given OpusHead as its description) and leaves the end's padding
-    for the program to trim to the container's total (RESEARCH.md § 9.3).
-- **Staged in `.scratch/area4/`:**
-  - `third_party/` holds every candidate at a pinned tag, nestegg and minimp4 included, and its `README.md` lists
-    them;
-  - `steamaudio/` holds Steam Audio 4.8.1's headers and libraries;
-  - `fixtures/` holds the test audio, and `hrtf/` the SOFA sets with `conv/`, SADIE II's D1 converted (`hrtfconv/`);
-  - `smoke/` holds the libraries built natively, natively with no FMA contraction, and in wasm.
+**The next session is area 5: the feature map and the order of work** (§ The design pass, 5):
+- a `FEATURES.md` drawn from Web Audio, the game middleware (FMOD, Wwise) and the DAW engines;
+- the `ROADMAP.md` put in order by example: a sample-exact loop (cosmic-forge's CF-24), a game's sounds, voice chat, a
+  synth on MIDI, a multitrack session with automation and bounce, and spatial sound on a headset;
+- whether a DAW's engine is a tier here or a package of its own;
+- speech, for kyoten's accessibility (KYR-76).
+
+It is mostly a survey and an ordering, with no probe planned. Each question is still asked in full (the problem, an
+example, the options, the production answer). Then the first rows are built, test-first.
+- **Read first:** § Decided, § The design pass, 5, [ROADMAP.md](ROADMAP.md), and kyoten's `docs/design/audio.md` and
+  `docs/design/accessibility.md` (its questions 4 and 5 are speech's).
+- **The pin.** The Mac's pin is still 0.9.945 (`c474b5e9`).
+  - kyoten's `.kama-version` moved to 0.9.949 on the Windows box (`9f1fdaef`, kyoten `55ca3ac`, for KY-56). That
+    commit was not on origin on 2026-11-14, whose `dev` stopped at `48a8e67f`, so the Mac could not rebuild it from a
+    clean clone. P8 and P9 ran on 0.9.945, like P5 to P7.
+  - At the next session's start: pull kama, and if kyoten's pinned commit is on origin, rebuild the Mac's pin there
+    (kyoten's `AGENTS.kyoten.md` § Build).
+  - **KAUD-4's fix** ("a dependency's declared flag is a flag of its consumer's build") is in `../kama`'s local `dev`
+    as its 0.9.949 (`dd7871ab`), not on origin. Re-run KAUD-4's repro once it lands.
+  - On 0.9.945, KAUD-1 and KAUD-3 are retired, and KAUD-2, KAUD-4, KAUD-5 and KAUD-6 reproduce.
+- **What area 4 taught, which the build rows need:**
+  - **kama's wasm release is `-Oz`, which no program can change (KAUD-6).** A kernel is an `unsafe fn` over raw
+    pointers. Each wasm cost is measured at `-Oz` and at `-O3` through `.scratch/area4/tools/emcc`, which swaps the
+    flag and nothing else (`KAMA_REAL_EMCC`, `KAMA_WASM_OPT`). The kama FFT cannot carry a long reverb's stages at
+    `-Oz`; pffft can.
+  - **Every leg makes the same samples with `reproducible-float`**, proved by hashes, and a C seam needs
+    `-ffp-contract=off`, which the flag sends it. **But a C library that calls the platform's libm is still not
+    reproducible:** pffft's twiddles came from `sinf` and differed between legs from 2,048 points up (RESEARCH.md
+    § 9.6). Any vendored C that computes tables with libm gets the same check, and the same fix (double, rounded once,
+    or the package's own math).
+  - **Inputs that must be identical on every leg are written once natively** (`gen.c` in P7 and P9), since a C `sin`
+    differs between legs.
+  - **WebCodecs drops Opus's pre-skip itself** and keeps every codec's end padding and MP3's and AAC's priming
+    (RESEARCH.md § 9.3, corrected on 2026-11-14).
+  - **A seek is exact only with pre-roll beyond the decoder's own:** 1 s for Opus (§ 9.5). AUD-26 measures each codec.
+- **Staged in `.scratch/` (git-ignored):**
+  - `area4/rt/` is the real-time harness P8 and P9 built (library `area4rt`), with `check/` as its smoke test (the
+    same hash natively and in both browsers). It provides:
+    - the device natively (miniaudio on CoreAudio at 128 frames) and the Wasm Audio Worklet on the web;
+    - each callback timed, and each phase's statistics printed as one row;
+    - the device's own underruns (CoreAudio's overloads, Chrome's `playbackStats`) and the lag;
+    - the load, workers (real-time and joined to the workgroup natively), files the page prefetches, a ring of
+      frames, and the hash.
+
+    **Its web clock is a spinning Wasm Worker at normal priority.** Under a loaded machine it stalls, so web maxima
+    are upper bounds.
+  - `aud-probe-stream/` (P8) and `aud-probe-convolver/` (P9), each with its `run.sh` and `summarize.py`. P9 holds the
+    patched pffft (`app/csrc/pffft/`) and the per-size bit check (`pfbits/`).
+  - `area4/`: `third_party/` (every candidate at a pinned tag), `steamaudio/`, `fixtures/` with `hrtf/` and
+    `hrtfconv/`, `smoke/` (the libraries natively and in wasm), and `dsp/` (the shared kama DSP).
 - **The Mac's toolchain** (emsdk's Python, Homebrew's paths, the pinned browsers) is in kyoten's `AGENTS.kyoten.md`
   § Build, *On macOS*.
   - ffmpeg 9.0.2 (Homebrew) has libopus, LAME and Apple's AAC encoder;
   - CMake 4 needs `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` for libsamplerate.
-  - The machine is shared with the kama project's own session, whose test matrix lifts the load average to 5 to 10.
+  - The machine is shared with the kama project's own session, whose test matrix lifts the load average to 5 to 21.
     A timing says what load it ran under.
-- **The probes' harness** is in `.scratch/`, which is git-ignored:
-  - `env.sh` sets the toolchain;
+- **The probes' harness** is in `.scratch/`:
+  - `env.sh` sets the toolchain. In zsh, write a flag list out, since `$F` does not split;
   - `browsers.sh` runs a page headless and muted, with the autoplay switches that let a realtime context start.
-    `CHROME_EXTRA`, `FF_EXTRA_PREFS` and `RUN_PATH` add flags, prefs and a query;
+    `CHROME_EXTRA`, `FF_EXTRA_PREFS` and `RUN_PATH` add flags, prefs, and the page and its query;
   - `serve.mjs` serves a page, isolated or not, and collects its printed rows;
   - a trusted click comes from `@kama/window`'s `tools/webtest.mjs`, as `aud-probe-context/act/` uses it;
   - KR-387 (0.9.943) lets `kama run --headless` start sound. But `kama run` serves one artifact, so the two-build web
     route still needs this harness (KAUD-5).
+  - A manifest's paths may not leave the project with `..` (link a folder in instead), and `ldflags` paths resolve
+    against the working directory. A published package vendors its C as `csources` instead.
 
 Waiting, and not area 4's:
 - **Safari's measurements, deferred by the owner** (2026-11-13: "we can do safari measurements later"). They take the
@@ -92,9 +107,13 @@ Waiting, and not area 4's:
 - WASAPI's exclusive and `IAudioClient3` modes, and MMCSS for render workers (decisions 17 and 19), on the Windows box.
 - What `reproducible-float` costs the DSP (decision 14), once there is DSP.
 - KAUD-2, KAUD-4, KAUD-5 and KAUD-6 upstream.
-- Area 4's open ends, each for when its row is built: pffft's SSE path compared on the Windows box (decision 21); the
-  loop fixture's MP3 that WebCodecs decodes 16 dB from ours (RESEARCH.md § 9.3); MagLS with a covariance constraint
-  for the SH HRIRs (§ 9.2).
+- Area 4's open ends, each for when its row is built:
+  - pffft's SSE path compared on the Windows box (decision 21), with its twiddles computed in double;
+  - the loop fixture's MP3 that WebCodecs decodes 16 dB from ours (RESEARCH.md § 9.3);
+  - MagLS with a covariance constraint for the SH HRIRs (§ 9.2);
+  - a stream's bytes arriving progressively (AUD-27);
+  - each other codec's exact seek (AUD-26);
+  - the convolver's partition layout for other response lengths (AUD-28).
 
 **It is designed and built on the Mac Mini, in parallel with kyoten's graphics track on Windows** (the owner,
 2026-11-13: "the mac kyoten clone can then design it and develop it in parallel to what we are doing here for

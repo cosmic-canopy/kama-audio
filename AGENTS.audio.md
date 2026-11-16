@@ -55,14 +55,39 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
     it on every leg in 5 of 5 runs.
 - **Decided on the way:** where a call scheduled ahead waits (32, in its node, as in Web Audio) and that a flush lands
   whole (33).
-- **Found on the way: KAUD-7.** std's collections trap when their allocator has no room, so every declared capacity
-  takes its storage as the ring's does, through the private `Slots` in `src/rt/ring.kama`.
+- **Found on the way: KAUD-7 and KAUD-8.**
+  - std's collections trap when their allocator has no room (KAUD-7). So every declared capacity takes its storage as
+    the ring's does, through the private `Slots` in `src/rt/ring.kama`.
+  - `try new(allocator:)` into a `Shared` traps when the object fits and its control block does not (KAUD-8). That is
+    a bug, since SPEC says `try new` answers `None`.
 - **Next:**
-  - **the slots (AUD-2).** Its questions come first:
-    - how a node's count is kept: a `Shared` per node, drawn from the injected allocator by `new(allocator:)` as
-      `@kama/gpu`'s handles are, or a count in the program side's slot table, with no allocation per node;
-    - the generation's width;
-    - the table's own storage, since KAUD-7 rules out std's `SlotMap`;
+  - **the slots (AUD-2).** Its questions go to the owner before any code, each with what was found on 2026-11-15:
+    1. **What keeps a node's count.** Decision 4 puts the count on the program's side; this asks what holds it.
+       - *A `Shared` per node,* drawn from the injected allocator by `try new(allocator:)`:
+         - its control block traps at an arena's limit even where the node itself fits (KAUD-8);
+         - a bump arena gives nothing back before its reset, and Web Audio's sources are single-use, one per sound,
+           so a game spends its arena as it plays.
+       - *A count in the program side's slot table:*
+         - the handle holds the context's state, a slot and a generation. Its copy counts the row up and its drop
+           counts it down, as `@kama/gpu`'s `StateHold` counts its C block by hand (its wgpu handles count through
+           webgpu.h's `AddRef` and `Release`);
+         - the table is taken once, at the context's make, with a declared capacity;
+         - a full table is an error at the create call;
+         - nothing is allocated per node.
+       - *The recommendation is the table.* It alone answers at a limit today, and a release costs the arena nothing.
+    2. **What a drop does when the backlog is full.** A destructor cannot return an error, and decision 8's error is a
+       call's.
+       - *The proposal:* the drop marks its row, and a flush sends the marked rows' releases once the backlog has
+         drained.
+       - So a release never needs room, and never overtakes a command that names its node.
+       - The table's capacity bounds the releases.
+    3. **The generation's width.** Commands and reports are ordered, so the generation is a check that catches a bug,
+       and it lets a report name its node.
+       - *The proposal:* a 32-bit slot and a 32-bit generation in one int64.
+       - A slot whose generation would wrap is retired.
+    4. **The table's storage.** KAUD-7 rules out std's `SlotMap`. *The proposal:* the private `Slots`, moved into a
+       file of its own in `audio::rt`, with the free rows chained in the order they were freed, so a freed slot waits
+       longest before its reuse.
   - **then the first commands, in `audio`:** a flat command type naming slots (a node made, a `connect()`, a start
     with its frame, a parameter's event, a release), and the late count, which is a node's rule (decision 32). AUD-1's
     row closes with them;
@@ -81,11 +106,19 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
     the program. That removes one of KAUD-5's three causes. The other two remain: one build makes one artifact, and
     KR-327's shared-memory flag is still open.
   - On 0.9.960, KAUD-2 and KAUD-6 reproduce, and KAUD-1, KAUD-3 and KAUD-4 are retired.
+  - **kama's own dev has reached 0.9.964 since** (read 2026-11-15). Nothing in 0.9.961 to 0.9.964 moves an open
+    entry. **KR-332, ruled the same day and built next on the Windows box, answers KAUD-6:**
+    - a wasm `--release` compiles and links at `-O3`;
+    - a size-first program sets `release.optimize`, and names the code it wants fast under `release.speed`.
+
+    The pin moves at the owner's word.
 - **What area 4 taught, which the build rows need:**
-  - **kama's wasm release is `-Oz`, which no program can change (KAUD-6).** A kernel is an `unsafe fn` over raw
-    pointers. Each wasm cost is measured at `-Oz` and at `-O3` through `.scratch/area4/tools/emcc`, which swaps the
-    flag and nothing else (`KAMA_REAL_EMCC`, `KAMA_WASM_OPT`). The kama FFT cannot carry a long reverb's stages at
-    `-Oz`; pffft can.
+  - **kama's wasm release is `-Oz`, which no program can change (KAUD-6),** until KR-332 is built. It makes `-O3`
+    the default.
+    - A kernel is an `unsafe fn` over raw pointers.
+    - Each wasm cost is measured at `-Oz` and at `-O3` through `.scratch/area4/tools/emcc`, which swaps the flag and
+      nothing else (`KAMA_REAL_EMCC`, `KAMA_WASM_OPT`).
+    - The kama FFT cannot carry a long reverb's stages at `-Oz`; pffft can.
   - **Every leg makes the same samples with `reproducible-float`**, proved by hashes, and a C seam needs
     `-ffp-contract=off`, which the flag sends it. **But a C library that calls the platform's libm is still not
     reproducible:** pffft's twiddles came from `sinf` and differed between legs from 2,048 points up (RESEARCH.md
@@ -139,7 +172,7 @@ Waiting, and not area 4's:
   each OS's echo cancellation (decision 18).
 - WASAPI's exclusive and `IAudioClient3` modes, and MMCSS for render workers (decisions 17 and 19), on the Windows box.
 - What `reproducible-float` costs the DSP (decision 14), once there is DSP.
-- KAUD-2, KAUD-5 and KAUD-6 upstream.
+- KAUD-2, KAUD-5, KAUD-6 (KR-332, ruled), KAUD-7 and KAUD-8 upstream.
 - Area 4's open ends, each for when its row is built:
   - pffft's SSE path compared on the Windows box (decision 21), with its twiddles computed in double;
   - the loop fixture's MP3 that WebCodecs decodes 16 dB from ours (RESEARCH.md § 9.3);

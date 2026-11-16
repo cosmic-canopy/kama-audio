@@ -53,6 +53,9 @@ round a loop near its end, not exact to the sample. Web Audio's `AudioBufferSour
 - **Questions for when it comes up:**
   - the first cut of `audio::` (its modules, and which names are exported): decided, 31;
   - where a call scheduled ahead waits, and whether a frame's calls land together: decided, 32 and 33;
+  - the slots' (AUD-2): what keeps a node's count, what a drop does when the backlog is full, the generation's
+    width, and the table's storage. AGENTS.audio.md § Where things stand gives each one's options and what was
+    found;
   - whether cosmic-forge's page is isolated, which decides the route it tests first;
   - the loop seam's test: its fixture, and how a seam is compared.
 - **Done:**

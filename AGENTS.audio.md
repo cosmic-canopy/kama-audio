@@ -25,7 +25,7 @@ It is the audio half of kyoten's rule that each engine module is built on a gene
 
 **Seeded on 2026-11-13 with `kama seed` on kama 0.9.938+g94365be5 (kyoten's pin). The design pass is done
 (2026-11-15): areas 1 to 5 are decided (§ Decided, 1 to 30), and so are the first slice's module cut (31) and its
-command protocol's timing (32 and 33),** on the
+command protocol's timing (32 and 33) and its slots (34 and 35),** on the
 evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This repository's documents, each to one purpose:
 - [FEATURES.md](FEATURES.md) is every feature the library will have, with its rungs, status, example, test and budget
   (decision 27);
@@ -53,47 +53,44 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
     either.
   - **A flush publishing each item on its own** is visible only from another thread. The backlog's thread case catches
     it on every leg in 5 of 5 runs.
-- **Decided on the way:** where a call scheduled ahead waits (32, in its node, as in Web Audio) and that a flush lands
-  whole (33).
+- **Decided on the way:**
+  - on 2026-11-15, where a call scheduled ahead waits (32, in its node, as in Web Audio) and that a flush lands whole
+    (33);
+  - on 2026-11-16, AUD-2's four questions: a node's count in the program side's slot table, a public `audio::rt`
+    primitive, its ids 32 + 32 bits (34), and a dropped node's release sent after the backlog (35).
 - **Found on the way: KAUD-7 and KAUD-8.**
   - std's collections trap when their allocator has no room (KAUD-7). So every declared capacity takes its storage as
     the ring's does, through the private `Slots` in `src/rt/ring.kama`.
   - `try new(allocator:)` into a `Shared` traps when the object fits and its control block does not (KAUD-8). That is
     a bug, since SPEC says `try new` answers `None`.
 - **Next:**
-  - **the slots (AUD-2).** Its questions go to the owner before any code, each with what was found on 2026-11-15:
-    1. **What keeps a node's count.** Decision 4 puts the count on the program's side; this asks what holds it.
-       - *A `Shared` per node,* drawn from the injected allocator by `try new(allocator:)`:
-         - its control block traps at an arena's limit even where the node itself fits (KAUD-8);
-         - a bump arena gives nothing back before its reset, and Web Audio's sources are single-use, one per sound,
-           so a game spends its arena as it plays.
-       - *A count in the program side's slot table:*
-         - the handle holds the context's state, a slot and a generation. Its copy counts the row up and its drop
-           counts it down, as `@kama/gpu`'s `StateHold` counts its C block by hand (its wgpu handles count through
-           webgpu.h's `AddRef` and `Release`);
-         - the table is taken once, at the context's make, with a declared capacity;
-         - a full table is an error at the create call;
-         - nothing is allocated per node.
-       - *The recommendation is the table.* It alone answers at a limit today, and a release costs the arena nothing.
-    2. **What a drop does when the backlog is full.** A destructor cannot return an error, and decision 8's error is a
-       call's.
-       - *The proposal:* the drop marks its row, and a flush sends the marked rows' releases once the backlog has
-         drained.
-       - So a release never needs room, and never overtakes a command that names its node.
-       - The table's capacity bounds the releases.
-    3. **The generation's width.** Commands and reports are ordered, so the generation is a check that catches a bug,
-       and it lets a report name its node.
-       - *The proposal:* a 32-bit slot and a 32-bit generation in one int64.
-       - A slot whose generation would wrap is retired.
-    4. **The table's storage.** KAUD-7 rules out std's `SlotMap`. *The proposal:* the private `Slots`, moved into a
-       file of its own in `audio::rt`, with the free rows chained in the order they were freed, so a freed slot waits
-       longest before its reuse.
+  - **the slots (AUD-2), built test-first** (decisions 4, 34 and 35):
+    1. **The slot table,** `audio::rt`'s third primitive, beside `Slots` in `src/rt/ring.kama`, with the ring's two
+       refusals. Its cases are FEATURES.md's `slots`, in `tests/src/slots_tests.kama`, each failing first:
+       - a fresh table is empty at its declared capacity, and its storage comes from an injected allocator once and
+         goes back at the drop;
+       - a take answers an id, the slot and its generation in one int64. A full table refuses a take, and nothing
+         changes;
+       - a row's count goes up and down. The last drop marks the row, which stays taken until the audio side's report
+         frees it;
+       - marked rows come out in the order they were marked (decision 35);
+       - a freed slot is reused with the next generation, after every slot freed before it;
+       - a slot whose generation would wrap is retired.
+    2. **How a case reaches the wrap.** Four billion reuses are too many for the gate. So the table grants one named
+       function of the tests program (`friend audiotests::…[…];`) the row's generation, and the case sets it near the
+       top.
+       - It was checked on the pin on 2026-11-16: a library's grant reaches a dependent's function by its qualified
+         path, and without it the member is refused as private.
+       - It is the package's one test seam, named in its source, and the owner was told of it the same day.
+    3. **A mutation pass** over the table, as `.scratch/aud29/mutate_ring.py` makes over the ring.
+    4. **The counted handle** comes with the first node, since it holds the context's state (decision 4). Its copy
+       counts its row up and its drop counts it down.
   - **then the first commands, in `audio`:** a flat command type naming slots (a node made, a `connect()`, a start
     with its frame, a parameter's event, a release), and the late count, which is a node's rule (decision 32). AUD-1's
     row closes with them;
   - then the way back (AUD-3) and the context's options and memory (AUD-4);
   - then an `OfflineAudioContext` rendering in the declared block (AUD-9), and the first golden.
-- **Read first:** § Decided (4, 6, 9, 32 and 33 above all), ROADMAP_DETAIL.md § AUD-29, and the probes it starts from
+- **Read first:** § Decided (4, 6, 9 and 32 to 35 above all), ROADMAP_DETAIL.md § AUD-29, and the probes it starts from
   (`aud-probe-cmd` for the commands and the way back, `aud-probe-routes` for slots and a block split at a frame).
 - **The pin is 0.9.960 (`b39fbaab`) on both machines.**
   - The Windows box bumped kyoten's `.kama-version` to it on 2026-11-15, at the owner's word. It was 0.9.956 before.
@@ -391,6 +388,8 @@ Those questions stay in kyoten's `audio.md`.
      - A count the audio thread decremented would make it the thread that frees.
      - A plain handle with an explicit release would leak a slot when forgotten, and would depart from the siblings'
        RAII.
+   - **Amended on 2026-11-16:** decision 34 says what keeps the count (a row of the program side's slot table) and
+     an id's width, and decision 35 when a dropped node's release is sent.
 5. **Decided on 2026-11-13: the audio thread never waits on an allocator** (area 2, ownership). The owner: "I think
    option 1."
    - **Where memory is shared (natively, and on an isolated page).** The program's side allocates everything the
@@ -937,6 +936,8 @@ Those questions stay in kyoten's `audio.md`.
       - the DAW and speech packages are built on this package's public API only (decisions 29 and 30), and move data
         between a real-time thread and the program's the same way;
       - kama's `internal` visibility would hide it from both.
+    - **Amended on 2026-11-16:** the backlog in front of the ring (decision 33) and the slot table (decision 34) are
+      among its primitives.
 32. **Decided on 2026-11-15: a call scheduled ahead waits in its node, as in Web Audio** (AUD-29, the command
     protocol). Decisions 3, 7 and 8 had left this open: the audio side drains the ring once a quantum, so something
     has to hold a `src.start(when: 2.0)` for the 750 quanta until its time comes. The owner took the recommendation.
@@ -978,6 +979,48 @@ Those questions stay in kyoten's `audio.md`.
       - the shared route and the page route apply a frame's calls alike;
       - a call waits only until the end of its frame's `update()`, which is where the upper tier makes its calls
         (decision 10).
+34. **Decided on 2026-11-16: a node's count is kept in the program side's slot table** (AUD-2's questions 1, 3 and 4).
+    The owner took the recommendations.
+    - **One row per slot, on the program's side alone,** so the audio thread never touches a count (decision 4).
+      - A node's handle holds the context's state, its slot and its generation.
+      - A copy counts its row up and a drop counts it down, as `@kama/gpu`'s `StateHold` counts its C block by hand.
+      - A buffer is counted the same way.
+    - **Its capacity is declared** (decision 6):
+      - the table is taken once, when the context is made, from the allocator the context is handed, and never grown;
+      - a full table is an error at the call that makes a node, and nothing is made;
+      - nothing is allocated per node.
+    - **An id is a 32-bit slot and a 32-bit generation in one int64,** the field a command names a node by.
+      - A freed slot is reused with the next generation.
+      - A slot whose generation would wrap is retired, never reused.
+    - **The table is one of `audio::rt`'s public primitives,** beside `Ring` and `Backlog`, for the reasons decision 31
+      gives (the owner, 2026-11-16, asked once it was found that the tests program cannot reach an `internal`
+      module).
+      - The DAW and speech packages (decisions 29 and 30) can keep their own objects, whose ids cross to the audio
+        thread, in tables of their own of the same type.
+      - It is built and tested on its own, test-first, before the first node.
+    - **Its storage is the ring's `Slots`,** in the same file and never exported. std's `SlotMap` cannot serve, since
+      it traps when its allocator has no room (KAUD-7).
+      - The free rows are chained in the order they were freed, so a freed slot waits longest before its reuse.
+    - **Why:**
+      - The other way, a `Shared` per node drawn by `try new(allocator:)`, traps at an arena's limit even where the
+        node fits (KAUD-8).
+      - A bump arena gives nothing back before its reset, and Web Audio's sources are single-use, one per sound. So a
+        `Shared` per node would spend a game's arena as it plays, where a table's release costs the allocator nothing.
+      - Commands and reports are ordered, so the generation is a check that catches a bug, and it lets a report name
+        its node. At 32 bits one slot wraps only after four billion reuses.
+35. **Decided on 2026-11-16: a dropped node's release never needs room** (AUD-2's question 2). The owner took the
+    recommendation.
+    - **The last drop marks its row.** A flush sends the marked rows' releases once the backlog has drained, in the
+      order they were marked.
+    - **So a release is never refused, and never overtakes a command that names its node:** every such command was
+      added before the drop.
+    - **The table's capacity bounds the marked rows,** so they need no limit of their own.
+    - **What a release means is decision 4's:** the program holds the node no more. The audio side keeps it while it
+      can still sound, then reports the slot freed.
+    - **Why:**
+      - A destructor cannot return an error, and decision 8's error is a call's.
+      - A release added to the backlog could find it full.
+      - A release sent ahead of the backlog could overtake the node's own commands.
 
 ## Where the truth is
 

@@ -6,10 +6,11 @@ tested.
 - The decided design and the library's departures from kama's are [AGENTS.audio.md](AGENTS.audio.md).
 - Its history is the git log and [CHANGELOG.md](CHANGELOG.md).
 
-**Where it stands** (2026-11-15, kama 0.9.960): the first slice, AUD-29 (a sample-exact loop), is under way. The command
+**Where it stands** (2026-11-17, kama 0.9.966): the first slice, AUD-29 (a sample-exact loop), is under way. The command
 protocol's two halves are built (AUD-1): the ring it runs on, which publishes a batch with one store, and the backlog in
-front of it. Both are tested natively in debug and release and on wasm under node. The commands themselves come with
-the nodes they name. Nothing makes a sound yet. Not published.
+front of it. So is the slot table that a command names a node by (AUD-2). Each is tested natively and on wasm under
+node, in debug and release. The commands themselves come with the nodes they name. Nothing makes a sound yet. Not
+published.
 
 ## The modules
 
@@ -19,7 +20,7 @@ Decision 31 sets the first cut:
 |---|---|
 | `audio` | the lower tier, Web Audio's graph under Web Audio's names. Nothing yet |
 | `audio::sound` | the upper tier: sounds, voices, buses, snapshots and emitters. Not made yet |
-| `audio::rt` | the real-time primitives that the engine and a program's own DSP share: `Ring`, `Backlog`, `CapacityError` |
+| `audio::rt` | the real-time primitives that the engine and a program's own DSP share: `Ring`, `Backlog`, `SlotTable`, `CapacityError`, `slotOf`, `generationOf` |
 
 ## The command protocol's two halves
 
@@ -106,7 +107,60 @@ side pops.
   - a million commands flushed in batches of 5, each flush made when the ring surely has room for all of it, cross to a
     second thread: every such flush moves the whole batch, and the consumer sees each one whole.
 
-### Proved by mutation
+## The slot table
+
+**A node's handle names its row in the program side's table, and only the row's id crosses to the audio side, never a
+pointer** (decisions 4, 34 and 35). The handle comes with the first node; the table is built and tested on its own,
+before it.
+
+### `audio::rt::SlotTable<A>`
+
+- **Making one:**
+  - `SlotTable::<A>.withCapacity(capacity:)` takes its storage from `A`'s default, the global heap;
+  - `SlotTable::<A>.withCapacityAndAllocator(allocator:, capacity:)` takes it from `allocator`;
+  - each returns `Result<SlotTable<A>, CapacityError>`, and takes its storage as the ring does: once, never grown, and
+    given back at the drop. Nothing is allocated per row;
+  - a capacity below one is `BadCapacity`, and so is one above 2^32, which a 32-bit slot cannot name. That bound is
+    checked before the allocator is asked.
+- **An id is one `int64`:** the slot in its low 32 bits, the generation in its high 32. Generations start at 1, so no
+  live id is 0. `audio::rt::slotOf(id:)` and `audio::rt::generationOf(id:)` read its halves.
+- **A row's life:**
+  - **`take()`** answers the id of the row freed longest ago, counted once. A fresh table's rows count as freed at the
+    make, in slot order. It answers `None` when every row is held or retired, and then nothing changes;
+  - **`countUp(id:)`** is a copy of the handle, and **`countDown(id:)`** a drop. The last drop marks the row, behind
+    every row marked before it. The row is still held;
+  - **`nextRelease()`** answers the id of the row marked longest ago, whose release the flush sends now, or `None`
+    (decision 35). The row is still held, since the audio side keeps a node while it can still sound;
+  - **`free(id:)`** is the audio side's report. The row waits behind every row freed before it, at the next
+    generation. A row whose generation is the last, 2^32 − 1, is retired instead and never handed out again.
+- **An id that names no row in the state a call needs is refused,** never trapped: `countUp`, `countDown` and `free`
+  answer `false`, and `countOf` answers 0. That covers an id of a row's earlier generation, a slot past the table, a
+  free slot, 0 and −1, a row freed before its release was sent, and a row freed twice. Nothing a program passes ends it.
+- **What it answers:** `countOf(id:)` is the copies held; `length()` is the rows held (taken, marked, or released and
+  not yet freed); `capacity()` is the rows it was made with; `retired()` is the slots whose generations are spent.
+- **The test seam.** The table grants one function of the tests program, `audiotests::ageSlot`, a free row's
+  generation (`friend audiotests::ageSlot[ageTo];`), so the wrap case need not free a slot four billion times. It is
+  the package's only seam, named in its source.
+- **Tested** (`tests/src/slots_tests.kama`, the `slots` cases, 15 of them):
+  - a fresh table is empty at its declared capacity, with nothing retired and no release due;
+  - both refusals, and more slots than 32 bits can name refused as `BadCapacity` before the allocator is asked. On a
+    32-bit target no `isize` can pass the bound, so the case holds there by construction;
+  - the storage comes from an injected allocator exactly once, and goes back at the drop;
+  - a fresh table hands out its slots in order, at generation 1, each counted once, and refuses a take when full,
+    changing nothing;
+  - a row's count goes up with each copy and down with each drop, and the last drop marks it. A marked row is still
+    held: neither a take nor its release hands its slot out again before the report frees it;
+  - releases come out in the order the rows were marked;
+  - a freed slot is reused at the next generation, after every slot freed before it, in the order the reports freed
+    them, whatever the order of the takes and releases, and a full table is full again once they are retaken;
+  - a slot whose generation would wrap is retired, never handed out again, and its last id is refused;
+  - an id of a row's earlier generation is refused and changes nothing, and so is every id no take answered: the slot
+    just past the table, which the storage's index would otherwise wrap onto slot 0, and a freed row's next generation
+    before a take answers it.
+
+## Proved by mutation
+
+### The ring and the backlog
 
 Each mutation of `src/rt/ring.kama` runs through the whole gate (`.scratch/aud29/mutate_ring.py`), and the file is
 restored byte for byte after each. **38 of 39 mutations turn a case red, none by a hang,** since the thread cases have a
@@ -118,3 +172,18 @@ deadline.
   review.
 - **Removing `publish()`'s early return when nothing is staged** is equivalent, since it stores the same head, and it is
   dropped.
+
+### The slot table
+
+Each of 47 mutations of the table's code runs through the whole gate (`.scratch/aud29/mutate_slots.py`), and the file
+is restored byte for byte after each. **All 47 turn a case red, none by a hang.**
+- **The first pass caught 43.** Each of the four it missed showed a case too loose, and the case was sharpened:
+  - **a slot exactly at the bound passing:** the case named slot 7, and the storage's index wraps, so only the slot just
+    past the table lands on a taken row;
+  - **`nextRelease()` keeping the row's link:** the stale link only reaches the free chain's end, so a full table must
+    stay full once its slots are retaken;
+  - **a freed row left released:** an id of its next generation could then be freed before any take answered it;
+  - **`retired()` answering how many are held:** the wrap case checked it only where the two were equal.
+- **`free()` clearing the row's link** was dropped before the pass, since `nextRelease()` has already cleared it: a row
+  leaving a chain has its link cleared where it leaves, as `take()` does.
+

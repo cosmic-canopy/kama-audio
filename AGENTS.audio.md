@@ -34,25 +34,44 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
 - [SPEC.md](SPEC.md) is what is built.
 
 **Now: AUD-29, a sample-exact loop, the first slice,** built test-first, depth-first, on the web and natively.
-- **Built on 2026-11-15** ([SPEC.md](SPEC.md)):
-  - the modules' first cut (decision 31);
-  - AUD-1's two halves:
-    - `audio::rt::Ring`, which publishes a batch with one release store (`stage`, `publish`);
-    - `audio::rt::Backlog` in front of it, which flushes what the ring has room for and counts its two high-water
-      marks;
-    - both refuse a make with `audio::rt::CapacityError` (it was `RingError`);
-  - the tests program (`tests/`, one program), with its second-thread harness in `tests/src/crossing.kama`;
-  - the gate, `tools/test.sh`: the guards, `kama check`, then the tests natively in debug and release and on wasm
-    under node.
+- **Built** ([SPEC.md](SPEC.md)):
+  - on 2026-11-15:
+    - the modules' first cut (decision 31);
+    - AUD-1's two halves: `audio::rt::Ring`, which publishes a batch with one release store (`stage`, `publish`), and
+      `audio::rt::Backlog` in front of it, which flushes what the ring has room for and counts its two high-water marks.
+      Both refuse a make with `audio::rt::CapacityError`;
+    - the tests program (`tests/`, one program), with its second-thread harness in `tests/src/crossing.kama`;
+    - the gate, `tools/test.sh`: the guards, `kama check`, then the tests natively and on wasm under node.
+  - on 2026-11-17:
+    - **AUD-2's slot table, `audio::rt::SlotTable`** (decisions 4, 34 and 35), beside `Slots` in `src/rt/ring.kama`,
+      with its 15 `slots` cases in `tests/src/slots_tests.kama`, each seen red against a stub first. An id is the slot
+      in the low 32 bits and the generation in the high 32, read by `audio::rt::slotOf` and `generationOf`.
+      Generations start at 1, so no live id is 0;
+    - every wasm leg in debug and release, the release held to Closure (kama 0.9.966's KR-289; kyoten's rendering.md
+      § Decided, 2026-11-17).
 
-  22 cases, green on every leg.
-- **Proved by mutation** (`.scratch/aud29/mutate_ring.py`, through the whole gate): 38 of 39 mutations of
-  `src/rt/ring.kama` are caught, none by a hang.
-  - **The miss is the publish made relaxed,** a weak-memory race, as before: caught in one run, missed in the next. So
-    the release and acquire pair is held by review. RESEARCH.md § 6.1 found that ThreadSanitizer is not the evidence
-    either.
-  - **A flush publishing each item on its own** is visible only from another thread. The backlog's thread case catches
-    it on every leg in 5 of 5 runs.
+  37 cases, green on every leg: native debug and release, wasm debug and release.
+- **Settled while building the table, reported to the owner to object to** (each within decisions 34 and 35):
+  - the name `SlotTable`, and its calls: `take()`, `countUp(id:)`, `countDown(id:)`, `nextRelease()`, `free(id:)`,
+    `countOf(id:)`, `length()`, `capacity()`, `retired()`;
+  - an id is a bare `int64`, as decision 34 words it, not a type of its own: a `type value` would need `Equatable`
+    for `==`, and a command's field is the `int64` either way;
+  - generations start at 1, and the last is 2^32 − 1;
+  - a row has five states: free, taken, marked (its last drop made), released (`nextRelease()` handed it to the flush)
+    and retired. `free(id:)` takes only a released row, so a report can never free a row whose release was not sent;
+  - an id that names no row in the state a call needs is refused with `false`, `None` or a count of 0, never a trap;
+  - a capacity above 2^32 is `BadCapacity`, checked before the allocator is asked, and the error's message says so.
+- **Proved by mutation:**
+  - the ring and the backlog (`.scratch/aud29/mutate_ring.py`, through the whole gate): 38 of 39 mutations of
+    `src/rt/ring.kama` are caught, none by a hang.
+    - **The miss is the publish made relaxed,** a weak-memory race: caught in one run, missed in the next. So the
+      release and acquire pair is held by review. RESEARCH.md § 6.1 found that ThreadSanitizer is not the evidence
+      either.
+    - **A flush publishing each item on its own** is visible only from another thread. The backlog's thread case
+      catches it on every leg in 5 of 5 runs.
+  - the slot table (`.scratch/aud29/mutate_slots.py`, through the whole gate): **47 of 47 mutations caught,** none by
+    a hang. The first pass caught 43, and each of the four it missed showed a case too loose, now sharpened (SPEC.md
+    § Proved by mutation). `free()`'s second clearing of a row's link was dropped before the pass as redundant.
 - **Decided on the way:**
   - on 2026-11-15, where a call scheduled ahead waits (32, in its node, as in Web Audio) and that a flush lands whole
     (33);
@@ -64,31 +83,14 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
   - `try new(allocator:)` into a `Shared` traps when the object fits and its control block does not (KAUD-8). That is
     a bug, since SPEC says `try new` answers `None`.
 - **Next:**
-  - **the slots (AUD-2), built test-first** (decisions 4, 34 and 35):
-    1. **The slot table,** `audio::rt`'s third primitive, beside `Slots` in `src/rt/ring.kama`, with the ring's two
-       refusals. Its cases are FEATURES.md's `slots`, in `tests/src/slots_tests.kama`, each failing first:
-       - a fresh table is empty at its declared capacity, and its storage comes from an injected allocator once and
-         goes back at the drop;
-       - a take answers an id, the slot and its generation in one int64. A full table refuses a take, and nothing
-         changes;
-       - a row's count goes up and down. The last drop marks the row, which stays taken until the audio side's report
-         frees it;
-       - marked rows come out in the order they were marked (decision 35);
-       - a freed slot is reused with the next generation, after every slot freed before it;
-       - a slot whose generation would wrap is retired.
-    2. **How a case reaches the wrap.** Four billion reuses are too many for the gate. So the table grants one named
-       function of the tests program (`friend audiotests::…[…];`) the row's generation, and the case sets it near the
-       top.
-       - It was checked on the pin on 2026-11-16: a library's grant reaches a dependent's function by its qualified
-         path, and without it the member is refused as private.
-       - It is the package's one test seam, named in its source, and the owner was told of it the same day.
-    3. **A mutation pass** over the table, as `.scratch/aud29/mutate_ring.py` makes over the ring.
-    4. **The counted handle** comes with the first node, since it holds the context's state (decision 4). Its copy
-       counts its row up and its drop counts it down.
+  - **the counted handle, with the first node** (decision 4). It holds the context's state, its row's id, and counts
+    its row up on a copy and down at its drop. The context takes the table, the backlog and the ring from the
+    allocator it is handed, once;
   - **then the first commands, in `audio`:** a flat command type naming slots (a node made, a `connect()`, a start
-    with its frame, a parameter's event, a release), and the late count, which is a node's rule (decision 32). AUD-1's
-    row closes with them;
-  - then the way back (AUD-3) and the context's options and memory (AUD-4);
+    with its frame, a parameter's event, a release), and the late count, which is a node's rule (decision 32). The
+    flush sends the backlog, then `nextRelease()`'s releases once it has drained (decision 35). AUD-1's row closes with
+    them;
+  - then the way back (AUD-3), whose report is `free(id:)`'s caller, and the context's options and memory (AUD-4);
   - then an `OfflineAudioContext` rendering in the declared block (AUD-9), and the first golden.
 - **Read first:** § Decided (4, 6, 9 and 32 to 35 above all), ROADMAP_DETAIL.md § AUD-29, and the probes it starts from
   (`aud-probe-cmd` for the commands and the way back, `aud-probe-routes` for slots and a block split at a frame).

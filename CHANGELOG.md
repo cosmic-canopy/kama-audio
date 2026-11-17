@@ -5,6 +5,12 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `audio::rt::SlotTable<A>`, the program side's table of slots with generations that a command names a node by (AUD-2,
+  decisions 4, 34 and 35): a declared capacity of at most 2^32 rows, its storage from an injected allocator, an id of
+  a 32-bit slot and a 32-bit generation in one `int64` (`audio::rt::slotOf`, `generationOf`), a row counted up and
+  down, its last drop marking it, releases in the order marked, reuse in the order freed at the next generation, a
+  slot retired before its generation wraps, and every id that names no row refused (2026-11-17).
+- The gate's wasm leg runs debug and release, the release held to Closure (2026-11-17).
 - `audio::rt::Backlog<T, A>`, the backlog in front of the command ring (AUD-1, decisions 8 and 33): a declared capacity,
   its storage from an injected allocator, a refused add when full, a flush that moves what the ring has room for and
   publishes it with one store, and its two high-water marks (2026-11-15).

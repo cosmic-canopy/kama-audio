@@ -1,0 +1,484 @@
+// slots: audio::rt::SlotTable, the program side's table of slots with generations (AUD-2; AGENTS.audio.md decisions 4,
+// 6, 34 and 35). A node's handle names its row by an id, and the audio side sees only that id, never a pointer.
+// - Its capacity is declared, and its storage comes from the injected allocator once, never grown (decisions 6, 34).
+// - An id is a 32-bit slot and a 32-bit generation in one int64, the field a command names a node by (decision 34).
+// - A row is counted on the program's side alone. Its last drop marks it, and it stays taken until the audio side's
+//   report frees it (decisions 4, 35).
+// - Marked rows come out in the order they were marked, so a flush can send their releases in that order (decision 35).
+// - A freed slot is reused with the next generation, after every slot freed before it, and a slot whose generation
+//   would wrap is retired (decision 34).
+// - An id that names no live row is refused with an answer, never a trap: nothing a program passes ends it.
+
+import { Tally, Counting, audio::rt::SlotTable, audio::rt::CapacityError, audio::rt::slotOf,
+         audio::rt::generationOf };
+
+export { slotsTests, ageSlot };
+
+fnptr string TableCase(ref SlotTable<GlobalAllocator> s);
+
+// Runs `body` on a fresh table of `capacity` on the global heap.
+fn void withTable(ref Tally t, const ref string name, isize capacity, TableCase body) {
+    Result<SlotTable<GlobalAllocator>, CapacityError> made = SlotTable::<GlobalAllocator>.withCapacity(capacity: capacity);
+    match (give made) {
+        case Ok(value: s0): {
+            SlotTable<GlobalAllocator> s = give s0;
+            string why = body(s: s);
+            t.verdict(name: name, why: why);
+        }
+        case Err(error: e): {
+            string m = e.message();
+            t.verdict(name: name, why: "the table was not made: ${m}");
+        }
+    };
+}
+
+// Takes one and says what is wrong with it, or "" when it names `slot` at `generation`. The id goes in `into`.
+fn string expectTake(ref SlotTable<GlobalAllocator> s, int64 slot, int64 generation, ref int64 into) {
+    Optional<int64> got = s.take();
+    return match (got) {
+        case Some(value: id): {
+            into = id;
+            int64 gs = slotOf(id: id);
+            int64 gg = generationOf(id: id);
+            return gs == slot && gg == generation ? "" : "took slot ${gs} at generation ${gg} where slot ${slot} at ${generation} was due";
+        }
+        case None: "a take was refused where slot ${slot} at generation ${generation} was due";
+    };
+}
+
+// Says what is wrong with the next release, or "" when it is `id`.
+fn string expectRelease(ref SlotTable<GlobalAllocator> s, int64 id) {
+    Optional<int64> got = s.nextRelease();
+    int64 ws = slotOf(id: id);
+    return match (got) {
+        case Some(value: r): {
+            int64 rs = slotOf(id: r);
+            return r == id ? "" : "the next release was slot ${rs} where slot ${ws} was due";
+        }
+        case None: "no release was due where slot ${ws}'s was";
+    };
+}
+
+fn string expectNoRelease(ref SlotTable<GlobalAllocator> s) {
+    Optional<int64> got = s.nextRelease();
+    return match (got) {
+        case Some(value: r): {
+            int64 rs = slotOf(id: r);
+            return "slot ${rs}'s release came out where none was due";
+        }
+        case None: "";
+    };
+}
+
+// The whole of a row's life after its take: its last drop, its release sent, and the audio side's report.
+fn string cycle(ref SlotTable<GlobalAllocator> s, int64 id) {
+    int64 slot = slotOf(id: id);
+    if (!s.countDown(id: id)) { return "slot ${slot}'s last drop was refused"; }
+    string sent = expectRelease(s: s, id: id);
+    if (!sent.isEmpty()) { return sent; }
+    if (!s.free(id: id)) { return "the report freeing slot ${slot} was refused"; }
+    return "";
+}
+
+// ---- making one -----------------------------------------------------------------------------------------------------
+
+fn string freshIsEmpty(ref SlotTable<GlobalAllocator> s) {
+    isize cap = s.capacity();
+    if (cap != 4) { return "its capacity is ${cap}, not the 4 declared"; }
+    isize n = s.length();
+    if (n != 0) { return "a fresh table holds ${n}"; }
+    isize gone = s.retired();
+    if (gone != 0) { return "a fresh table has ${gone} slots retired"; }
+    return expectNoRelease(s: s);
+}
+
+fn void badCapacity(ref Tally t) {
+    Result<SlotTable<GlobalAllocator>, CapacityError> zero = SlotTable::<GlobalAllocator>.withCapacity(capacity: 0);
+    Result<SlotTable<GlobalAllocator>, CapacityError> negative = SlotTable::<GlobalAllocator>.withCapacity(capacity: -1);
+    bool zeroRefused = match (zero) { case Ok(value: s): false; case Err(error: e): e == CapacityError::BadCapacity; };
+    bool negativeRefused = match (negative) { case Ok(value: s): false; case Err(error: e): e == CapacityError::BadCapacity; };
+    string why = zeroRefused && negativeRefused ? "" : "zero refused: ${zeroRefused}, -1 refused: ${negativeRefused}";
+    t.verdict(name: "slots: a capacity below one is refused as BadCapacity", why: why);
+}
+
+// A slot is 32 bits, so a table of more than 2^32 rows could not name them all. An allocator with no room shows that
+// the bound is checked first: past it, BadCapacity, never OutOfMemory. On a 32-bit target no isize is past it.
+unsafe fn void tooManySlots(ref Tally t) {
+    string why = "";
+    if (sizeof(isize) >= 8) {
+        isize most = 65536;
+        most = most * 65536;
+        isize past = most + 1;
+        InlineArray<int64>#(5) cells = [0; (5)];
+        Counting a = Counting.make(cells: addr(of: cells[0]), room: false);
+        Result<SlotTable<Counting>, CapacityError> over = SlotTable::<Counting>.withCapacityAndAllocator(allocator: a, capacity: past);
+        Result<SlotTable<Counting>, CapacityError> at = SlotTable::<Counting>.withCapacityAndAllocator(allocator: a, capacity: most);
+        bool overRefused = match (over) { case Ok(value: s): false; case Err(error: e): e == CapacityError::BadCapacity; };
+        bool atAsked = match (at) { case Ok(value: s): false; case Err(error: e): e == CapacityError::OutOfMemory; };
+        if (!overRefused) { why = "a table of 2^32 + 1 slots was not refused as BadCapacity"; }
+        else if (!atAsked) { why = "a table of 2^32 slots was refused before its allocator was asked"; }
+    }
+    t.verdict(name: "slots: more slots than 32 bits can name are refused as BadCapacity, before the allocator is asked", why: why);
+}
+
+// Makes a table of 16 through `a`, uses it, and drops it when it returns. "" when it was made and used.
+unsafe fn string useTableFrom(Counting a) {
+    Result<SlotTable<Counting>, CapacityError> made = SlotTable::<Counting>.withCapacityAndAllocator(allocator: a, capacity: 16);
+    return match (give made) {
+        case Ok(value: s0): {
+            SlotTable<Counting> s = give s0;
+            Optional<int64> got = s.take();
+            bool took = match (got) { case Some(value: id): slotOf(id: id) == 0; case None: false; };
+            return took ? "" : "a take from it failed";
+        }
+        case Err(error: e): {
+            string m = e.message();
+            return "the table was not made: ${m}";
+        }
+    };
+}
+
+unsafe fn void fromTheAllocator(ref Tally t) {
+    InlineArray<int64>#(5) cells = [0; (5)];
+    Counting a = Counting.make(cells: addr(of: cells[0]), room: true);
+    string used = useTableFrom(a: a);
+    string why = give used;
+    if (why.isEmpty() && (cells[0] != 1 || cells[1] < 16 * 8)) {
+        int64 n = cells[0];
+        int64 b = cells[1];
+        why = "${n} allocations of ${b} bytes, not one for 16 rows";
+    }
+    if (why.isEmpty() && (cells[2] != 1 || cells[3] != cells[1])) {
+        int64 n = cells[2];
+        int64 b = cells[3];
+        int64 want = cells[1];
+        why = "${n} frees of ${b} bytes after the drop, not one of ${want}";
+    }
+    if (why.isEmpty() && cells[4] != 0) { why = "it reallocated, and a table never grows"; }
+    t.verdict(name: "slots: its storage comes from the injected allocator, once, and goes back to it at the drop", why: why);
+}
+
+unsafe fn void noRoom(ref Tally t) {
+    InlineArray<int64>#(5) cells = [0; (5)];
+    Counting a = Counting.make(cells: addr(of: cells[0]), room: false);
+    Result<SlotTable<Counting>, CapacityError> made = SlotTable::<Counting>.withCapacityAndAllocator(allocator: a, capacity: 16);
+    bool refused = match (made) { case Ok(value: s): false; case Err(error: e): e == CapacityError::OutOfMemory; };
+    string why = refused ? "" : "a table was made with no memory to hold it";
+    t.verdict(name: "slots: an allocator with no room refuses the table as OutOfMemory, and none is made", why: why);
+}
+
+// ---- taking ---------------------------------------------------------------------------------------------------------
+
+// A fresh table hands out its slots in order, each at generation 1, so no live id is ever 0.
+fn string takesInOrder(ref SlotTable<GlobalAllocator> s) {
+    int64 slot = 0;
+    while (slot < 4) {
+        int64 id = 0;
+        string why = expectTake(s: s, slot: slot, generation: 1, into: id);
+        if (!why.isEmpty()) { return why; }
+        if (id == 0) { return "slot ${slot}'s id is 0"; }
+        int64 n = s.countOf(id: id);
+        if (n != 1) { return "slot ${slot} was taken with a count of ${n}, not 1"; }
+        slot = slot + 1;
+    }
+    isize held = s.length();
+    if (held != 4) { return "it holds ${held} after four takes"; }
+    return "";
+}
+
+fn string fullRefuses(ref SlotTable<GlobalAllocator> s) {
+    InlineArray<int64>#(4) ids = [0; (4)];
+    int64 slot = 0;
+    while (slot < 4) {
+        string why = expectTake(s: s, slot: slot, generation: 1, into: ids[slot]);
+        if (!why.isEmpty()) { return why; }
+        slot = slot + 1;
+    }
+    Optional<int64> fifth = s.take();
+    bool refused = match (fifth) { case Some(value: id): false; case None: true; };
+    if (!refused) { return "a full table of 4 answered a fifth take"; }
+    isize held = s.length();
+    if (held != 4) { return "a refused take left it holding ${held}"; }
+    slot = 0;
+    while (slot < 4) {
+        int64 n = s.countOf(id: ids[slot]);
+        if (n != 1) { return "a refused take left slot ${slot} with a count of ${n}"; }
+        slot = slot + 1;
+    }
+    return expectNoRelease(s: s);
+}
+
+// ---- counting -------------------------------------------------------------------------------------------------------
+
+fn string countsUpAndDown(ref SlotTable<GlobalAllocator> s) {
+    int64 id = 0;
+    string took = expectTake(s: s, slot: 0, generation: 1, into: id);
+    if (!took.isEmpty()) { return took; }
+    if (!s.countUp(id: id) || !s.countUp(id: id)) { return "a copy's count up was refused"; }
+    int64 three = s.countOf(id: id);
+    if (three != 3) { return "two copies made a count of ${three}, not 3"; }
+    if (!s.countDown(id: id)) { return "a drop's count down was refused"; }
+    int64 two = s.countOf(id: id);
+    if (two != 2) { return "a drop left a count of ${two}, not 2"; }
+    string none = expectNoRelease(s: s);
+    if (!none.isEmpty()) { return "with copies still held, ${none}"; }
+    if (!s.countDown(id: id)) { return "a drop's count down was refused"; }
+    string still = expectNoRelease(s: s);
+    if (!still.isEmpty()) { return "with a copy still held, ${still}"; }
+    return "";
+}
+
+// The last drop marks the row. It stays taken, so its slot is not handed out again, until the report frees it.
+fn string lastDropMarks(ref SlotTable<GlobalAllocator> s) {
+    int64 id = 0;
+    string took = expectTake(s: s, slot: 0, generation: 1, into: id);
+    if (!took.isEmpty()) { return took; }
+    if (!s.countDown(id: id)) { return "the last drop was refused"; }
+    int64 n = s.countOf(id: id);
+    if (n != 0) { return "after the last drop its count is ${n}"; }
+    isize held = s.length();
+    if (held != 1) { return "a marked row is not held: the table holds ${held}"; }
+    Optional<int64> again = s.take();
+    bool refused = match (again) { case Some(value: other): false; case None: true; };
+    if (!refused) { return "a table of 1 handed out its marked slot again"; }
+    if (s.countUp(id: id)) { return "a marked row was counted up"; }
+    if (s.countDown(id: id)) { return "a marked row was counted down again"; }
+    string sent = expectRelease(s: s, id: id);
+    if (!sent.isEmpty()) { return sent; }
+    Optional<int64> stillTaken = s.take();
+    bool stillRefused = match (stillTaken) { case Some(value: other): false; case None: true; };
+    if (!stillRefused) { return "a table of 1 handed out its slot once the release was sent, before the report"; }
+    if (!s.free(id: id)) { return "the report freeing it was refused"; }
+    isize after = s.length();
+    if (after != 0) { return "a freed row is still held: the table holds ${after}"; }
+    return "";
+}
+
+// ---- releases (decision 35) -----------------------------------------------------------------------------------------
+
+fn string marksInOrder(ref SlotTable<GlobalAllocator> s) {
+    InlineArray<int64>#(4) ids = [0; (4)];
+    int64 slot = 0;
+    while (slot < 4) {
+        string why = expectTake(s: s, slot: slot, generation: 1, into: ids[slot]);
+        if (!why.isEmpty()) { return why; }
+        slot = slot + 1;
+    }
+    if (!s.countDown(id: ids[2]) || !s.countDown(id: ids[0]) || !s.countDown(id: ids[3])) {
+        return "a last drop was refused";
+    }
+    string first = expectRelease(s: s, id: ids[2]);
+    if (!first.isEmpty()) { return first; }
+    // A row marked after a release was taken goes behind the ones still waiting.
+    if (!s.countDown(id: ids[1])) { return "a last drop was refused"; }
+    string second = expectRelease(s: s, id: ids[0]);
+    if (!second.isEmpty()) { return second; }
+    string third = expectRelease(s: s, id: ids[3]);
+    if (!third.isEmpty()) { return third; }
+    string fourth = expectRelease(s: s, id: ids[1]);
+    if (!fourth.isEmpty()) { return fourth; }
+    return expectNoRelease(s: s);
+}
+
+// ---- reuse ----------------------------------------------------------------------------------------------------------
+
+// A freed slot is reused with the next generation, after every slot freed before it: the slots a fresh table has never
+// handed out count as freed at its make, in order.
+fn string freedGoesLast(ref SlotTable<GlobalAllocator> s) {
+    int64 a = 0;
+    int64 b = 0;
+    string ta = expectTake(s: s, slot: 0, generation: 1, into: a);
+    if (!ta.isEmpty()) { return ta; }
+    string tb = expectTake(s: s, slot: 1, generation: 1, into: b);
+    if (!tb.isEmpty()) { return tb; }
+    string ca = cycle(s: s, id: a);
+    if (!ca.isEmpty()) { return ca; }
+    int64 c = 0;
+    string tc = expectTake(s: s, slot: 2, generation: 1, into: c);
+    if (!tc.isEmpty()) { return "with slot 0 freed: ${tc}"; }
+    string cb = cycle(s: s, id: b);
+    if (!cb.isEmpty()) { return cb; }
+    int64 d = 0;
+    string td = expectTake(s: s, slot: 3, generation: 1, into: d);
+    if (!td.isEmpty()) { return "with slots 0 and 1 freed: ${td}"; }
+    int64 a2 = 0;
+    string ta2 = expectTake(s: s, slot: 0, generation: 2, into: a2);
+    if (!ta2.isEmpty()) { return "freed first: ${ta2}"; }
+    int64 b2 = 0;
+    string tb2 = expectTake(s: s, slot: 1, generation: 2, into: b2);
+    if (!tb2.isEmpty()) { return "freed second: ${tb2}"; }
+    isize held = s.length();
+    if (held != 4) { return "it holds ${held} after the reuse"; }
+    return "";
+}
+
+// The order is the order freed, whatever the order the slots were taken in.
+fn string freedInOrder(ref SlotTable<GlobalAllocator> s) {
+    InlineArray<int64>#(3) ids = [0; (3)];
+    int64 slot = 0;
+    while (slot < 3) {
+        string why = expectTake(s: s, slot: slot, generation: 1, into: ids[slot]);
+        if (!why.isEmpty()) { return why; }
+        slot = slot + 1;
+    }
+    if (!s.countDown(id: ids[1]) || !s.countDown(id: ids[2]) || !s.countDown(id: ids[0])) {
+        return "a last drop was refused";
+    }
+    string r1 = expectRelease(s: s, id: ids[1]);
+    if (!r1.isEmpty()) { return r1; }
+    string r2 = expectRelease(s: s, id: ids[2]);
+    if (!r2.isEmpty()) { return r2; }
+    string r0 = expectRelease(s: s, id: ids[0]);
+    if (!r0.isEmpty()) { return r0; }
+    // The reports arrive in another order than the releases: the audio side keeps a node while it can still sound.
+    if (!s.free(id: ids[2]) || !s.free(id: ids[0]) || !s.free(id: ids[1])) { return "a report was refused"; }
+    int64 x = 0;
+    string first = expectTake(s: s, slot: 2, generation: 2, into: x);
+    if (!first.isEmpty()) { return first; }
+    string second = expectTake(s: s, slot: 0, generation: 2, into: x);
+    if (!second.isEmpty()) { return second; }
+    string third = expectTake(s: s, slot: 1, generation: 2, into: x);
+    if (!third.isEmpty()) { return third; }
+    Optional<int64> fourth = s.take();
+    return match (fourth) {
+        case Some(value: id): {
+            int64 again = slotOf(id: id);
+            return "a full table of 3 handed out slot ${again} again";
+        }
+        case None: "";
+    };
+}
+
+// ---- the wrap -------------------------------------------------------------------------------------------------------
+
+comptime int64 LAST_GENERATION = 4294967295;
+
+// The package's one test seam (AUD-2): four billion reuses are too many for the gate, so the table grants this function
+// alone a free row's generation, and the case sets it near the top.
+fn void ageSlot(ref SlotTable<GlobalAllocator> s, int64 slot, int64 generation) {
+    s.ageTo(slot: slot, generation: generation);
+}
+
+fn string wrapRetires(ref SlotTable<GlobalAllocator> s) {
+    ageSlot(s: s, slot: 0, generation: LAST_GENERATION - 1);
+    int64 a = 0;
+    string ta = expectTake(s: s, slot: 0, generation: LAST_GENERATION - 1, into: a);
+    if (!ta.isEmpty()) { return ta; }
+    string ca = cycle(s: s, id: a);
+    if (!ca.isEmpty()) { return ca; }
+    int64 b = 0;
+    string tb = expectTake(s: s, slot: 1, generation: 1, into: b);
+    if (!tb.isEmpty()) { return tb; }
+    int64 last = 0;
+    string tl = expectTake(s: s, slot: 0, generation: LAST_GENERATION, into: last);
+    if (!tl.isEmpty()) { return "at the last generation: ${tl}"; }
+    isize none = s.retired();
+    if (none != 0) { return "${none} slots are retired while both are held"; }
+    string cl = cycle(s: s, id: last);
+    if (!cl.isEmpty()) { return cl; }
+    isize gone = s.retired();
+    if (gone != 1) { return "${gone} slots are retired after slot 0's last generation was freed, not 1"; }
+    isize held = s.length();
+    if (held != 1) { return "it holds ${held} with slot 0 retired and slot 1 taken, not 1"; }
+    Optional<int64> wrapped = s.take();
+    bool refused = match (wrapped) { case Some(value: id): false; case None: true; };
+    if (!refused) { return "a retired slot was handed out again"; }
+    if (s.countUp(id: last) || s.countDown(id: last) || s.free(id: last)) { return "a retired slot's last id was taken"; }
+    string cb = cycle(s: s, id: b);
+    if (!cb.isEmpty()) { return cb; }
+    int64 b2 = 0;
+    string tb2 = expectTake(s: s, slot: 1, generation: 2, into: b2);
+    if (!tb2.isEmpty()) { return "beside a retired slot: ${tb2}"; }
+    return "";
+}
+
+// ---- ids that name no live row --------------------------------------------------------------------------------------
+
+// An id from a row's earlier generation names nothing, and changes nothing.
+fn string staleRefused(ref SlotTable<GlobalAllocator> s) {
+    int64 old = 0;
+    string ta = expectTake(s: s, slot: 0, generation: 1, into: old);
+    if (!ta.isEmpty()) { return ta; }
+    string ca = cycle(s: s, id: old);
+    if (!ca.isEmpty()) { return ca; }
+    int64 now = 0;
+    string tn = expectTake(s: s, slot: 0, generation: 2, into: now);
+    if (!tn.isEmpty()) { return tn; }
+    if (s.countUp(id: old)) { return "a stale id was counted up"; }
+    if (s.countDown(id: old)) { return "a stale id was counted down"; }
+    if (s.free(id: old)) { return "a stale id was freed"; }
+    int64 n = s.countOf(id: old);
+    if (n != 0) { return "a stale id has a count of ${n}"; }
+    int64 live = s.countOf(id: now);
+    if (live != 1) { return "a stale id's calls left the live row with a count of ${live}"; }
+    // A row freed and taken again is not freed by a report that names its earlier generation.
+    if (!s.countDown(id: now)) { return "the live row's last drop was refused"; }
+    string sent = expectRelease(s: s, id: now);
+    if (!sent.isEmpty()) { return sent; }
+    if (s.free(id: old)) { return "a stale report freed the live row"; }
+    if (!s.free(id: now)) { return "the live row's report was refused"; }
+    return "";
+}
+
+// An id whose slot is past the table, or that no take ever answered, is refused.
+fn string strangersRefused(ref SlotTable<GlobalAllocator> s) {
+    int64 id = 0;
+    string ta = expectTake(s: s, slot: 0, generation: 1, into: id);
+    if (!ta.isEmpty()) { return ta; }
+    int64 atBound = id + 2;   // slot 2, generation 1, in a table of 2: the first slot past it
+    int64 past = id + 7;   // slot 7, generation 1
+    int64 neverTaken = id + 1;   // slot 1, generation 1, still free
+    if (s.countUp(id: atBound) || s.countDown(id: atBound) || s.free(id: atBound)) {
+        return "an id of the slot just past the table was taken";
+    }
+    if (s.countUp(id: past) || s.countDown(id: past) || s.free(id: past)) { return "an id past the table was taken"; }
+    if (s.countUp(id: neverTaken) || s.countDown(id: neverTaken) || s.free(id: neverTaken)) {
+        return "an id of a free slot was taken";
+    }
+    if (s.countUp(id: 0) || s.countDown(id: 0) || s.free(id: 0)) { return "the id 0 was taken"; }
+    if (s.countUp(id: -1) || s.countDown(id: -1) || s.free(id: -1)) { return "the id -1 was taken"; }
+    int64 n = s.countOf(id: atBound);
+    if (n != 0) { return "an id of the slot just past the table has a count of ${n}"; }
+    // A taken row is not freed before its release was sent.
+    if (s.free(id: id)) { return "a taken row was freed before its last drop"; }
+    if (!s.countDown(id: id)) { return "its last drop was refused"; }
+    if (s.free(id: id)) { return "a marked row was freed before its release was sent"; }
+    string sent = expectRelease(s: s, id: id);
+    if (!sent.isEmpty()) { return sent; }
+    if (!s.free(id: id)) { return "its report was refused"; }
+    if (s.free(id: id)) { return "a row was freed twice"; }
+    int64 upcoming = id + 4294967296;   // slot 0 at generation 2, which no take has answered yet
+    if (slotOf(id: upcoming) != 0 || generationOf(id: upcoming) != 2) { return "the next generation's id is not slot 0 at 2"; }
+    if (s.countUp(id: upcoming) || s.countDown(id: upcoming) || s.free(id: upcoming)) {
+        return "an id of a freed row's next generation was taken before a take answered it";
+    }
+    isize held = s.length();
+    if (held != 0) { return "the refused calls left it holding ${held}"; }
+    return "";
+}
+
+unsafe fn void slotsTests(ref Tally t) {
+    withTable(t: t, name: "slots: a fresh table is empty, at its declared capacity", capacity: 4, body: freshIsEmpty);
+    badCapacity(t: t);
+    tooManySlots(t: t);
+    fromTheAllocator(t: t);
+    noRoom(t: t);
+    withTable(t: t, name: "slots: a fresh table hands out its slots in order, at generation 1, each counted once",
+              capacity: 4, body: takesInOrder);
+    withTable(t: t, name: "slots: a full table refuses a take, and nothing changes", capacity: 4, body: fullRefuses);
+    withTable(t: t, name: "slots: a row's count goes up with each copy and down with each drop", capacity: 1,
+              body: countsUpAndDown);
+    withTable(t: t, name: "slots: the last drop marks the row, which stays taken until the audio side's report frees it",
+              capacity: 1, body: lastDropMarks);
+    withTable(t: t, name: "slots: marked rows' releases come out in the order the rows were marked", capacity: 4,
+              body: marksInOrder);
+    withTable(t: t, name: "slots: a freed slot is reused with the next generation, after every slot freed before it",
+              capacity: 4, body: freedGoesLast);
+    withTable(t: t, name: "slots: slots are reused in the order the reports freed them", capacity: 3, body: freedInOrder);
+    withTable(t: t, name: "slots: a slot whose generation would wrap is retired, never reused", capacity: 2,
+              body: wrapRetires);
+    withTable(t: t, name: "slots: an id of a row's earlier generation is refused, and changes nothing", capacity: 1,
+              body: staleRefused);
+    withTable(t: t, name: "slots: an id no take answered is refused, and a row is freed only after its release was sent",
+              capacity: 2, body: strangersRefused);
+}

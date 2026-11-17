@@ -47,7 +47,8 @@ is drawn from is [RESEARCH.md](RESEARCH.md) § 10.
 - **Budget:** `—` until the first measurement sets it. It holds three numbers:
   - the wasm the feature adds, in KB after brotli;
   - its render cost, in ms of one core per second of audio for one instance (a voice, a node), offline, natively and
-    in wasm under node at kama's `-Oz`. `-O3` is noted beside it while KAUD-6 is open;
+    in wasm under node at kama's release default, `-O3` since KR-332 (KAMA_GAPS.md KAUD-6). `-Oz` is noted beside it,
+    since a size-first program builds the package so unless it lists it under `release.speed`;
   - its memory for one instance at its default options (decision 6). A footprint you can calculate needs it.
 
   **A budget never limits what is built** (kyoten's rule, the owner, 2026-11-11):

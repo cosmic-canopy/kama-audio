@@ -209,7 +209,8 @@ platform's haptics API. On the web that is the Gamepad API's vibration.
 
 **When each measures equal.** Each vendored C library sits behind the package's own seam so kama can replace it, and the
 owner foresees that it will (decision 17):
-- a kama FFT for pffft, once a program can choose a wasm release's speed (KAUD-6);
+- a kama FFT for pffft, measured against it at `-O3`: a wasm release is `-O3` since KR-332, and a size-first program
+  keeps the package at speed with `release.speed` (KAMA_GAPS.md KAUD-6, retired 2026-11-17);
 - kama device backends for miniaudio;
 - a kama rung for libsamplerate, at 140 dB or better.
 

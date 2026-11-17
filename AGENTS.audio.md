@@ -92,29 +92,28 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
   - then an `OfflineAudioContext` rendering in the declared block (AUD-9), and the first golden.
 - **Read first:** § Decided (4, 6, 9 and 32 to 35 above all), ROADMAP_DETAIL.md § AUD-29, and the probes it starts from
   (`aud-probe-cmd` for the commands and the way back, `aud-probe-routes` for slots and a block split at a frame).
-- **The pin is 0.9.960 (`b39fbaab`) on both machines.**
-  - The Windows box bumped kyoten's `.kama-version` to it on 2026-11-15, at the owner's word. It was 0.9.956 before.
+- **The pin is 0.9.966 (`ca0e88e7`) on both machines.**
+  - The Windows box bumped kyoten's `.kama-version` to it on 2026-11-17, at the owner's word, through 0.9.962, 0.9.964
+    and 0.9.965. It was 0.9.960 before.
   - The Mac rebuilt it from a clean clone the same day. kyoten's `tools/test.sh` and this package's are green on it
-    there.
-  - The 0.9.956 pin is kept in kyoten's `.scratch/kama-pin-0.9.956`.
-  - P5 to P9 ran on 0.9.945, kept in kyoten's `.scratch/kama-pin-0.9.945`.
-  - **KAUD-4 is fixed on the pin** (0.9.953, `54b44d61`, KR-390) and retired. A library's own flag is now its
-    consumer's, so a build switch such as the worklet instance's can live in the library, with no re-declaration in
-    the program. That removes one of KAUD-5's three causes. The other two remain: one build makes one artifact, and
-    KR-327's shared-memory flag is still open.
-  - On 0.9.960, KAUD-2 and KAUD-6 reproduce, and KAUD-1, KAUD-3 and KAUD-4 are retired.
-  - **kama's own dev has reached 0.9.964 since** (read 2026-11-15). Nothing in 0.9.961 to 0.9.964 moves an open
-    entry. **KR-332, ruled the same day and built next on the Windows box, answers KAUD-6:**
-    - a wasm `--release` compiles and links at `-O3`;
-    - a size-first program sets `release.optimize`, and names the code it wants fast under `release.speed`.
-
-    The pin moves at the owner's word.
+    there. The 0.9.960 pin is kept in kyoten's `.scratch/kama-pin-0.9.960`, and P5 to P9's 0.9.945 in
+    `.scratch/kama-pin-0.9.945`.
+  - **A wasm release runs Closure over its JS since 0.9.966 (KR-289),** so the gate's wasm leg runs debug and release,
+    as the owner decided for every gate on 2026-11-17 (kyoten's rendering.md § Decided). The release JS is held to
+    Closure by emscripten's `ENVIRONMENT_IS_NODE`, which only Closure renames.
+  - **KAUD-6 is fixed by KR-332 (0.9.965) and retired.** A wasm `--release` is `-O3`, a size-first program sets
+    `release.optimize: "size"` and names the code it wants fast under `release.speed`, and an `-O` in a manifest's
+    flags is refused by name.
+  - On 0.9.966, KAUD-2, KAUD-7 and KAUD-8 reproduce, and two of KAUD-5's three causes stand: one build makes one
+    artifact, and KR-327's shared-memory flag is still open. kama's origin `dev` was still at the pin's commit on
+    2026-11-17.
+  - The pin moves at the owner's word.
 - **What area 4 taught, which the build rows need:**
-  - **kama's wasm release is `-Oz`, which no program can change (KAUD-6),** until KR-332 is built. It makes `-O3`
-    the default.
-    - A kernel is an `unsafe fn` over raw pointers.
-    - Each wasm cost is measured at `-Oz` and at `-O3` through `.scratch/area4/tools/emcc`, which swaps the flag and
-      nothing else (`KAMA_REAL_EMCC`, `KAMA_WASM_OPT`).
+  - **A wasm release is `-O3` since KR-332** (KAMA_GAPS.md KAUD-6, measured on the pin, 2026-11-17, under node):
+    - the 129-bin complex multiply-accumulate over views takes 75 ns, as over raw pointers; it took 4,446 at `-Oz`;
+    - the 256-tap FIR over views takes 51 µs and over raw pointers 27, so a hot kernel is still measured both ways;
+    - a size-first build is still `-Oz` where it does not name the package under `release.speed`, and P7 to P9's wasm
+      costs were measured at both levels through `.scratch/area4/tools/emcc`, which swapped the flag.
     - The kama FFT cannot carry a long reverb's stages at `-Oz`; pffft can.
   - **Every leg makes the same samples with `reproducible-float`**, proved by hashes, and a C seam needs
     `-ffp-contract=off`, which the flag sends it. **But a C library that calls the platform's libm is still not
@@ -169,7 +168,7 @@ Waiting, and not area 4's:
   each OS's echo cancellation (decision 18).
 - WASAPI's exclusive and `IAudioClient3` modes, and MMCSS for render workers (decisions 17 and 19), on the Windows box.
 - What `reproducible-float` costs the DSP (decision 14), once there is DSP.
-- KAUD-2, KAUD-5, KAUD-6 (KR-332, ruled), KAUD-7 and KAUD-8 upstream.
+- KAUD-2, KAUD-5, KAUD-7 and KAUD-8 upstream.
 - Area 4's open ends, each for when its row is built:
   - pffft's SSE path compared on the Windows box (decision 21), with its twiddles computed in double;
   - the loop fixture's MP3 that WebCodecs decodes 16 dB from ours (RESEARCH.md § 9.3);

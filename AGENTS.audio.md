@@ -94,21 +94,25 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
   - then an `OfflineAudioContext` rendering in the declared block (AUD-9), and the first golden.
 - **Read first:** § Decided (4, 6, 9 and 32 to 35 above all), ROADMAP_DETAIL.md § AUD-29, and the probes it starts from
   (`aud-probe-cmd` for the commands and the way back, `aud-probe-routes` for slots and a block split at a frame).
-- **The pin is 0.9.966 (`ca0e88e7`) on both machines.**
-  - The Windows box bumped kyoten's `.kama-version` to it on 2026-11-17, at the owner's word, through 0.9.962, 0.9.964
-    and 0.9.965. It was 0.9.960 before.
-  - The Mac rebuilt it from a clean clone the same day. kyoten's `tools/test.sh` and this package's are green on it
-    there. The 0.9.960 pin is kept in kyoten's `.scratch/kama-pin-0.9.960`, and P5 to P9's 0.9.945 in
+- **The pin is 0.9.978 (`5e542c55`) on both machines.**
+  - The Windows box bumped kyoten's `.kama-version` to it on 2026-11-18. The Mac rebuilt it from a clean clone the same
+    day, at the owner's word ("Match Windows: 0.9.978"), after first building 0.9.981, origin's head: 0.9.978 already
+    holds KR-399 to KR-402, which the context's state needs.
+  - kyoten's `tools/test.sh` and this package's are green on it on the Mac. The 0.9.966 pin is kept in kyoten's
+    `.scratch/kama-pin-0.9.966`, 0.9.981 in `.scratch/kama-pin-0.9.981`, and P5 to P9's 0.9.945 in
     `.scratch/kama-pin-0.9.945`.
+  - **`try new` covers a `Shared`'s whole box since 0.9.973 (KR-399), and leaks nothing it was given since 0.9.971
+    (KR-402).** So KAUD-8 is retired, and the context's state is one `Shared` made by `try new(allocator:)`
+    (`.scratch/aud2-trynew/`: `None` at every budget below 224 bytes, 0 bytes left out each time).
   - **A wasm release runs Closure over its JS since 0.9.966 (KR-289),** so the gate's wasm leg runs debug and release,
     as the owner decided for every gate on 2026-11-17 (kyoten's rendering.md § Decided). The release JS is held to
     Closure by emscripten's `ENVIRONMENT_IS_NODE`, which only Closure renames.
   - **KAUD-6 is fixed by KR-332 (0.9.965) and retired.** A wasm `--release` is `-O3`, a size-first program sets
     `release.optimize: "size"` and names the code it wants fast under `release.speed`, and an `-O` in a manifest's
     flags is refused by name.
-  - On 0.9.966, KAUD-2, KAUD-7 and KAUD-8 reproduce, and two of KAUD-5's three causes stand: one build makes one
-    artifact, and KR-327's shared-memory flag is still open. kama's origin `dev` was still at the pin's commit on
-    2026-11-17.
+  - On 0.9.978, KAUD-2, KAUD-7 and KAUD-9 reproduce, and two of KAUD-5's three causes stand: one build makes one
+    artifact, and KR-327's shared-memory flag is still open. KAUD-7's ask is kama's KR-403, briefed and not built.
+    kama's origin `dev` was at 0.9.981 on 2026-11-18, with nothing more for this package.
   - The pin moves at the owner's word.
 - **What area 4 taught, which the build rows need:**
   - **A wasm release is `-O3` since KR-332** (KAMA_GAPS.md KAUD-6, measured on the pin, 2026-11-17, under node):
@@ -421,6 +425,7 @@ Those questions stay in kyoten's `audio.md`.
      The library never allocates past a limit and never drops silently.
    - **Why:** kyoten's vision asks for "a footprint you can calculate" and budgets per element. Dependency injection
      (kyoten's rule) is how a library takes what it depends on.
+   - **Amended on 2026-11-18:** decision 36 says how the allocator is handed over: as callbacks, `AudioMemory`.
 7. **Decided on 2026-11-13: stamped commands on one ordered ring per context, by two routes** (area 2, the real-time
    model). The owner took the recommendation.
    - **The commands.** Each call becomes a flat, typed command stamped with the int64 frame it applies at. One ring per
@@ -1022,6 +1027,36 @@ Those questions stay in kyoten's `audio.md`.
       - A destructor cannot return an error, and decision 8's error is a call's.
       - A release added to the backlog could find it full.
       - A release sent ahead of the backlog could overtake the node's own commands.
+36. **Decided on 2026-11-18: the program's memory is handed over as callbacks** (AUD-2's handle; how decision 6's
+    allocator is injected). The owner first asked of the erased option as framed, whose context kept its bookkeeping on
+    the global heap: "is option 1 the no hack production grade answer for general purpose?" It was not. The callbacks
+    were probed next and taken as recommended.
+    - **`AudioMemory` is a user pointer and the allocator's functions,** as miniaudio's `ma_allocation_callbacks`,
+      FMOD's memory callbacks and Wwise's memory hooks take a program's memory. It is a plain `type value` that
+      implements kama's `Allocator`, so it is the allocator of every package type, and no type names the program's:
+      `GainNode` and `OfflineAudioContext` are written as MDN writes them (decision 3).
+    - **Every byte the library allocates is drawn through it,** the context's state included. Nothing is boxed, and
+      nothing goes to the global heap behind the program's back (decision 6).
+    - **The package ships the callbacks for kama's two allocators:**
+      - `AudioMemory.global()`, the global heap;
+      - `AudioMemory.inArena(arena:)`, an std `Arena`, which outlives every context made from it, as it outlives its
+        containers.
+
+      A program with an allocator of its own hands its pointer and three free functions, as it would in C.
+    - **Its cost is one indirect call per allocation.** An allocation happens only at a make or a hand-back, on the
+      program's side, never on the audio thread (decision 5).
+    - **Why:**
+      - kama reaches an allocator through a type parameter, so an allocator injected plainly puts its type into every
+        type that holds it (`GainNode<BumpAllocator>`). kama 0.9.966, 0.9.978 and 0.9.981 infer it at no make, not
+        even the default, so every program would write `GainNode::<GlobalAllocator>.make(…)` (`.scratch/aud2-generic/`).
+      - kama cannot yet erase an allocator without a box. A generic function's instance cannot be bound to an `fnptr`
+        ("a FunctionPtr binds a free function name or another FunctionPtr"), and a contract handle or a
+        `BindableFunctionPtr` boxes on the global heap (`.scratch/aud2-handle/`, `.scratch/aud2-erased/`; KAUD-9).
+      - The callbacks need neither. On 0.9.966, 0.9.978 and 0.9.981, an `Arena`'s, the global heap's and a
+        program's own allocator each served a slot table and the state's `Shared`, and the program's own had every byte back
+        (`.scratch/aud2-callbacks/`).
+    - **Later:** once a generic function's instance binds to an `fnptr` (KAUD-9), the package can write the callbacks
+      for any allocator (`AudioMemory.of(allocator:)`). That adds to the API and changes nothing in it.
 
 ## Where the truth is
 

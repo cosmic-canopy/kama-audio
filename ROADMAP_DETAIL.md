@@ -7,8 +7,9 @@ Each row's reasoning: what drives it, what it builds, what it needs, what is ope
   [FEATURES.md](FEATURES.md), and how it was decided is the git log.
 - `tools/check-roadmap.sh` holds every section to a row.
 
-**Every row keeps the decided design** (AGENTS.audio.md § Decided, 1 to 35): one engine in kama on both legs, the two
-tiers, Web Audio's names, the real-time model, the two legs, the ladders, the module cut, the commands' timing and the slots.
+**Every row keeps the decided design** (AGENTS.audio.md § Decided, 1 to 36): one engine in kama on both legs, the two
+tiers, Web Audio's names, the real-time model, the two legs, the ladders, the module cut, the commands' timing, the slots
+and the program's memory as callbacks.
 - **Every row is test-first.** Every feature it builds gets golden samples: an offline render whose hash is the same in
   native debug, native release and wasm (FEATURES.md § How to read a row).
 - **A test makes no sound the owner hears and never takes the focus:** it renders offline. A real device runs only

@@ -1,0 +1,78 @@
+// audio::graph, the parts a context and every node made from it share (decisions 4, 34, 35 and 36). The module is
+// internal: the package's own modules import it, and no program can.
+//
+// - **`ContextState`** is what a context's handles share: the program side's slot table, whose rows count the nodes
+//   (decision 34), and the context's fixed properties. It is one block, made by `try new` from the program's memory
+//   (decision 36), and freed with the last hold, the context's or a node's.
+// - **`NodeHold`** is a node's hold on its context's state and on its row: a copy counts the row up, a drop counts it
+//   down, and the last drop marks the row for release (decision 35). The audio thread never touches a count
+//   (decision 4).
+// - **`ContextKey`** is what `BaseAudioContext.stateFor` asks for, so only `NodeHold.take` can reach a context's state.
+
+import { audio::AudioMemory, audio::AudioError, audio::BaseAudioContext, audio::rt::SlotTable, std::memory::Shared };
+
+export { ContextState, NodeHold, ContextKey };
+
+type resource ContextState {
+    SlotTable<AudioMemory> nodes;
+    float32 rate = 0;
+
+    public ctor make(SlotTable<AudioMemory> nodes, float32 sampleRate) {
+        this.nodes = give nodes;
+        this.rate = sampleRate;
+    }
+
+    public const fn float32 sampleRate() { return this.rate; }
+
+    // A row for a new node, counted once, or `None` when every row is held.
+    public fn Optional<int64> takeRow() { return this.nodes.take(); }
+
+    // A copy of the node `id` names.
+    public fn bool countUp(int64 id) { return this.nodes.countUp(id: id); }
+
+    // A drop of the node `id` names; the last marks its row for release.
+    public fn bool countDown(int64 id) { return this.nodes.countDown(id: id); }
+
+    // The id of the node dropped longest ago whose release is due (decision 35), or `None`.
+    public fn Optional<int64> nextRelease() { return this.nodes.nextRelease(); }
+
+    // The rows held: nodes the program holds, and nodes dropped whose rows the audio side has not freed.
+    public const fn isize rowsHeld() { return this.nodes.length(); }
+}
+
+type value ContextKey {
+    friend NodeHold[mint];
+
+    ctor mint() { }
+}
+
+type resource NodeHold implements Copyable<This>(bare: give) {
+    Shared<ContextState, AudioMemory> state;
+    int64 row = 0;
+
+    private ctor adopt(Shared<ContextState, AudioMemory> state, int64 row) {
+        this.state = give state;
+        this.row = row;
+    }
+
+    // A row in `context`'s table, counted once, or `TooManyNodes` when every row is held, and then nothing changes.
+    public ctor Result<NodeHold, AudioError> take(BaseAudioContext context) {
+        ContextKey key = ContextKey.mint();
+        Shared<ContextState, AudioMemory> state = context.stateFor(key: key);
+        Optional<int64> taken = state.takeRow();
+        int64 id = match (taken) { case Some(value: v): v; case None: 0; };
+        if (id == 0) { return Result::Err(error: AudioError::TooManyNodes); }   // no live id is 0 (decision 34)
+        return Result::Ok(value: NodeHold.adopt(state: give state, row: id));
+    }
+
+    public ctor copy(ref NodeHold source) {
+        this.state = copy source.state;
+        this.row = source.row;
+        bool counted = this.state.countUp(id: this.row);
+    }
+
+    // The id of the node's row: its slot and generation (decision 34).
+    public const fn int64 id() { return this.row; }
+
+    ~NodeHold() { bool counted = this.state.countDown(id: this.row); }
+}

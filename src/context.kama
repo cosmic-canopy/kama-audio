@@ -1,0 +1,112 @@
+// audio::BaseAudioContext and audio::OfflineAudioContext, Web Audio's contexts (decision 3), and the errors a make
+// answers.
+//
+// - **`BaseAudioContext` is a contract,** as Web Audio's is the base of `AudioContext` and `OfflineAudioContext`. kama's
+//   inheritance cannot carry it, since a derived type may not add a public member and each context adds its own. A node
+//   is made from any context through it.
+// - **A context is a resource,** and every node made from it holds its state (decision 4), so the state lives until the
+//   last of them is dropped, the context's own handle included. That state is one block, drawn by `try new` from the
+//   program's memory (decision 36) together with the slot table, whose capacity is declared (decisions 6 and 34).
+// - **Every limit answers at the make,** never with a trap: an option outside what Web Audio allows is `NotSupported`,
+//   as Web Audio's `NotSupportedError`; memory with no room for a declared capacity is `OutOfMemory`; and a node made
+//   when every row is held is `TooManyNodes`.
+
+import { audio::graph::ContextState, audio::graph::ContextKey, audio::rt::SlotTable, audio::rt::CapacityError,
+         AudioMemory, std::memory::Shared };
+
+export { BaseAudioContext, OfflineAudioContext, OfflineAudioContextOptions, AudioError };
+
+// Why a context or a node was not made.
+type enum AudioError implements Error {
+    NotSupported, OutOfMemory, TooManyNodes;
+
+    public const fn string message() {
+        return match (this) {
+            case NotSupported: "an option is outside what Web Audio allows: 1 to 32 channels, a length of at least one frame, a sample rate from 3,000 to 768,000 Hz, and at least one node";
+            case OutOfMemory: "the program's memory had no room for the context's declared capacities";
+            case TooManyNodes: "every node row the context declared is held; a dropped node's row comes back once the audio side frees it";
+        };
+    }
+}
+
+type contract BaseAudioContext for resource {
+    // The sample rate, in Hz, at which the context renders.
+    const fn float32 sampleRate();
+
+    // The state a node made from this context holds. Only the package can build a key.
+    fn Shared<ContextState, AudioMemory> stateFor(ContextKey key);
+}
+
+// Web Audio's `OfflineAudioContextOptions`, with the package's declared capacities and the program's memory (decision 6).
+type value OfflineAudioContextOptions {
+    public int32 numberOfChannels = 1;
+    public int64 length = 1;                 // in sample frames
+    public float32 sampleRate = 44100;       // in Hz
+    public isize nodeCapacity = 1024;        // the nodes it can hold at once: the slot table's rows (decision 34)
+    public AudioMemory memory = AudioMemory.global();
+
+    public ctor make(int64 length, float32 sampleRate) {
+        this.length = length;
+        this.sampleRate = sampleRate;
+    }
+}
+
+// Web Audio's ranges: implementations support at least 32 channels and sample rates from 3,000 to 768,000 Hz.
+comptime int32 MOST_CHANNELS = 32;
+comptime float32 LOWEST_RATE = 3000;
+comptime float32 HIGHEST_RATE = 768000;
+
+type resource OfflineAudioContext implements BaseAudioContext {
+    Shared<ContextState, AudioMemory> state;
+    int32 channels = 1;
+    int64 frames = 1;
+
+    // The package's one test seam into a context: the tests program reads its rows and its due releases.
+    friend audiotests::rowsHeldIn[rowsHeld];
+    friend audiotests::releaseDueIn[releaseDue];
+
+    private ctor adopt(Shared<ContextState, AudioMemory> state, int32 channels, int64 frames) {
+        this.state = give state;
+        this.channels = channels;
+        this.frames = frames;
+    }
+
+    // A context rendering `options.length` frames of `options.numberOfChannels` channels at `options.sampleRate`, its
+    // state drawn from `options.memory`.
+    public ctor Result<OfflineAudioContext, AudioError> make(OfflineAudioContextOptions options) {
+        if (options.numberOfChannels < 1 || options.numberOfChannels > MOST_CHANNELS || options.length < 1
+            || options.sampleRate < LOWEST_RATE || options.sampleRate > HIGHEST_RATE || options.nodeCapacity < 1) {
+            return Result::Err(error: AudioError::NotSupported);
+        }
+        Result<SlotTable<AudioMemory>, CapacityError> table =
+            SlotTable::<AudioMemory>.withCapacityAndAllocator(allocator: options.memory, capacity: options.nodeCapacity);
+        return match (give table) {
+            case Ok(value: nodes): OfflineAudioContext.withState(options: options, nodes: give nodes);
+            case Err(error: e): Result::Err(error: AudioError::OutOfMemory);
+        };
+    }
+
+    private ctor Result<OfflineAudioContext, AudioError> withState(OfflineAudioContextOptions options,
+                                                                    SlotTable<AudioMemory> nodes) {
+        Optional<Shared<ContextState, AudioMemory>> state =
+            try new(allocator: options.memory) ContextState.make(nodes: give nodes, sampleRate: options.sampleRate);
+        return match (give state) {
+            case Some(value: s): Result::Ok(value: OfflineAudioContext.adopt(state: give s, channels: options.numberOfChannels,
+                                                                              frames: options.length));
+            case None: Result::Err(error: AudioError::OutOfMemory);
+        };
+    }
+
+    public const fn float32 sampleRate() { return this.state.sampleRate(); }
+
+    // Web Audio's `length`: the frames it renders.
+    public const fn int64 length() { return this.frames; }
+
+    public const fn int32 numberOfChannels() { return this.channels; }
+
+    public fn Shared<ContextState, AudioMemory> stateFor(ContextKey key) { return copy this.state; }
+
+    private const fn isize rowsHeld() { return this.state.rowsHeld(); }
+
+    private fn Optional<int64> releaseDue() { return this.state.nextRelease(); }
+}

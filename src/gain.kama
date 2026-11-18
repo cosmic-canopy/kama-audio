@@ -1,0 +1,26 @@
+// audio::GainNode, Web Audio's `GainNode` (decision 3): the first node, and the pattern every node follows.
+//
+// A node is a counted resource (decisions 4, 34 and 35). Making one takes a row in its context's table; `copy` counts
+// the row up and a `give` moves the handle; each drop counts it down, and the last marks the row, whose release the
+// flush sends. The audio side keeps the node while it can still sound, then frees the row.
+
+import { audio::graph::NodeHold, BaseAudioContext, AudioError };
+
+export { GainNode };
+
+type resource GainNode implements Copyable<This>(bare: give) {
+    NodeHold hold;
+
+    private ctor adopt(NodeHold hold) { this.hold = give hold; }
+
+    // A gain node in `context`, or `TooManyNodes` when every node row the context declared is held.
+    public ctor Result<GainNode, AudioError> make(BaseAudioContext context) {
+        Result<NodeHold, AudioError> taken = NodeHold.take(context: context);
+        return match (give taken) {
+            case Ok(value: h): Result::Ok(value: GainNode.adopt(hold: give h));
+            case Err(error: e): Result::Err(error: e);
+        };
+    }
+
+    public ctor copy(ref GainNode source) { this.hold = copy source.hold; }
+}

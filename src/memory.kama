@@ -1,0 +1,95 @@
+// audio::AudioMemory, the program's memory handed to a context as callbacks (decision 36; decisions 5 and 6).
+//
+// **A user pointer and the allocator's three functions,** as miniaudio's `ma_allocation_callbacks`, FMOD's memory
+// callbacks and Wwise's memory hooks take a program's memory. It is a plain value that implements kama's `Allocator`, so
+// it is the allocator of every type in the package, and no type names the program's allocator: a context and its nodes
+// keep Web Audio's names (decision 3).
+// - **Every byte the library allocates is drawn through it,** the context's state included, and only on the program's
+//   side, at a make or a hand-back (decision 5). Nothing is boxed, and nothing goes to the global heap behind the
+//   program's back.
+// - **Ready-made for kama's two allocators:** `global()` is the global heap, and `inArena(arena:)` is an std `Arena`,
+//   which must outlive every context made from it, as it outlives the containers drawn from it.
+// - **A program with an allocator of its own** hands its pointer and three free functions to `make`, as it would in C.
+//   Once kama binds a generic function's instance to an `fnptr` (KAMA_GAPS.md KAUD-9), the package can write those for
+//   any allocator.
+
+import { std::collections::Arena };
+
+export { AudioMemory, AllocateFn, ReallocateFn, DeallocateFn };
+
+// `Allocator.allocate` through the user pointer: a block of `bytes` aligned to `align`, or `None` when there is no room.
+fnptr Optional<UnsafePtr> AllocateFn(UnsafePtr user, usize bytes, usize align);
+// `Allocator.reallocate` through the user pointer: the block resized, moved if it must be, or `None` and the block untouched.
+fnptr Optional<UnsafePtr> ReallocateFn(UnsafePtr user, UnsafePtr pointer, usize bytes, usize newBytes, usize align);
+// `Allocator.deallocate` through the user pointer: the block given back, with the layout it was allocated with.
+fnptr void DeallocateFn(UnsafePtr user, UnsafePtr pointer, usize bytes, usize align);
+
+type value AudioMemory implements Allocator {
+    UnsafePtr user;
+    AllocateFn onAllocate;
+    ReallocateFn onReallocate;
+    DeallocateFn onDeallocate;
+
+    // A program's own allocator: `user` is handed back to each function, and must outlive every context made from this.
+    public unsafe ctor make(UnsafePtr user, AllocateFn allocate, ReallocateFn reallocate, DeallocateFn deallocate) {
+        this.user = user;
+        this.onAllocate = allocate;
+        this.onReallocate = reallocate;
+        this.onDeallocate = deallocate;
+    }
+
+    // The global heap.
+    public unsafe ctor global() {
+        this.user = null;
+        this.onAllocate = globalAllocate;
+        this.onReallocate = globalReallocate;
+        this.onDeallocate = globalDeallocate;
+    }
+
+    // An std `Arena`, which must outlive every context made from this. Its blocks come back at the arena's `reset()`.
+    public unsafe ctor inArena(ref Arena arena) {
+        this.user = cast<UnsafePtr>(addr(of: arena));
+        this.onAllocate = arenaAllocate;
+        this.onReallocate = arenaReallocate;
+        this.onDeallocate = arenaDeallocate;
+    }
+
+    public unsafe fn Optional<UnsafePtr> allocate(usize bytes, usize align) {
+        return this.onAllocate(user: this.user, bytes: bytes, align: align);
+    }
+
+    public unsafe fn Optional<UnsafePtr> reallocate(UnsafePtr pointer, usize bytes, usize newBytes, usize align) {
+        return this.onReallocate(user: this.user, pointer: pointer, bytes: bytes, newBytes: newBytes, align: align);
+    }
+
+    public unsafe fn void deallocate(UnsafePtr pointer, usize bytes, usize align) {
+        this.onDeallocate(user: this.user, pointer: pointer, bytes: bytes, align: align);
+    }
+}
+
+unsafe fn Optional<UnsafePtr> globalAllocate(UnsafePtr user, usize bytes, usize align) {
+    return GlobalAllocator.make().allocate(bytes: bytes, align: align);
+}
+
+unsafe fn Optional<UnsafePtr> globalReallocate(UnsafePtr user, UnsafePtr pointer, usize bytes, usize newBytes, usize align) {
+    return GlobalAllocator.make().reallocate(pointer: pointer, bytes: bytes, newBytes: newBytes, align: align);
+}
+
+unsafe fn void globalDeallocate(UnsafePtr user, UnsafePtr pointer, usize bytes, usize align) {
+    GlobalAllocator.make().deallocate(pointer: pointer, bytes: bytes, align: align);
+}
+
+unsafe fn Optional<UnsafePtr> arenaAllocate(UnsafePtr user, usize bytes, usize align) {
+    UnsafePtr<Arena> arena = cast<UnsafePtr<Arena>>(user);
+    return arena[0].handle().allocate(bytes: bytes, align: align);
+}
+
+unsafe fn Optional<UnsafePtr> arenaReallocate(UnsafePtr user, UnsafePtr pointer, usize bytes, usize newBytes, usize align) {
+    UnsafePtr<Arena> arena = cast<UnsafePtr<Arena>>(user);
+    return arena[0].handle().reallocate(pointer: pointer, bytes: bytes, newBytes: newBytes, align: align);
+}
+
+unsafe fn void arenaDeallocate(UnsafePtr user, UnsafePtr pointer, usize bytes, usize align) {
+    UnsafePtr<Arena> arena = cast<UnsafePtr<Arena>>(user);
+    arena[0].handle().deallocate(pointer: pointer, bytes: bytes, align: align);
+}

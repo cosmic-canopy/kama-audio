@@ -25,7 +25,7 @@ It is the audio half of kyoten's rule that each engine module is built on a gene
 
 **Seeded on 2026-11-13 with `kama seed` on kama 0.9.938+g94365be5 (kyoten's pin). The design pass is done
 (2026-11-15): areas 1 to 5 are decided (§ Decided, 1 to 30), and so are the first slice's module cut (31) and its
-command protocol's timing (32 and 33) and its slots (34 and 35),** on the
+command protocol's timing (32 and 33), its slots (34 and 35) and the program's memory (36),** on the
 evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This repository's documents, each to one purpose:
 - [FEATURES.md](FEATURES.md) is every feature the library will have, with its rungs, status, example, test and budget
   (decision 27);
@@ -49,8 +49,18 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
       Generations start at 1, so no live id is 0;
     - every wasm leg in debug and release, the release held to Closure (kama 0.9.966's KR-289; kyoten's rendering.md
       § Decided, 2026-11-17).
+  - on 2026-11-18, **AUD-2's counted handle with the first node** (decisions 4, 34, 35 and 36):
+    - `audio::AudioMemory` (`src/memory.kama`), the program's memory as a user pointer and three callbacks, ready-made
+      for the global heap and an std `Arena`;
+    - `audio::OfflineAudioContext` and its options, the `audio::BaseAudioContext` contract and `audio::AudioError`
+      (`src/context.kama`);
+    - `audio::GainNode` (`src/gain.kama`);
+    - the internal module `audio::graph` (`src/graph/graph.kama`): `ContextState`, the slot table and the context's
+      properties in one `Shared` made by `try new`, and `NodeHold`, which counts the row on a copy and at a drop;
+    - its 11 `nodes` cases (`tests/src/nodes_tests.kama`), each seen red against a stub or a mutation first. The tests
+      program hands the package its own allocator as callbacks, and counts its global heap (`tests/src/heap.kama`).
 
-  37 cases, green on every leg: native debug and release, wasm debug and release.
+  48 cases, green on every leg: native debug and release, wasm debug and release.
 - **Settled while building the table, reported to the owner to object to** (each within decisions 34 and 35):
   - the name `SlotTable`, and its calls: `take()`, `countUp(id:)`, `countDown(id:)`, `nextRelease()`, `free(id:)`,
     `countOf(id:)`, `length()`, `capacity()`, `retired()`;
@@ -61,6 +71,22 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
     and retired. `free(id:)` takes only a released row, so a report can never free a row whose release was not sent;
   - an id that names no row in the state a call needs is refused with `false`, `None` or a count of 0, never a trap;
   - a capacity above 2^32 is `BadCapacity`, checked before the allocator is asked, and the error's message says so.
+- **Settled while building the handle, reported to the owner to object to** (each within decisions 3, 4, 6, 34 to 36):
+  - **`BaseAudioContext` is a contract, not a base type.** kama's inheritance forbids a derived type to add a public
+    member, and each context adds its own, as `GainNode` adds `gain`. The node that `connect()` takes will be a
+    contract, `AudioNode`, for the same reason, when `connect()` comes;
+  - **what a context and its nodes share is an internal module, `audio::graph`,** which no program can import.
+    `BaseAudioContext.stateFor(key:)` is public, as a contract's members are, but its key's type is in that module, so
+    only the package can call it. Decision 31's cut gains it;
+  - **a node is `Copyable` with a bare hand-off that moves,** as `@kama/gpu`'s handles are: `copy g` counts up;
+  - **the first context is `OfflineAudioContext`,** made with `make(options:)` from `OfflineAudioContextOptions.make(
+    length:, sampleRate:)`, whose other fields take Web Audio's defaults (`numberOfChannels` 1), then
+    `nodeCapacity`, 1,024 by default, and `memory`, the global heap by default;
+  - **`AudioError` is `NotSupported`, `OutOfMemory` or `TooManyNodes`.** `NotSupported` is Web Audio's
+    `NotSupportedError` for its ranges: 1 to 32 channels, at least one frame, 3,000 to 768,000 Hz; a node capacity
+    below one is the same;
+  - **`GainNode.make(context:)` takes no options yet.** Its `gain` comes with `AudioParam` and the commands;
+  - **the test seam into a context is two `friend` grants,** `audiotests::rowsHeldIn` and `releaseDueIn`.
 - **Proved by mutation:**
   - the ring and the backlog (`.scratch/aud29/mutate_ring.py`, through the whole gate): 38 of 39 mutations of
     `src/rt/ring.kama` are caught, none by a hang.
@@ -72,27 +98,33 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
   - the slot table (`.scratch/aud29/mutate_slots.py`, through the whole gate): **47 of 47 mutations caught,** none by
     a hang. The first pass caught 43, and each of the four it missed showed a case too loose, now sharpened (SPEC.md
     § Proved by mutation). `free()`'s second clearing of a row's link was dropped before the pass as redundant.
+  - the memory, the context and the first node (`.scratch/aud29/mutate_handle.py`, through the whole gate): **39 of 40
+    caught,** none by a hang, the 40th equivalent (the options' default `length`, which the one constructor writes
+    first). The first pass caught 37; its two other misses showed the tests blind to the global heap, which the tests
+    program now counts.
 - **Decided on the way:**
   - on 2026-11-15, where a call scheduled ahead waits (32, in its node, as in Web Audio) and that a flush lands whole
     (33);
   - on 2026-11-16, AUD-2's four questions: a node's count in the program side's slot table, a public `audio::rt`
-    primitive, its ids 32 + 32 bits (34), and a dropped node's release sent after the backlog (35).
-- **Found on the way: KAUD-7 and KAUD-8.**
-  - std's collections trap when their allocator has no room (KAUD-7). So every declared capacity takes its storage as
-    the ring's does, through the private `Slots` in `src/rt/ring.kama`.
-  - `try new(allocator:)` into a `Shared` traps when the object fits and its control block does not (KAUD-8). That is
-    a bug, since SPEC says `try new` answers `None`.
+    primitive, its ids 32 + 32 bits (34), and a dropped node's release sent after the backlog (35);
+  - on 2026-11-18, the program's memory as callbacks, `AudioMemory` (36), and kyoten's pin at 0.9.978 on both
+    machines, for `try new` into a `Shared` (KR-399 to KR-402).
+- **Found on the way: KAUD-7, KAUD-8 and KAUD-9.**
+  - std's collections trap when their allocator has no room (KAUD-7, kama's KR-403, briefed). So every declared
+    capacity takes its storage as the ring's does, through the private `Slots` in `src/rt/ring.kama`.
+  - `try new(allocator:)` into a `Shared` trapped when the object fit and its control block did not (KAUD-8). Fixed in
+    0.9.973 and retired.
+  - A generic function's instance cannot be bound to an `fnptr` (KAUD-9), so the package cannot write the callbacks
+    for any allocator, and a program with its own writes three free functions.
 - **Next:**
-  - **the counted handle, with the first node** (decision 4). It holds the context's state, its row's id, and counts
-    its row up on a copy and down at its drop. The context takes the table, the backlog and the ring from the
-    allocator it is handed, once;
-  - **then the first commands, in `audio`:** a flat command type naming slots (a node made, a `connect()`, a start
+  - **the first commands, in `audio`:** a flat command type naming slots (a node made, a `connect()`, a start
     with its frame, a parameter's event, a release), and the late count, which is a node's rule (decision 32). The
-    flush sends the backlog, then `nextRelease()`'s releases once it has drained (decision 35). AUD-1's row closes with
-    them;
+    flush sends the backlog, then `nextRelease()`'s releases once it has drained (decision 35). The context's state
+    takes the backlog and the ring from the program's memory beside the table, and `GainNode` sends its make and its
+    release. AUD-1's row closes with them;
   - then the way back (AUD-3), whose report is `free(id:)`'s caller, and the context's options and memory (AUD-4);
   - then an `OfflineAudioContext` rendering in the declared block (AUD-9), and the first golden.
-- **Read first:** § Decided (4, 6, 9 and 32 to 35 above all), ROADMAP_DETAIL.md § AUD-29, and the probes it starts from
+- **Read first:** § Decided (4, 6, 9 and 32 to 36 above all), SPEC.md § Contexts and nodes, ROADMAP_DETAIL.md § AUD-29, and the probes it starts from
   (`aud-probe-cmd` for the commands and the way back, `aud-probe-routes` for slots and a block split at a frame).
 - **The pin is 0.9.978 (`5e542c55`) on both machines.**
   - The Windows box bumped kyoten's `.kama-version` to it on 2026-11-18. The Mac rebuilt it from a clean clone the same
@@ -944,6 +976,8 @@ Those questions stay in kyoten's `audio.md`.
       - kama's `internal` visibility would hide it from both.
     - **Amended on 2026-11-16:** the backlog in front of the ring (decision 33) and the slot table (decision 34) are
       among its primitives.
+    - **Amended on 2026-11-18:** an internal module, `audio::graph`, holds what a context and its nodes share, so the
+      lower tier's files share it and no program can import it (settled under decisions 4 and 34, and reported).
 32. **Decided on 2026-11-15: a call scheduled ahead waits in its node, as in Web Audio** (AUD-29, the command
     protocol). Decisions 3, 7 and 8 had left this open: the audio side drains the ring once a quantum, so something
     has to hold a `src.start(when: 2.0)` for the 750 quanta until its time comes. The owner took the recommendation.

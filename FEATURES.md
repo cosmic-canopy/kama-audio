@@ -86,7 +86,7 @@ that kind needs.
 | Nodes and buffers as counted resources | `AudioNode`, `AudioBuffer` | slots with generations, chosen on the program's side | planned | loop | slots | — |
 | A node kept while it can sound | Web Audio's lifetime rule | a playing source until it ends · a live input or a tail not yet silent | planned | loop | node-lifetime | — |
 | The way back: events and levels | `onended` | an event ring · latest-value snapshots | planned | loop | way-back | — |
-| Declared capacities and an injected allocator | — | the global heap · an `Allocator` the program hands the context | planned | loop | capacities | — |
+| Declared capacities and the program's memory | — | the global heap · an std `Arena` · the program's own allocator, as callbacks (`AudioMemory`) | planned | loop | capacities | — |
 | The engine's declared block | `renderSizeHint`, `renderQuantumSize` (1.1) | several blocks a callback · a FIFO between the block and the device | planned | loop | block | — |
 | Connections and fan-in | `connect`, `disconnect` | — | planned | loop | connect | — |
 | Channel count, mode and interpretation | `channelCount`, `channelCountMode`, `channelInterpretation` | discrete · the speakers' up-mix and down-mix | planned | sfx | channel-rules | — |

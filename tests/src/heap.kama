@@ -1,0 +1,47 @@
+// The tests program's global heap, counted (kama's `@globalAllocator`): every block the program's C obtains, resizes
+// or releases passes through it, so a case can see what the package drew from the global heap, and what it gave back.
+// It is the tests program's own choice, as a program chooses its heap; the package sets nothing program-wide. The
+// blocks themselves come from the platform's allocator, as kama's runtime takes them by default (`csrc/heap.c`).
+
+import { std::concurrent::Atomic };
+
+export { CountingHeap, heapAllocations, heapBytesOut };
+
+extern "heap.h";
+extern fn UnsafePtr audiotests_heap_allocate(usize n, usize align);
+extern fn UnsafePtr audiotests_heap_reallocate(UnsafePtr p, usize n, usize newN, usize align);
+extern fn void audiotests_heap_deallocate(UnsafePtr p, usize n, usize align);
+
+@globalAllocator type resource CountingHeap implements GlobalHeap {
+    Atomic<int64> allocations;   // blocks obtained, ever
+    Atomic<int64> bytesOut;      // bytes held now
+
+    public unsafe fn Optional<UnsafePtr> allocate(usize bytes, usize align) {
+        UnsafePtr p = audiotests_heap_allocate(n: bytes, align: align);
+        if (p == null) { return Optional::None; }
+        int64 a = this.allocations.fetchAdd(delta: 1);
+        int64 b = this.bytesOut.fetchAdd(delta: cast<int64>(bytes));
+        return Optional::Some(value: p);
+    }
+
+    public unsafe fn Optional<UnsafePtr> reallocate(UnsafePtr pointer, usize bytes, usize newBytes, usize align) {
+        UnsafePtr p = audiotests_heap_reallocate(p: pointer, n: bytes, newN: newBytes, align: align);
+        if (p == null) { return Optional::None; }
+        int64 b = this.bytesOut.fetchAdd(delta: cast<int64>(newBytes) - cast<int64>(bytes));
+        return Optional::Some(value: p);
+    }
+
+    public unsafe fn void deallocate(UnsafePtr pointer, usize bytes, usize align) {
+        audiotests_heap_deallocate(p: pointer, n: bytes, align: align);
+        int64 b = this.bytesOut.fetchAdd(delta: 0 - cast<int64>(bytes));
+    }
+
+    public fn int64 allocated() { return this.allocations.load(); }
+    public fn int64 held() { return this.bytesOut.load(); }
+}
+
+// Blocks the program has obtained from its global heap, ever.
+fn int64 heapAllocations() { return global::<CountingHeap>().allocated(); }
+
+// Bytes the program holds on its global heap now.
+fn int64 heapBytesOut() { return global::<CountingHeap>().held(); }

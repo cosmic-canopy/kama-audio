@@ -8,7 +8,7 @@
   "entry": "src/main.kama",
   "reproducible-float": true,
   "cincludes": ["csrc"],
-  "csources": ["csrc/thr.c"],
+  "csources": ["csrc/thr.c", "csrc/heap.c"],
   "emSettings": { "WASM_WORKERS": 1 },
   "modules": {
     ".": { "visibility": "internal" }

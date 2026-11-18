@@ -6,11 +6,12 @@ tested.
 - The decided design and the library's departures from kama's are [AGENTS.audio.md](AGENTS.audio.md).
 - Its history is the git log and [CHANGELOG.md](CHANGELOG.md).
 
-**Where it stands** (2026-11-17, kama 0.9.966): the first slice, AUD-29 (a sample-exact loop), is under way. The command
+**Where it stands** (2026-11-18, kama 0.9.978): the first slice, AUD-29 (a sample-exact loop), is under way. The command
 protocol's two halves are built (AUD-1): the ring it runs on, which publishes a batch with one store, and the backlog in
-front of it. So is the slot table that a command names a node by (AUD-2). Each is tested natively and on wasm under
-node, in debug and release. The commands themselves come with the nodes they name. Nothing makes a sound yet. Not
-published.
+front of it. So is the slot table that a command names a node by (AUD-2), and the first node over it: an
+`OfflineAudioContext` made from the program's memory, handed over as callbacks, and a `GainNode` counted in its table.
+Each is tested natively and on wasm under node, in debug and release. The commands themselves come next. Nothing makes
+a sound yet. Not published.
 
 ## The modules
 
@@ -18,9 +19,10 @@ Decision 31 sets the first cut:
 
 | Module | What it holds |
 |---|---|
-| `audio` | the lower tier, Web Audio's graph under Web Audio's names. Nothing yet |
+| `audio` | the lower tier, Web Audio's graph under Web Audio's names: `AudioMemory`, `BaseAudioContext`, `OfflineAudioContext`, `OfflineAudioContextOptions`, `AudioError`, `GainNode` |
 | `audio::sound` | the upper tier: sounds, voices, buses, snapshots and emitters. Not made yet |
 | `audio::rt` | the real-time primitives that the engine and a program's own DSP share: `Ring`, `Backlog`, `SlotTable`, `CapacityError`, `slotOf`, `generationOf` |
+| `audio::graph` | **internal**: what a context and its nodes share, `ContextState` and `NodeHold`. The package's own modules import it, and no program can |
 
 ## The command protocol's two halves
 
@@ -158,6 +160,90 @@ before it.
     just past the table, which the storage's index would otherwise wrap onto slot 0, and a freed row's next generation
     before a take answers it.
 
+## The program's memory
+
+### `audio::AudioMemory`
+
+**The program's memory, handed over as a user pointer and three callbacks** (decision 36), as miniaudio, FMOD and Wwise
+take theirs. It is a `type value` that implements kama's `Allocator`, so it is the allocator of every type in the
+package, and no type names the program's allocator.
+- **Making one:**
+  - `AudioMemory.global()` is the global heap;
+  - `AudioMemory.inArena(arena:)` is an std `Arena`, which must outlive every context made from it;
+  - `AudioMemory.make(user:, allocate:, reallocate:, deallocate:)` is a program's own allocator: three free functions
+    of the types `AllocateFn`, `ReallocateFn` and `DeallocateFn`, each handed `user` first, then `Allocator`'s own
+    arguments.
+- **Every byte the package allocates is drawn through it,** the context's state included: nothing is boxed, and
+  nothing goes to the global heap behind the program's back. An allocation happens only at a make, on the program's
+  side, never on the audio thread (decision 5).
+- **Tested** (`tests/src/nodes_tests.kama`, the `nodes` cases):
+  - the ready-made callbacks draw from the global heap, which keeps a block's bytes when it grows, and from an arena,
+    which runs out where the heap would not, has room again after its reset, and grows a block in place;
+  - nothing is drawn from the global heap behind the program's back. While a context is made from the program's own
+    memory, and a node, a copy and their drops, every block the global heap gives is one the program's allocator asked
+    for; `global()` gives back every byte it takes; and an arena's block, taken and given back, never reaches the heap.
+
+  The tests program is itself a program with an allocator of its own, three free functions over a few counters. It
+  also counts its global heap, its own choice through kama's `@globalAllocator` (`tests/src/heap.kama`, the blocks
+  from the platform's allocator as kama's runtime takes them, `tests/csrc/heap.c`).
+
+## Contexts and nodes
+
+**A context is a resource, and every node made from it holds its state** (decision 4). The state lives until the
+last of them is dropped, the context's own handle included.
+
+### `audio::BaseAudioContext`
+
+**A contract,** as Web Audio's `BaseAudioContext` is the base of its two contexts. kama's inheritance cannot carry
+it: a derived type may add no public member, and each context adds its own. A node is made from any context through
+it. Its members:
+- `sampleRate()`, in Hz;
+- `stateFor(key:)`, the state a node holds. Its key's type is in `audio::graph`, which no program can import, so only
+  the package can call it.
+
+### `audio::OfflineAudioContext`
+
+- **Making one:** `OfflineAudioContext.make(options:)` returns `Result<OfflineAudioContext, AudioError>`.
+  `OfflineAudioContextOptions.make(length:, sampleRate:)` holds Web Audio's options, then the package's:
+  - `numberOfChannels`, 1 by default;
+  - `length`, in sample frames;
+  - `sampleRate`, in Hz;
+  - `nodeCapacity`, the nodes it can hold at once, 1,024 by default: the rows of its slot table (decisions 6, 34);
+  - `memory`, `AudioMemory.global()` by default.
+- **What a make takes:** the slot table and the state, drawn from `options.memory` once, two allocations. The state
+  is one `Shared`, made by `try new(allocator:)`. Both go back with the last hold.
+- **What a make answers instead** (`audio::AudioError`), with nothing left allocated:
+  - `NotSupported` for an option outside Web Audio's ranges, as Web Audio's `NotSupportedError`: 1 to 32 channels, a
+    length of at least one frame, a sample rate from 3,000 to 768,000 Hz. A node capacity below one is the same;
+  - `OutOfMemory` when the memory has no room for the table or the state. When the table fits and the state does not,
+    the table goes back too.
+- **What it answers:** `sampleRate()`, `length()` and `numberOfChannels()`, as it was made.
+- **The test seam:** two `friend` grants to the tests program, `audiotests::rowsHeldIn` and `audiotests::releaseDueIn`,
+  read its rows held and take its next release due.
+
+### `audio::GainNode`
+
+**The first node, and the pattern every node follows** (decisions 4, 34 and 35).
+- **Making one:** `GainNode.make(context:)` takes a row in the context's table and returns
+  `Result<GainNode, AudioError>`. With every row held it answers `TooManyNodes`, and nothing changes. Making a node
+  allocates nothing.
+- **A counted resource,** `Copyable` with a bare hand-off that moves, as `@kama/gpu`'s handles are: `copy g` counts its
+  row up, a `give` moves the handle without counting, and each drop counts it down.
+- **The last drop marks the row,** and releases come out in the order the last drops were made. The row stays held
+  until the audio side frees it, so a context whose rows are all held refuses a make even after a drop.
+- **Tested** (the `nodes` cases, 11 of them, each seen red against a stub or a mutation first):
+  - a context takes its table and its state from the program's memory once, and making a node takes nothing; its state
+    outlives the context's handle while a node holds it, and everything goes back at the last drop;
+  - it answers the channels, length and sample rate it was made with;
+  - each of Web Audio's ranges refused as `NotSupported`, each bound made, and nothing allocated;
+  - `OutOfMemory` at every budget short of the context, leaving nothing out, the table included;
+  - a make takes a row, the first at slot 0, held after the last drop, its release due once;
+  - a copy counts the row up, a give moves it, and the last drop releases it once;
+  - releases in the order of the last drops;
+  - a full table refuses a make, before and after a drop, and changes nothing;
+  - a thousand copies and their drops balance;
+  - and the memory's two cases above.
+
 ## Proved by mutation
 
 ### The ring and the backlog
@@ -186,4 +272,15 @@ is restored byte for byte after each. **All 47 turn a case red, none by a hang.*
   - **`retired()` answering how many are held:** the wrap case checked it only where the two were equal.
 - **`free()` clearing the row's link** was dropped before the pass, since `nextRelease()` has already cleared it: a row
   leaving a chain has its link cleared where it leaves, as `take()` does.
+
+### The program's memory, the contexts and the first node
+
+Each of 40 mutations of `src/memory.kama`, `src/context.kama`, `src/gain.kama` and `src/graph/graph.kama` runs through the
+whole gate (`.scratch/aud29/mutate_handle.py`), and each file is restored byte for byte after each. **39 of 40 turn a
+case red, none by a hang.**
+- **The first pass caught 37.** Two of its misses showed the tests blind to the global heap: `global()`'s deallocate
+  giving nothing back, and an arena's blocks handed back to the global heap. The tests program now counts its global
+  heap, and the case that reads it catches both.
+- **The options' default `length` made 0 is equivalent,** and is dropped: the one constructor,
+  `make(length:, sampleRate:)`, writes `length` before anything reads it.
 

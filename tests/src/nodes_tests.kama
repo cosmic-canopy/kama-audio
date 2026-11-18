@@ -8,7 +8,7 @@
 //   `OutOfMemory`, a full table as `TooManyNodes`.
 // These tests are a program with an allocator of its own: three free functions over a few counters (decision 36).
 
-import { Tally, audio::AudioMemory, audio::OfflineAudioContext, audio::OfflineAudioContextOptions, audio::AudioError,
+import { Tally, heapAllocations, heapBytesOut, audio::AudioMemory, audio::OfflineAudioContext, audio::OfflineAudioContextOptions, audio::AudioError,
          audio::GainNode, audio::rt::slotOf, audio::rt::generationOf, std::collections::Arena,
          std::collections::DynamicArray };
 
@@ -142,7 +142,36 @@ unsafe fn string readyMade() {
     arena.reset();
     Optional<UnsafePtr> again = inArena.allocate(bytes: 48, align: 8);
     bool againFit = match (again) { case Some(value: x): true; case None: false; };
-    return againFit ? "" : "the arena had no room after its reset";
+    if (!againFit) { return "the arena had no room after its reset"; }
+    // A block grown through the arena's callbacks grows in the arena: 16 bytes grown to 48 leave no room for 32 more.
+    arena.reset();
+    Optional<UnsafePtr> small = inArena.allocate(bytes: 16, align: 8);
+    UnsafePtr growing = null;
+    match (small) { case Some(value: x): { growing = x; } case None: { } };
+    if (growing == null) { return "an empty arena of 64 bytes had no room for 16"; }
+    Optional<UnsafePtr> regrown = inArena.reallocate(pointer: growing, bytes: 16, newBytes: 48, align: 8);
+    bool regrewIn = match (regrown) { case Some(value: x): true; case None: false; };
+    if (!regrewIn) { return "the arena could not grow 16 bytes to 48"; }
+    Optional<UnsafePtr> past = inArena.allocate(bytes: 32, align: 8);
+    bool pastFit = match (past) { case Some(value: x): true; case None: false; };
+    return pastFit ? "a block grown through the arena's callbacks did not grow in the arena" : "";
+}
+
+// A context answers the channels, the length and the sample rate it was made with.
+fn string properties() {
+    OfflineAudioContextOptions o = OfflineAudioContextOptions.make(length: 96000, sampleRate: 22050);
+    o.numberOfChannels = 6;
+    Result<OfflineAudioContext, AudioError> made = OfflineAudioContext.make(options: o);
+    return match (give made) {
+        case Ok(value: context): {
+            int32 channels = context.numberOfChannels();
+            int64 frames = context.length();
+            float32 rate = context.sampleRate();
+            return channels == 6 && frames == 96000 && rate == 22050 ? ""
+                : "made with 6 channels, 96,000 frames at 22,050 Hz, it answered ${channels}, ${frames} at ${rate}";
+        }
+        case Err(error: e): { string m = named(e: e); return "the context was refused: ${m}"; }
+    };
 }
 
 // A context takes its slot table and its state from the program's memory, two allocations, and making nodes takes
@@ -184,6 +213,64 @@ unsafe fn string lastHold() {
     int64 blocks = c[0];
     int64 bytes = c[1];
     return blocks == 0 && bytes == 0 ? "" : "${blocks} blocks and ${bytes} bytes were still out after the last hold";
+}
+
+// The package draws nothing from the global heap behind the program's back (decision 36): while a context is made
+// from the program's own memory, and a node, a copy and their drops, every block the global heap gives is one the
+// program's allocator asked for (the tests' own allocator draws from it). The ready-made callbacks keep to their
+// heaps: `global()` gives back every byte it takes, and an arena's blocks, taken and given back, never reach it.
+unsafe fn string globalHeap() {
+    InlineArray<int64>#(4) cells = [0; (4)];
+    cells[3] = -1;
+    UnsafePtr<int64> c = addr(of: cells[0]);
+    OfflineAudioContextOptions o = optionsIn(memory: countedIn(cells: c), nodes: 4);
+    int64 before = heapAllocations();
+    bool made = false;
+    {
+        Result<OfflineAudioContext, AudioError> got = OfflineAudioContext.make(options: o);
+        match (give got) {
+            case Ok(value: context): {
+                Result<GainNode, AudioError> g = GainNode.make(context: context);
+                match (give g) {
+                    case Ok(value: node): {
+                        GainNode other = copy node;
+                        letGo(node: give other);
+                        made = true;
+                    }
+                    case Err(error: e): { }
+                };
+            }
+            case Err(error: e): { }
+        };
+    }
+    int64 drew = heapAllocations() - before;
+    int64 asked = c[2];
+    if (!made) { return "the context or its node was refused"; }
+    if (asked != 2 || drew != asked) {
+        return "the global heap gave ${drew} blocks where the program's own allocator, which draws from it, asked for ${asked} of the 2 due";
+    }
+
+    AudioMemory heap = AudioMemory.global();
+    int64 heldBefore = heapBytesOut();
+    Optional<UnsafePtr> p = heap.allocate(bytes: 64, align: 8);
+    int64 heldDuring = heapBytesOut();
+    match (p) { case Some(value: x): { heap.deallocate(pointer: x, bytes: 64, align: 8); } case None: { } };
+    int64 heldAfter = heapBytesOut();
+    int64 took = heldDuring - heldBefore;
+    int64 kept = heldAfter - heldBefore;
+    if (took != 64) { return "global() took ${took} bytes from the global heap where 64 were due"; }
+    if (kept != 0) { return "global() kept ${kept} bytes of the global heap after giving its block back"; }
+
+    Arena arena = Arena.make(capacity: 64);
+    AudioMemory inArena = AudioMemory.inArena(arena: arena);
+    int64 blocksBefore = heapAllocations();
+    int64 bytesBefore = heapBytesOut();
+    Optional<UnsafePtr> q = inArena.allocate(bytes: 48, align: 8);
+    match (q) { case Some(value: x): { inArena.deallocate(pointer: x, bytes: 48, align: 8); } case None: { } };
+    int64 blocksMoved = heapAllocations() - blocksBefore;
+    int64 bytesMoved = heapBytesOut() - bytesBefore;
+    return blocksMoved == 0 && bytesMoved == 0 ? ""
+        : "an arena's block, taken and given back, moved ${blocksMoved} blocks and ${bytesMoved} bytes of the global heap";
 }
 
 // ---- the make's answers -----------------------------------------------------------------------------------------------
@@ -423,6 +510,8 @@ fn void nodesTests(ref Tally t) {
     t.verdict(name: "nodes: the ready-made callbacks draw from the global heap and from an Arena", why: readyMade());
     t.verdict(name: "nodes: a context takes its table and state from the program's memory once, and the last hold gives them back",
               why: lastHold());
+    t.verdict(name: "nodes: nothing is drawn from the global heap behind the program's back", why: globalHeap());
+    t.verdict(name: "nodes: a context answers the channels, length and sample rate it was made with", why: properties());
     t.verdict(name: "nodes: an option outside Web Audio's ranges is NotSupported, and allocates nothing", why: ranges());
     t.verdict(name: "nodes: memory with no room is OutOfMemory at every budget short of the context, leaving nothing out",
               why: noRoom());

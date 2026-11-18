@@ -124,8 +124,21 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
     release. AUD-1's row closes with them;
   - then the way back (AUD-3), whose report is `free(id:)`'s caller, and the context's options and memory (AUD-4);
   - then an `OfflineAudioContext` rendering in the declared block (AUD-9), and the first golden.
-- **Read first:** § Decided (4, 6, 9 and 32 to 36 above all), SPEC.md § Contexts and nodes, ROADMAP_DETAIL.md § AUD-29, and the probes it starts from
-  (`aud-probe-cmd` for the commands and the way back, `aud-probe-routes` for slots and a block split at a frame).
+- **Read first:** § Decided (4, 6, 9 and 32 to 36 above all), SPEC.md § Contexts and nodes, ROADMAP_DETAIL.md
+  § AUD-29, and the probes it starts from (`aud-probe-cmd` for the commands and the way back, `aud-probe-routes` for
+  slots and a block split at a frame).
+- **Each slice checks the owner's games for code it can take** (2026-11-18, after the owner asked why audio came so
+  fast in them). `../friendly-fire-department/audio/` and `../the-mallow-man/audio/` each answer one game: a fixed set
+  of commands, a ring that drops when full, and the web leg rendered on the page's thread. But parts of them fit rungs
+  already decided, and kyoten's rule lets them be taken with no credit line, their source named as provenance:
+  - the mallow man's RBJ biquads (`biquad.kama`), the cookbook Web Audio's `BiquadFilterNode` is specified by
+    (AUD-30, AUD-34);
+  - its equal-power pan law (`space.kama`), decision 20's first spatial rung (AUD-30);
+  - FFD's microphone capture through miniaudio (`mic_native.kama`, `ffd_mic_native.h`), for voice chat's native input
+    (AUD-32).
+
+  The synth's oscillators (`synth.kama`) need band-limiting first, since Web Audio's must not alias. Taken code is held
+  to this package's rules like any other: test-first, proved by mutation.
 - **The pin is 0.9.978 (`5e542c55`) on both machines.**
   - The Windows box bumped kyoten's `.kama-version` to it on 2026-11-18. The Mac rebuilt it from a clean clone the same
     day, at the owner's word ("Match Windows: 0.9.978"), after first building 0.9.981, origin's head: 0.9.978 already

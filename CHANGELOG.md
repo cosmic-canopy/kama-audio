@@ -5,6 +5,18 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- A call's command reaches the audio side (AUD-1 over AUD-2's handle, decisions 7, 8, 33 and 35): `GainNode.make`
+  adds its make to the context's backlog, and the context's flush moves the backlog into the command ring, then the
+  due releases once the backlog has drained, all published with one store. A release is never refused and never
+  overtakes a command naming its node; a full ring keeps it due (2026-11-18).
+- `OfflineAudioContextOptions` declares `ringCapacity` (1,024) and `backlogCapacity` (4,096), each at least one, and a
+  context draws both from the program's memory beside its slot table: four allocations at a make, every part taken
+  before a refusal given back (2026-11-18).
+- `AudioError::TooManyCommands`: a make with the context's backlog full, answered before a row is taken, so nothing
+  changes (decision 8) (2026-11-18).
+- `audio::rt::Ring.room()`, the producer's room counting what is staged and not yet popped, and
+  `audio::rt::Backlog.stageInto(ring:)`, a move that stages without publishing, so a caller can stage more behind it
+  and publish once; `flushInto` is the two together (2026-11-18).
 - `audio::AudioMemory`, the program's memory handed to a context as a user pointer and three callbacks (decision 36):
   `global()`, `inArena(arena:)`, or `make(user:, allocate:, reallocate:, deallocate:)` for a program's own allocator;
   every byte the package allocates is drawn through it (2026-11-18).

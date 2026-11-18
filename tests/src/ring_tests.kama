@@ -232,6 +232,47 @@ fn string pushPublishesStaged(ref Ring<Probe> r) {
     return expectEmpty(r: r);
 }
 
+fn string roomOf(ref Ring<Probe> r, isize want, const ref string moment) {
+    isize n = r.room();
+    return n == want ? "" : "${moment}: the room was ${n} where ${want} was due";
+}
+
+// The room counts what is staged and what the consumer has not popped, grows only as the consumer pops, and a stage it
+// allows is taken.
+fn string roomCounts(ref Ring<Probe> r) {
+    string why = roomOf(r: r, want: 4, moment: "a fresh ring of 4");
+    if (!why.isEmpty()) { return why; }
+    if (!r.stage(item: Probe.make(seq: 0))) { return "a stage onto an empty ring was refused"; }
+    why = roomOf(r: r, want: 3, moment: "one staged");
+    if (!why.isEmpty()) { return why; }
+    r.publish();
+    why = roomOf(r: r, want: 3, moment: "one published");
+    if (!why.isEmpty()) { return why; }
+    if (!r.push(item: Probe.make(seq: 1))) { return "a push onto a ring of 4 holding one was refused"; }
+    why = roomOf(r: r, want: 2, moment: "two published");
+    if (!why.isEmpty()) { return why; }
+    why = expectSeq(r: r, seq: 0);
+    if (!why.isEmpty()) { return why; }
+    why = roomOf(r: r, want: 3, moment: "one of two popped");
+    if (!why.isEmpty()) { return why; }
+    int64 i = 2;
+    while (i < 5) {
+        if (!r.stage(item: Probe.make(seq: i))) { return "stage ${i} was refused with room for it"; }
+        i = i + 1;
+    }
+    why = roomOf(r: r, want: 0, moment: "one published and three staged");
+    if (!why.isEmpty()) { return why; }
+    if (r.stage(item: Probe.make(seq: 99))) { return "a ring with no room took a stage"; }
+    r.publish();
+    i = 1;
+    while (i < 5) {
+        why = expectSeq(r: r, seq: i);
+        if (!why.isEmpty()) { return why; }
+        i = i + 1;
+    }
+    return roomOf(r: r, want: 4, moment: "every item popped, the counters past the capacity");
+}
+
 // ---- across threads -----------------------------------------------------------------------------------------------
 
 fn int64 pushOne(ref Crossing c, int64 next) {
@@ -261,6 +302,8 @@ unsafe fn void ringTests(ref Tally t) {
     withRing(t: t, name: "command-ring: what is staged counts against the capacity, and staging past it is refused",
              capacity: 4, body: stagedCounts);
     withRing(t: t, name: "command-ring: a push publishes what was staged before it", capacity: 4, body: pushPublishesStaged);
+    withRing(t: t, name: "command-ring: its room counts what is staged and what is not popped, and grows only as items are popped",
+             capacity: 4, body: roomCounts);
     crossing(t: t, name: "command-ring: a million commands cross to another thread whole and in order", batch: 1,
              step: pushOne);
     crossing(t: t, name: "command-ring: a million commands staged in batches of 5 cross to another thread, each batch whole",

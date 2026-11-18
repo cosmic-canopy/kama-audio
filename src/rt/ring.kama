@@ -23,7 +23,8 @@
 // - **Its capacity is declared, and its storage is taken the same way.** A full backlog refuses an add and keeps what
 //   it holds, so the call that made the command can return an error, and nothing is lost.
 // - **A flush moves what the ring has room for,** from the front, in order, and publishes it with one store. What is
-//   left waits, in order, and goes first on the next flush.
+//   left waits, in order, and goes first on the next flush. A move stages without publishing, so a caller can stage
+//   more behind it and publish everything with the one store: a context's flush adds the due releases that way.
 // - **It counts its high-water marks:** the most it has held at once, which its capacity must allow, and the most a
 //   flush has left behind, which says by how much the ring was too small.
 //
@@ -154,6 +155,14 @@ type resource Ring<T: value, A: Allocator = GlobalAllocator> {
         return Optional::Some(value: item);
     }
 
+    // The producer's side: how many more items it can stage now, counting what is staged and what the consumer has not
+    // popped. The consumer only ever adds to it, so a stage the room allows is never refused.
+    public fn isize room() {
+        int64 h = this.head.loadExplicit(order: MemoryOrder::Relaxed) + this.staged;
+        int64 t = this.tail.loadExplicit(order: MemoryOrder::Acquire);
+        return cast<isize>(this.slots.count() - (h - t));
+    }
+
     // The capacity it was made with.
     public const fn isize capacity() { return cast<isize>(this.slots.count()); }
 }
@@ -192,9 +201,10 @@ type resource Backlog<T: value, A: Allocator = GlobalAllocator> {
         return true;
     }
 
-    // Moves as many as `ring` has room for, from the front, in order, and publishes them with one release store. Answers
-    // how many moved. What is left waits, in order, ahead of anything added later.
-    public fn isize flushInto(ref Ring<T, A> ring) {
+    // Moves as many as `ring` has room for, from the front, in order, staged and not yet published: the caller publishes
+    // them, with anything it stages after them, in one store. Answers how many moved. What is left waits, in order,
+    // ahead of anything added later.
+    public fn isize stageInto(ref Ring<T, A> ring) {
         int64 moved = 0;
         bool room = true;
         while (room && this.front < this.back) {
@@ -204,10 +214,17 @@ type resource Backlog<T: value, A: Allocator = GlobalAllocator> {
                 moved = moved + 1;
             }
         }
-        ring.publish();
         int64 left = this.back - this.front;
         if (left > this.mostLeftBehind) { this.mostLeftBehind = left; }
         return cast<isize>(moved);
+    }
+
+    // Moves as many as `ring` has room for, from the front, in order, and publishes them with one release store. Answers
+    // how many moved. What is left waits, in order, ahead of anything added later.
+    public fn isize flushInto(ref Ring<T, A> ring) {
+        isize moved = this.stageInto(ring: ring);
+        ring.publish();
+        return moved;
     }
 
     // How many it holds now.

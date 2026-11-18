@@ -10,8 +10,9 @@ tested.
 protocol's two halves are built (AUD-1): the ring it runs on, which publishes a batch with one store, and the backlog in
 front of it. So is the slot table that a command names a node by (AUD-2), and the first node over it: an
 `OfflineAudioContext` made from the program's memory, handed over as callbacks, and a `GainNode` counted in its table.
-Each is tested natively and on wasm under node, in debug and release. The commands themselves come next. Nothing makes
-a sound yet. Not published.
+A node's make and its release travel as commands: the backlog, then a flush into the ring. Each is tested natively and
+on wasm under node, in debug and release. Nothing reads the commands on the audio side yet, and nothing makes a sound.
+Not published.
 
 ## The modules
 
@@ -22,7 +23,7 @@ Decision 31 sets the first cut:
 | `audio` | the lower tier, Web Audio's graph under Web Audio's names: `AudioMemory`, `BaseAudioContext`, `OfflineAudioContext`, `OfflineAudioContextOptions`, `AudioError`, `GainNode` |
 | `audio::sound` | the upper tier: sounds, voices, buses, snapshots and emitters. Not made yet |
 | `audio::rt` | the real-time primitives that the engine and a program's own DSP share: `Ring`, `Backlog`, `SlotTable`, `CapacityError`, `slotOf`, `generationOf` |
-| `audio::graph` | **internal**: what a context and its nodes share, `ContextState` and `NodeHold`. The package's own modules import it, and no program can |
+| `audio::graph` | **internal**: what a context and its nodes share, `ContextState`, `NodeHold` and the commands, `Command` and `NodeKind`. The package's own modules import it, and no program can |
 
 ## The command protocol's two halves
 
@@ -60,12 +61,14 @@ side pops.
     nothing.
 - **`pop()` is the consumer's side.** It answers `None` on an empty ring. It is `@noheap`, so it never allocates, and
   it never waits.
+- **`room()`** is the producer's room: the capacity, less what is published and not yet popped, less what is staged.
+  The consumer only adds to it, so a stage it allows is never refused.
 - **`capacity()`** is the capacity it was made with.
 - **The counters:**
   - they are monotonic int64s, masked only at the array, so any capacity works, not only a power of two;
   - each sits on its own 128-byte line, and so does the producer's count of what it has staged;
   - each side publishes its counter with a release store, and reads the other's with an acquire load.
-- **Tested** (`tests/src/ring_tests.kama`, the `command-ring` cases, 12 of them):
+- **Tested** (`tests/src/ring_tests.kama`, the `command-ring` cases, 13 of them):
   - a fresh ring is empty at its declared capacity;
   - what is pushed comes out in order;
   - a full ring refuses a push and keeps what it holds;
@@ -75,6 +78,8 @@ side pops.
   - a staged item cannot be popped until it is published, then comes out in order;
   - what is staged counts against the capacity;
   - a push publishes what was staged before it;
+  - its room counts what is staged and what is not popped, grows only as items are popped, and a stage it allows is
+    taken;
   - a million commands cross to a second thread (a pthread natively, a Wasm Worker on wasm) whole and in order;
   - a million staged in batches of 5 cross with each batch seen whole: whenever the consumer finds the ring empty, it
     has seen a whole number of batches.
@@ -92,17 +97,21 @@ side pops.
 - **`flushInto(ring:)`** moves items from the front, in order, as many as the ring has room for. One release store
   publishes them (decision 33). It answers how many moved. What is left waits, in order, ahead of anything added later,
   and goes first on the next flush.
+- **`stageInto(ring:)`** is the same move, staged and not published, so the caller can stage more behind it and
+  publish everything with one store. `flushInto` is `stageInto` and the ring's `publish()`.
 - **`length()`** is how many it holds now, and **`capacity()`** the capacity it was made with.
 - **Its two high-water marks:**
   - `highWater()` is the most it has held at once, which its declared capacity must allow;
   - `mostLeft()` is the most a flush has left behind, which says by how much the ring was too small.
-- **Tested** (`tests/src/backlog_tests.kama`, the `backlog` cases, 10 of them):
+- **Tested** (`tests/src/backlog_tests.kama`, the `backlog` cases, 11 of them):
   - a fresh backlog is empty at its declared capacity, with both marks at zero;
   - what is added reaches the ring only at a flush, in order;
   - a flush moves what the ring has room for, and what is left goes first on the next one, ahead of what was added
     since;
   - a full backlog refuses an add and keeps what it holds;
   - a flush into a full ring moves nothing and keeps the order;
+  - a move stages what the ring has room for without publishing it, counts what it leaves behind, and what is left
+    goes first on the next;
   - both marks, and that neither falls when less follows;
   - both refusals;
   - the storage comes from an injected allocator exactly once, and goes back at the drop;
@@ -209,40 +218,89 @@ it. Its members:
   - `length`, in sample frames;
   - `sampleRate`, in Hz;
   - `nodeCapacity`, the nodes it can hold at once, 1,024 by default: the rows of its slot table (decisions 6, 34);
+  - `ringCapacity`, the commands that can cross to the audio side at once, 1,024 by default: its command ring
+    (decision 7);
+  - `backlogCapacity`, the commands that can wait for a flush, 4,096 by default: its backlog (decisions 8, 33);
   - `memory`, `AudioMemory.global()` by default.
-- **What a make takes:** the slot table and the state, drawn from `options.memory` once, two allocations. The state
-  is one `Shared`, made by `try new(allocator:)`. Both go back with the last hold.
+- **What a make takes:** the slot table, the command ring, the backlog and the state, drawn from `options.memory` once
+  each and in that order, four allocations. The state is one `Shared`, made by `try new(allocator:)`, that holds the
+  other three. All go back with the last hold.
 - **What a make answers instead** (`audio::AudioError`), with nothing left allocated:
   - `NotSupported` for an option outside Web Audio's ranges, as Web Audio's `NotSupportedError`: 1 to 32 channels, a
-    length of at least one frame, a sample rate from 3,000 to 768,000 Hz. A node capacity below one is the same;
-  - `OutOfMemory` when the memory has no room for the table or the state. When the table fits and the state does not,
-    the table goes back too.
+    length of at least one frame, a sample rate from 3,000 to 768,000 Hz. A node, ring or backlog capacity below one
+    is the same;
+  - `OutOfMemory` when the memory has no room for a part. Every part taken before it goes back.
 - **What it answers:** `sampleRate()`, `length()` and `numberOfChannels()`, as it was made.
-- **The test seam:** two `friend` grants to the tests program, `audiotests::rowsHeldIn` and `audiotests::releaseDueIn`,
-  read its rows held and take its next release due.
+- **The test seam:** four `friend` grants to the tests program:
+  - `audiotests::rowsHeldIn` reads its rows held;
+  - `audiotests::releaseDueIn` takes its next release due straight from the table;
+  - `audiotests::flushIn` flushes it;
+  - `audiotests::sentIn` takes the next command from its ring, as the audio side would, as text.
 
 ### `audio::GainNode`
 
 **The first node, and the pattern every node follows** (decisions 4, 34 and 35).
-- **Making one:** `GainNode.make(context:)` takes a row in the context's table and returns
-  `Result<GainNode, AudioError>`. With every row held it answers `TooManyNodes`, and nothing changes. Making a node
-  allocates nothing.
+- **Making one:** `GainNode.make(context:)` takes a row in the context's table, adds its make to the context's
+  backlog, and returns `Result<GainNode, AudioError>`. Making a node allocates nothing. It refuses, and nothing
+  changes:
+  - with the backlog full, as `TooManyCommands`. The backlog is checked first, before a row is taken;
+  - with every row held, as `TooManyNodes`.
 - **A counted resource,** `Copyable` with a bare hand-off that moves, as `@kama/gpu`'s handles are: `copy g` counts its
   row up, a `give` moves the handle without counting, and each drop counts it down.
 - **The last drop marks the row,** and releases come out in the order the last drops were made. The row stays held
   until the audio side frees it, so a context whose rows are all held refuses a make even after a drop.
 - **Tested** (the `nodes` cases, 11 of them, each seen red against a stub or a mutation first):
-  - a context takes its table and its state from the program's memory once, and making a node takes nothing; its state
-    outlives the context's handle while a node holds it, and everything goes back at the last drop;
+  - a context takes its table, its ring, its backlog and its state from the program's memory once, and making a node
+    takes nothing; its state outlives the context's handle while a node holds it, and everything goes back at the last
+    drop;
   - it answers the channels, length and sample rate it was made with;
-  - each of Web Audio's ranges refused as `NotSupported`, each bound made, and nothing allocated;
-  - `OutOfMemory` at every budget short of the context, leaving nothing out, the table included;
+  - each of Web Audio's ranges, and each capacity below one, refused as `NotSupported`, each bound made, and nothing
+    allocated;
+  - `OutOfMemory` at every budget short of the context, leaving nothing out, each part in turn the one refused;
   - a make takes a row, the first at slot 0, held after the last drop, its release due once;
   - a copy counts the row up, a give moves it, and the last drop releases it once;
   - releases in the order of the last drops;
   - a full table refuses a make, before and after a drop, and changes nothing;
   - a thousand copies and their drops balance;
   - and the memory's two cases above.
+
+## The commands
+
+**A call's command waits in the context's backlog, and a flush sends it into the ring the audio side reads**
+(decisions 7, 8, 32, 33 and 35). The flush's public callers come with their rows: a real-time context's `update()`
+(AUD-5) and an offline render's start (AUD-9).
+
+- **A command is flat and typed:** `audio::graph::Command`, a kama enum whose variants carry only numbers. So it
+  crosses a ring, or a transferred buffer, as its bytes, and the audio side applies each kind by name. It names its
+  node by the row's id, never by a pointer (decision 34). Two kinds are built so far, each sent by a call that is:
+  - `Made(node, kind)`, sent by a node's make. `NodeKind` names what to make, `Gain` so far;
+  - `Release(node)`, sent for a node whose last handle was dropped (decision 35).
+
+  Each later kind arrives with the call that sends it. `describe()` gives a command as text, `made gain 0:1` for a gain
+  made at slot 0, generation 1. Tests read it that way, since they cannot import the internal module.
+- **What a flush sends,** all published with one store (decision 33):
+  - first, the backlog's commands, in the order the calls were made, as many as the ring has room for;
+  - then, only once the backlog has drained, the due releases, in the order the last drops were made, while the ring
+    has room.
+- **So a release is never refused, and never overtakes a command naming its node.** Every such command was added
+  before the node's last drop.
+  - A release is taken from the table only when the ring has room, so a ring with no room keeps it due. The row stays
+    marked, and the release goes on a later flush, once.
+  - The drained backlog is checked, not inferred from the ring's room, because the audio side can free room on
+    another thread between the move and the releases.
+- **Tested** (`tests/src/commands_tests.kama`, the `commands` cases, 8 of them, each red against a stub first but the
+  defaults', which the mutations prove):
+  - the options declare a ring of 1,024 and a backlog of 4,096 by default, beside the table's 1,024 rows;
+  - a make adds its command to the backlog, and only a flush sends it, once;
+  - a flush sends the backlog's commands in the order the calls were made;
+  - a copy's drop sends nothing, and releases follow the backlog in the order of the last drops;
+  - a release waits behind the commands the backlog still holds;
+  - a ring with no room keeps a release due, sent on a later flush once;
+  - a full backlog refuses a make with `TooManyCommands`, and nothing changes;
+  - with the backlog and the table full, the backlog answers first.
+
+  The `nodes` cases cover the context's new parts: four allocations, each new capacity's range, every part in turn
+  refused with what came before it given back, and nothing taken from the global heap behind the program's back.
 
 ## Proved by mutation
 

@@ -2,23 +2,64 @@
 // internal: the package's own modules import it, and no program can.
 //
 // - **`ContextState`** is what a context's handles share: the program side's slot table, whose rows count the nodes
-//   (decision 34), and the context's fixed properties. It is one block, made by `try new` from the program's memory
-//   (decision 36), and freed with the last hold, the context's or a node's.
+//   (decision 34), the backlog every call's command waits in and the ring a flush moves it into (decisions 7, 8 and
+//   33), and the context's fixed properties. `stateFrom` draws its parts from the program's memory (decision 36), the
+//   state itself one block made by `try new`, all freed with the last hold, the context's or a node's.
 // - **`NodeHold`** is a node's hold on its context's state and on its row: a copy counts the row up, a drop counts it
 //   down, and the last drop marks the row for release (decision 35). The audio thread never touches a count
 //   (decision 4).
 // - **`ContextKey`** is what `BaseAudioContext.stateFor` asks for, so only `NodeHold.take` can reach a context's state.
+// - **`Command`** is what a call sends the audio side (decisions 7, 32 and 33): a flat, typed value naming its node by
+//   the id of its row, never by a pointer.
 
-import { audio::AudioMemory, audio::AudioError, audio::BaseAudioContext, audio::rt::SlotTable, std::memory::Shared };
+import { audio::AudioMemory, audio::AudioError, audio::BaseAudioContext, audio::rt::SlotTable, audio::rt::Ring,
+         audio::rt::Backlog, audio::rt::CapacityError, audio::rt::slotOf, audio::rt::generationOf, std::memory::Shared };
 
-export { ContextState, NodeHold, ContextKey };
+export { ContextState, NodeHold, ContextKey, Command, NodeKind, stateFrom };
+
+// The kind of node a `Made` command makes.
+type enum NodeKind {
+    Gain;
+
+    public const fn string name() { return match (this) { case Gain: "gain"; }; }
+}
+
+// A call's command (decision 7): flat bytes, so it crosses a ring or a transferred buffer as it is, and typed, so the
+// audio side applies each kind by name. A node is named by its row's id, its slot and generation (decision 34).
+type enum Command {
+    Made(int64 node, NodeKind kind),
+    Release(int64 node);
+
+    // The command as text, for a test's or a log's reading: `made gain 0:1`, `release 0:1`, each node as its slot and
+    // generation.
+    public const fn string describe() {
+        return match (this) {
+            case Made(node: n, kind: k): {
+                string what = k.name();
+                int64 slot = slotOf(id: n);
+                int64 generation = generationOf(id: n);
+                return "made ${what} ${slot}:${generation}";
+            }
+            case Release(node: n): {
+                int64 slot = slotOf(id: n);
+                int64 generation = generationOf(id: n);
+                return "release ${slot}:${generation}";
+            }
+        };
+    }
+}
 
 type resource ContextState {
     SlotTable<AudioMemory> nodes;
+    Backlog<Command, AudioMemory> waiting;
+    Ring<Command, AudioMemory> commands;
     float32 rate = 0;
 
-    public ctor make(SlotTable<AudioMemory> nodes, float32 sampleRate) {
+    public ctor make(SlotTable<AudioMemory> nodes, Ring<Command, AudioMemory> commands,
+                     Backlog<Command, AudioMemory> waiting, float32 sampleRate) {
         this.nodes = give nodes;
+        this.commands = give commands;
+        this.waiting = give waiting;
         this.rate = sampleRate;
     }
 
@@ -38,6 +79,78 @@ type resource ContextState {
 
     // The rows held: nodes the program holds, and nodes dropped whose rows the audio side has not freed.
     public const fn isize rowsHeld() { return this.nodes.length(); }
+
+    // Whether the backlog has room for one more command.
+    public const fn bool canSend() { return this.waiting.length() < this.waiting.capacity(); }
+
+    // Adds `command` behind the backlog's. False when the backlog is full, and then nothing is added.
+    public fn bool send(Command command) { return this.waiting.add(item: command); }
+
+    // The flush (decision 33): the backlog's commands moved into the ring, then, once the backlog has drained, the due
+    // releases while the ring has room (decision 35), all published with one store. Answers how many it sent.
+    // - A release goes only behind a drained backlog, so it never overtakes a command added before its node's last drop.
+    //   With the ring drained on another thread, room can open between the move and the releases, so this is checked,
+    //   not inferred from the room.
+    // - A release is taken from the table only when the ring has room for it, so none is handed over and not sent: a
+    //   row stays marked, and its release due, until a flush has room.
+    public fn isize flush() {
+        isize sent = this.waiting.stageInto(ring: this.commands);
+        if (this.waiting.length() == 0) {
+            bool more = true;
+            while (more && this.commands.room() > 0) {
+                Optional<int64> due = this.nodes.nextRelease();
+                match (due) {
+                    case Some(value: id): {
+                        bool staged = this.commands.stage(item: Command::Release(node: id));
+                        sent = sent + 1;
+                    }
+                    case None: { more = false; }
+                };
+            }
+        }
+        this.commands.publish();
+        return sent;
+    }
+
+    // The audio side's next command from the ring, or `None` when it holds none published. An offline render takes its
+    // commands on the program's thread; a real-time context's audio side reads the same ring.
+    public fn Optional<Command> nextCommand() { return this.commands.pop(); }
+}
+
+// A context's state drawn from `memory` (decision 36): its slot table of `nodeCapacity` rows, its command ring of
+// `ringCapacity`, its backlog of `backlogCapacity`, then the block that holds them, in that order, each only once the
+// one before it fit. A part with no room is `OutOfMemory`, and every part taken before it goes back.
+fn Result<Shared<ContextState, AudioMemory>, AudioError> stateFrom(AudioMemory memory, isize nodeCapacity,
+                                                                   isize ringCapacity, isize backlogCapacity,
+                                                                   float32 sampleRate) {
+    Result<SlotTable<AudioMemory>, CapacityError> table =
+        SlotTable::<AudioMemory>.withCapacityAndAllocator(allocator: memory, capacity: nodeCapacity);
+    match (give table) {
+        case Ok(value: nodes): {
+            Result<Ring<Command, AudioMemory>, CapacityError> ring =
+                Ring::<Command, AudioMemory>.withCapacityAndAllocator(allocator: memory, capacity: ringCapacity);
+            match (give ring) {
+                case Ok(value: commands): {
+                    Result<Backlog<Command, AudioMemory>, CapacityError> backlog =
+                        Backlog::<Command, AudioMemory>.withCapacityAndAllocator(allocator: memory, capacity: backlogCapacity);
+                    match (give backlog) {
+                        case Ok(value: waiting): {
+                            Optional<Shared<ContextState, AudioMemory>> state =
+                                try new(allocator: memory) ContextState.make(nodes: give nodes, commands: give commands,
+                                                                             waiting: give waiting, sampleRate: sampleRate);
+                            return match (give state) {
+                                case Some(value: s): Result::Ok(value: give s);
+                                case None: Result::Err(error: AudioError::OutOfMemory);
+                            };
+                        }
+                        case Err(error: e): { return Result::Err(error: AudioError::OutOfMemory); }
+                    };
+                }
+                case Err(error: e): { return Result::Err(error: AudioError::OutOfMemory); }
+            };
+        }
+        case Err(error: e): { return Result::Err(error: AudioError::OutOfMemory); }
+    };
 }
 
 type value ContextKey {
@@ -55,13 +168,18 @@ type resource NodeHold implements Copyable<This>(bare: give) {
         this.row = row;
     }
 
-    // A row in `context`'s table, counted once, or `TooManyNodes` when every row is held, and then nothing changes.
-    public ctor Result<NodeHold, AudioError> take(BaseAudioContext context) {
+    // A row in `context`'s table, counted once, with its `Made` command sent. `TooManyCommands` when the backlog is
+    // full, or `TooManyNodes` when every row is held, and then nothing changes.
+    public ctor Result<NodeHold, AudioError> take(BaseAudioContext context, NodeKind kind) {
         ContextKey key = ContextKey.mint();
         Shared<ContextState, AudioMemory> state = context.stateFor(key: key);
+        // The backlog's room is checked before a row is taken, so the make's command is sure to fit, and a refusal
+        // leaves the table as it was.
+        if (!state.canSend()) { return Result::Err(error: AudioError::TooManyCommands); }
         Optional<int64> taken = state.takeRow();
         int64 id = match (taken) { case Some(value: v): v; case None: 0; };
         if (id == 0) { return Result::Err(error: AudioError::TooManyNodes); }   // no live id is 0 (decision 34)
+        bool sent = state.send(command: Command::Made(node: id, kind: kind));
         return Result::Ok(value: NodeHold.adopt(state: give state, row: id));
     }
 

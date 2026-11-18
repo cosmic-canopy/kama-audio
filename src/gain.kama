@@ -4,7 +4,7 @@
 // the row up and a `give` moves the handle; each drop counts it down, and the last marks the row, whose release the
 // flush sends. The audio side keeps the node while it can still sound, then frees the row.
 
-import { audio::graph::NodeHold, BaseAudioContext, AudioError };
+import { audio::graph::NodeHold, audio::graph::NodeKind, BaseAudioContext, AudioError };
 
 export { GainNode };
 
@@ -13,9 +13,10 @@ type resource GainNode implements Copyable<This>(bare: give) {
 
     private ctor adopt(NodeHold hold) { this.hold = give hold; }
 
-    // A gain node in `context`, or `TooManyNodes` when every node row the context declared is held.
+    // A gain node in `context`, its make sent. `TooManyCommands` when the context's backlog is full, or `TooManyNodes`
+    // when every node row it declared is held, and then nothing changes.
     public ctor Result<GainNode, AudioError> make(BaseAudioContext context) {
-        Result<NodeHold, AudioError> taken = NodeHold.take(context: context);
+        Result<NodeHold, AudioError> taken = NodeHold.take(context: context, kind: NodeKind::Gain);
         return match (give taken) {
             case Ok(value: h): Result::Ok(value: GainNode.adopt(hold: give h));
             case Err(error: e): Result::Err(error: e);

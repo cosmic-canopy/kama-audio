@@ -342,3 +342,16 @@ case red, none by a hang.**
 - **The options' default `length` made 0 is equivalent,** and is dropped: the one constructor,
   `make(length:, sampleRate:)`, writes `length` before anything reads it.
 
+### The commands
+
+Each of 53 mutations of the ring's room and the backlog's move (`src/rt/ring.kama`), the commands, the flush, the
+state's parts and a make that sends (`src/graph/graph.kama`), and the context's new options and seams
+(`src/context.kama`) runs through the whole gate (`.scratch/aud29/mutate_commands.py`). Each file is restored byte for
+byte after each, and a mutation kama refuses to compile would count as invalid, not caught. **52 of 53 turn a case red,
+none by a hang.**
+- **The defaults' case, green on its first run,** catches each default made one smaller: the nodes', the ring's and
+  the backlog's.
+- **The one missed is the flush sending releases while the backlog still holds commands.** On one thread it cannot be
+  seen: the backlog stops moving only when the ring is full, so no release has room. The check matters only when the
+  audio side pops on another thread between the move and the releases, which would let a release overtake its node's
+  make. That is a race no deterministic case holds, so the check is held by review, as the ring's release store is.

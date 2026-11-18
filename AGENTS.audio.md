@@ -59,8 +59,20 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
       properties in one `Shared` made by `try new`, and `NodeHold`, which counts the row on a copy and at a drop;
     - its 11 `nodes` cases (`tests/src/nodes_tests.kama`), each seen red against a stub or a mutation first. The tests
       program hands the package its own allocator as callbacks, and counts its global heap (`tests/src/heap.kama`).
+  - on 2026-11-18, **AUD-1's first commands over the handle** (decisions 7, 8, 33 and 35; SPEC.md § The commands):
+    - `audio::graph::Command`, a kama enum whose variants carry only numbers: `Made(node, kind)` with `NodeKind`
+      (`Gain`), and `Release(node)`. It is 24 bytes, so it crosses as its bytes, and the audio side applies it by name;
+    - `ContextState` holds the backlog and the command ring beside the table. Its `flush()` stages the backlog, then,
+      once the backlog has drained, the due releases while the ring has room, and publishes everything with one store;
+    - `GainNode.make` sends its make. A full backlog answers `AudioError::TooManyCommands`, checked before a row is
+      taken, so nothing changes;
+    - `OfflineAudioContextOptions` declares `ringCapacity` and `backlogCapacity`. `audio::graph::stateFrom` draws the
+      four parts in order, and gives back every part taken before a refusal;
+    - `audio::rt::Ring.room()` and `audio::rt::Backlog.stageInto(ring:)`;
+    - 8 `commands` cases (`tests/src/commands_tests.kama`), one each for the room and the move, and 4 `nodes` cases
+      sharpened, each seen red against a stub first but the defaults'.
 
-  48 cases, green on every leg: native debug and release, wasm debug and release.
+  58 cases, green on every leg: native debug and release, wasm debug and release.
 - **Settled while building the table, reported to the owner to object to** (each within decisions 34 and 35):
   - the name `SlotTable`, and its calls: `take()`, `countUp(id:)`, `countDown(id:)`, `nextRelease()`, `free(id:)`,
     `countOf(id:)`, `length()`, `capacity()`, `retired()`;
@@ -87,6 +99,25 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
     below one is the same;
   - **`GainNode.make(context:)` takes no options yet.** Its `gain` comes with `AudioParam` and the commands;
   - **the test seam into a context is two `friend` grants,** `audiotests::rowsHeldIn` and `releaseDueIn`.
+- **Settled while building the commands, reported to the owner to object to** (each within decisions 6 to 8, 31 to 33
+  and 35):
+  - **`Command` is in the internal `audio::graph`,** since it is the protocol between a context, its nodes and the
+    engine, and no program needs it. The tests read it as text through two more `friend` grants, `audiotests::flushIn`
+    and `sentIn` (`made gain 0:1`). A probe showed that a module's `visibility` list names only the package's own
+    modules, so the tests program cannot import it;
+  - **a command is a kama enum with number payloads,** not a struct with a kind field. It is flat bytes all the same,
+    and the audio side's `match` over it is exhaustive. Each kind arrives with the call that sends it, so there is no
+    frame field yet: the first timed call brings it;
+  - **the options are `ringCapacity`, 1,024 by default, and `backlogCapacity`, 4,096,** each at least one or
+    `NotSupported`. The backlog is the larger, since every call of a frame waits in it until the flush (decision 33);
+  - **a full backlog is `AudioError::TooManyCommands`,** and with both the backlog and the table full, the backlog
+    answers first: it is checked before a row is taken;
+  - **a release is taken from the table only when the ring has room,** by `Ring.room()`, so `nextRelease()` never hands
+    over a release that cannot be sent;
+  - **the backlog's move is `Backlog.stageInto(ring:)`,** and `flushInto` is it plus `publish()`, so a caller can stage
+    more and publish once;
+  - **the flush is not public yet.** Its callers come with their rows, `update()` (AUD-5) and the offline render's start
+    (AUD-9).
 - **Proved by mutation:**
   - the ring and the backlog (`.scratch/aud29/mutate_ring.py`, through the whole gate): 38 of 39 mutations of
     `src/rt/ring.kama` are caught, none by a hang.
@@ -102,6 +133,11 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
     caught,** none by a hang, the 40th equivalent (the options' default `length`, which the one constructor writes
     first). The first pass caught 37; its two other misses showed the tests blind to the global heap, which the tests
     program now counts.
+  - the commands (`.scratch/aud29/mutate_commands.py`, through the whole gate): **52 of 53 caught,** none by a hang, and
+    none refused by kama. The miss is the flush sending releases while the backlog still holds commands. On one
+    thread that is invisible, since a backlog left holding commands means the ring is full. It matters only when the
+    audio side pops on another thread between the move and the releases, a race held by review, as the ring's release
+    store is.
 - **Decided on the way:**
   - on 2026-11-15, where a call scheduled ahead waits (32, in its node, as in Web Audio) and that a flush lands whole
     (33);
@@ -117,14 +153,16 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
   - A generic function's instance cannot be bound to an `fnptr` (KAUD-9), so the package cannot write the callbacks
     for any allocator, and a program with its own writes three free functions.
 - **Next:**
-  - **the first commands, in `audio`:** a flat command type naming slots (a node made, a `connect()`, a start
-    with its frame, a parameter's event, a release), and the late count, which is a node's rule (decision 32). The
-    flush sends the backlog, then `nextRelease()`'s releases once it has drained (decision 35). The context's state
-    takes the backlog and the ring from the program's memory beside the table, and `GainNode` sends its make and its
-    release. AUD-1's row closes with them;
-  - then the way back (AUD-3), whose report is `free(id:)`'s caller, and the context's options and memory (AUD-4);
-  - then an `OfflineAudioContext` rendering in the declared block (AUD-9), and the first golden.
-- **Read first:** § Decided (4, 6, 9 and 32 to 36 above all), SPEC.md § Contexts and nodes, ROADMAP_DETAIL.md
+  - **the audio side.** An engine stepped a quantum at a time drains the ring at the top of each quantum and keeps the
+    audio side's own table of node slots, its generations checked. It applies `Made` and `Release` under Web Audio's
+    lifetime rule, so a gain with no input is freed at once. Its "slot freed" report needs the way back (AUD-3), whose
+    reader is `free(id:)`'s caller;
+  - **the rest of AUD-1's commands, each with its call:** `connect()` (the `AudioNode` contract), a source's start with
+    its frame, and a parameter's events with `AudioParam`. The late count is a timed call's rule (decision 32), so it
+    lands with the first one, on the audio side's clock;
+  - then the context's options and memory (AUD-4), an `OfflineAudioContext` rendering in the declared block (AUD-9),
+    and the first golden.
+- **Read first:** § Decided (4, 6, 9 and 32 to 36 above all), SPEC.md § Contexts and nodes and § The commands, ROADMAP_DETAIL.md
   § AUD-29, and the probes it starts from (`aud-probe-cmd` for the commands and the way back, `aud-probe-routes` for
   slots and a block split at a frame).
 - **Each slice checks the owner's games for code it can take** (2026-11-18, after the owner asked why audio came so

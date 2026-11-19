@@ -6,8 +6,11 @@
 //   back off by a little (322,579 of the first 2,000,000), and a plain round-up of `time × rate` would put each of those
 //   a frame late, a whole quantum late on a quantum's edge. A time between two frames' times lands on the later, as Web
 //   Audio's event at a time takes effect at the first frame at or after it.
-// - **A negative time, NaN, and a time whose frame is past what an int64 counts answer `None`,** and the call says what
-//   that means for it.
+// - **The floor of `time × rate` is never past the answer,** so the search only steps up: a frame below it whose own
+//   time is at or after the time would need the product to overshoot by a whole frame, which a float64 cannot below
+//   2^51 frames (about 1,500 years at 48 kHz). Past that, frames stop being told apart, and the time is refused.
+// - **A negative time, NaN, infinity and a time past 2^51 frames answer `None`,** and the call says what that means for
+//   it.
 
 import { std::math::floor };
 
@@ -17,9 +20,8 @@ fn Optional<int64> frameAt(float64 time, float32 sampleRate) {
     if (!(time >= 0)) { return Optional::None; }
     float64 rate = cast<float64>(sampleRate);
     float64 product = time * rate;
-    if (!(product < 4000000000000000000.0)) { return Optional::None; }
+    if (!(product < 2251799813685248.0)) { return Optional::None; }
     int64 frame = cast<int64>(floor(x: product));
-    while (frame > 0 && cast<float64>(frame - 1) / rate >= time) { frame = frame - 1; }
     while (cast<float64>(frame) / rate < time) { frame = frame + 1; }
     return Optional::Some(value: frame);
 }

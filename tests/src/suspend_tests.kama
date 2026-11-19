@@ -223,6 +223,11 @@ fn string refusals(ref OfflineAudioContext context) {
     if (!why.isEmpty()) { return why; }
     why = refusedAs(r: context.suspend(suspendTime: 1000000), want: "InvalidState", what: "a time far past the end");
     if (!why.isEmpty()) { return why; }
+    why = refusedAs(r: context.suspend(suspendTime: 1e300), want: "InvalidState", what: "a time past any frame");
+    if (!why.isEmpty()) { return why; }
+    float64 one = 1;
+    why = refusedAs(r: context.suspend(suspendTime: one / zero), want: "InvalidState", what: "infinity");
+    if (!why.isEmpty()) { return why; }
     why = taken(r: context.suspend(suspendTime: timeOf(frame: 512, rate: 48000)), what: "a suspend at frame 512");
     if (!why.isEmpty()) { return why; }
     why = refusedAs(r: context.suspend(suspendTime: timeOf(frame: 500, rate: 48000)), want: "InvalidState",
@@ -295,6 +300,31 @@ fn string currentTime(ref OfflineAudioContext context) {
     return now == want ? "" : "after 256 frames the current time was ${now} where ${want} was due";
 }
 
+// A quantum's first frame after its start, k × 128 + 1, stops the render at the next quantum, though its product with
+// the rate falls a little short of it for about one frame in six: a frame read a frame early would stop a quantum early.
+fn string firstFrameAfterEach(ref OfflineAudioContext context) {
+    float64 rate = cast<float64>(context.sampleRate());
+    int64 k = 0;
+    while (k < 255) {
+        string why = taken(r: context.suspend(suspendTime: timeOf(frame: k * 128 + 1, rate: rate)), what: "the suspend after quantum ${k}");
+        if (!why.isEmpty()) { return why; }
+        k = k + 1;
+    }
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) { case Ok(value: q): give q; case Err(error: e): { return "the start was refused"; } };
+    k = 0;
+    while (k < 255) {
+        context.update();
+        int64 frame = (k + 1) * 128;
+        string why = expectStatus(r: r, want: "suspended ${frame}", moment: "the stop after quantum ${k}");
+        if (!why.isEmpty()) { return why; }
+        Result<Unit, AudioError> again = context.resume();
+        k = k + 1;
+    }
+    context.update();
+    return expectStatus(r: r, want: "ready", moment: "after the last stop");
+}
+
 unsafe fn void suspendTests(ref Tally t) {
     t.verdict(name: "suspend: the options declare 64 suspends by default", why: defaults());
     withSuspends(t: t, name: "suspend: the render stops at the frame, renders nothing while suspended, and goes on once resumed",
@@ -307,6 +337,10 @@ unsafe fn void suspendTests(ref Tally t) {
                  length: 32768, framesPerUpdate: 32768, suspends: 256, body: everyQuantumBoundary);
     withSuspends(t: t, name: "suspend: every quantum's own time stops the render at that quantum, at 44.1 kHz", rate: 44100,
                  length: 32768, framesPerUpdate: 32768, suspends: 256, body: everyQuantumBoundary);
+    withSuspends(t: t, name: "suspend: each quantum's first frame after its start stops the render at the next, at 48 kHz",
+                 rate: 48000, length: 32768, framesPerUpdate: 32768, suspends: 256, body: firstFrameAfterEach);
+    withSuspends(t: t, name: "suspend: each quantum's first frame after its start stops the render at the next, at 44.1 kHz",
+                 rate: 44100, length: 32768, framesPerUpdate: 32768, suspends: 256, body: firstFrameAfterEach);
     withSuspends(t: t, name: "suspend: each of Web Audio's refusals is InvalidState, and changes nothing", rate: 48000,
                  length: 1024, framesPerUpdate: 128, suspends: 4, body: refusals);
     withSuspends(t: t, name: "suspend: a resume before the start is InvalidState, and one while running changes nothing",

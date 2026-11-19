@@ -10,8 +10,13 @@
 //   keeps it, and its output begins at that frame, inside a quantum or at its edge. A time already past when the command lands starts it at once, counted late.
 //   Refusals, in Web Audio's order, changing nothing: a second start is `InvalidState`; a time negative, not finite or
 //   past 2^51 frames is `Range`, Web Audio's `RangeError`; a full backlog is `TooManyCommands`.
-// - **A started source can sound** (decision 4): released, it is kept while it plays. With no stop, it plays as long as
-//   the context renders.
+// - **`stop(stopTime:)`, Web Audio's `stop(when)`,** under the same name rule: the source renders up to that frame, and a
+//   later stop replaces an earlier one while it plays. Refusals, in Web Audio's order, changing nothing: before a start,
+//   `InvalidState`; a bad time, `Range`; a full backlog, `TooManyCommands`. A stop already past stops it at once,
+//   counted late.
+// - **Its end is Web Audio's `ended` event, polled:** in the quantum that renders up to its stop, the source reports its
+//   end on the way back, and `ended()` answers true once an `update()` has read it. With no stop, it never ends.
+// - **A started source can sound until it ends** (decision 4): released, it is kept while it plays, then freed.
 
 import { audio::graph::NodeHold, audio::graph::NodeKind, audio::graph::NodeLink, audio::graph::ContextKey, AudioNode,
          BaseAudioContext, AudioError };
@@ -46,6 +51,14 @@ type resource ConstantSourceNode implements AudioNode, Copyable<This>(bare: give
     // has started already, `Range` for a time negative, not finite or past 2^51 frames, `TooManyCommands` with the
     // backlog full, and a refusal changes nothing.
     public fn Result<Unit, AudioError> start(float64 startTime) { return this.hold.start(startTime: startTime); }
+
+    // Stops the source at `stopTime`, in seconds on the context's clock (Web Audio's `stop(when)`). `InvalidState` before
+    // its start, `Range` for a time negative, not finite or past 2^51 frames, `TooManyCommands` with the backlog full,
+    // and a refusal changes nothing. A later stop replaces an earlier one while the source plays.
+    public fn Result<Unit, AudioError> stop(float64 stopTime) { return this.hold.stop(stopTime: stopTime); }
+
+    // Whether the source has ended (Web Audio's `ended` event, polled): its end read on the way back by an `update()`.
+    public const fn bool ended() { return this.hold.ended(); }
 
     // Connects this node's output to `destination`'s input (`AudioNode`'s contract).
     public fn Result<Unit, AudioError> connect(AudioNode destination) { return this.hold.connect(destination: destination); }

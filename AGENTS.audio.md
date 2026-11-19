@@ -144,7 +144,14 @@ where a node's samples live (38) and the first source (39),** on the evidence in
     - `AudioNode.numberOfInputs()` and `numberOfOutputs()`, and a connect to a source refused as `IndexSize`, the
       defect the mutation pass found.
 
-  146 cases, green on every leg: native debug and release, wasm debug and release.
+  - on 2026-11-19, **a source's stop and its end** (decisions 4, 9, 32 and 39; SPEC.md § The render and the first
+    source):
+    - `ConstantSourceNode.stop(stopTime:)` and `ended()`; a `Stop` command carrying its frame; `Event::Ended` on the
+      way back, kept in the row's source state; a released source freed once it ends; the way back at two reports a
+      row;
+    - 6 `stop` cases (`tests/src/stop_tests.kama`), each seen red against a stub first.
+
+  152 cases, green on every leg: native debug and release, wasm debug and release.
 - **Settled while building the table, reported to the owner to object to** (each within decisions 34 and 35):
   - the name `SlotTable`, and its calls: `take()`, `countUp(id:)`, `countDown(id:)`, `nextRelease()`, `free(id:)`,
     `countOf(id:)`, `length()`, `capacity()`, `retired()`;
@@ -316,6 +323,13 @@ where a node's samples live (38) and the first source (39),** on the evidence in
     statistics make it public;
   - **the program side keeps a byte a row for its source's state,** the eighteenth part, so a second start is refused at
     the call; it is cleared when the row is taken;
+  - **`stop(stopTime:)`, by the same rule as the start,** and **Web Audio's `ended` event is polled:** `ended()` on the
+    source, true once an `update()` has read the end on the way back, as what kama cannot await is polled (decision
+    37's reasoning). A stop after the end changes nothing, as in Web Audio;
+  - **a source ends in the quantum that renders up to its stop,** reported then, and its freeing, if released, comes in
+    the next quantum's walk;
+  - **the way back holds two reports a row,** a node's end and its freeing, where decision 9 sized it at one: an update
+    may render many quanta before it reads them;
   - **`numberOfInputs()` and `numberOfOutputs()` are members of `AudioNode`,** Web Audio's, and a connect to a node
     with no input is `IndexSize`, after `InvalidAccess`, as Web Audio's connect checks them. The first mutation pass
     found it: a connect to a constant was taken, and one not playing passed its input on.
@@ -398,9 +412,9 @@ where a node's samples live (38) and the first source (39),** on the evidence in
   - std's `FixedArray` traps when its allocator has no room, as KAUD-7's collections do, so the slot array takes its
     storage through `Slots` too.
 - **Next:**
-  - **then `stop(stopTime:)` and a source's end** (decisions 4, 9 and 32): the end reported on the way back as Web
-    Audio's `ended`, a released source freed once it ends, and the walk due when one does; then `AudioParam` and the
-    gain's `gain`; then the buffer player and the first golden. **The buffer player's stereo buffers bring the cases
+  - **a source's stop and its end proved by mutation** (`.scratch/aud29/mutate_stop.py`, to write);
+  - **then `AudioParam`,** its automation timeline (decision 32: each parameter's events in its node, a declared
+    capacity) and the gain's `gain`; then the buffer player and the first golden. **The buffer player's stereo buffers bring the cases
     for the seven mutations of the render that only a node of more than one channel besides the destination can
     reach** (SPEC.md § Proved by mutation, the render and the first source). **The `AudioBuffer`'s
     sample memory is the owner's question,** asked when a buffer is made to be played: how its samples count against

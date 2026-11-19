@@ -41,11 +41,14 @@
 //   destination's the context's ("explicit"), at most `capacity`. One channel reaches more by the speaker rules (stereo
 //   and quad left and right, 5.1 its centre), equal counts channel by channel, and any other count discretely: the
 //   first channels, the rest silence. A silent node writes nothing and adds nothing, as Chromium's silent flag.
-// - **A source keeps its start's frame** (decision 32), and renders from it, inside a quantum or at its edge. A start
-//   already past when it lands begins at the quantum it lands in, counted late.
-// - **The way back always has room for a report:** its capacity is the node capacity, and a slot is reported freed at
-//   most once before the program side reads the report, since only that read lets the slot be taken again. So a
-//   report is never refused, and a row never leaks.
+// - **A source keeps its start's and its stop's frames** (decision 32), and renders from the one up to the other, inside
+//   a quantum or at its edge; a later stop replaces an earlier one. A start or a stop already past when it lands takes
+//   effect at the quantum it lands in, counted late. In the quantum that renders up to its stop, a source ends: it
+//   reports `Event::Ended` on the way back, Web Audio's `ended`, and, released, it can no longer sound, so the walk is
+//   due.
+// - **The way back always has room for a report:** its capacity is twice the node capacity, and a node reports its end
+//   at most once and its freeing at most once before the program side reads the reports, since only that read lets its
+//   slot be taken again. So a report is never refused, and a row never leaks.
 //
 // It runs on the audio thread for a real-time context, and on the program's thread for an offline render. Either way it
 // is handed the two rings it reads and writes, and owns only its nodes, its connections and its marks.
@@ -62,7 +65,8 @@ comptime int64 QUANTUM = 128;
 // What the audio side reports on the way back (decision 9). Each kind arrives with what sends it: a sound's end with
 // the first source, an error and a block handed back with theirs.
 type enum Event {
-    Freed(int64 node);
+    Freed(int64 node),
+    Ended(int64 node);
 }
 
 // What the audio side keeps of a node, at its id's slot.
@@ -70,11 +74,15 @@ type value EngineNode {
     public NodeKind kind = NodeKind::Gain;
     public bool released = false;    // the program holds it no more
     public int64 start = -1;         // a source's first frame, or -1 before its start
+    public int64 stop = -1;          // the frame a source stops before, or -1 with no stop
+    public bool ended = false;       // a source has rendered up to its stop and reported its end
 
     public ctor make(NodeKind kind) {
         this.kind = kind;
         this.released = false;
         this.start = -1;
+        this.stop = -1;
+        this.ended = false;
     }
 }
 
@@ -198,9 +206,10 @@ type resource Engine {
         bool placed = this.nodes.put(id: destination, value: EngineNode.make(kind: NodeKind::Destination));
     }
 
-    // One render quantum: every command published before it applied in order; then, if one was a release, the walk;
-    // then, if the graph changed, the order's search; then the reports they made published on the way back with one
-    // store; then the render, the order run over the blocks. Answers how many commands it applied.
+    // One render quantum: every command published before it applied in order; then, if one was a release or a released
+    // source ended, the walk; then, if the graph changed, the order's search; then the render, the order run over the
+    // blocks; then the reports they made published on the way back with one store. Answers how many commands it
+    // applied.
     @noheap public fn isize renderQuantum(ref Ring<Command, AudioMemory> commands, ref Ring<Event, AudioMemory> events) {
         isize applied = 0;
         bool more = true;
@@ -222,8 +231,8 @@ type resource Engine {
             this.sort();
             this.changed = false;
         }
+        this.render(events: events);
         events.publish();
-        this.render();
         this.clock = this.clock + QUANTUM;
         return applied;
     }
@@ -243,7 +252,7 @@ type resource Engine {
 
     // The render (decision 38): every node in the order starts silent; then each in turn renders into its block, or
     // leaves its input there, and adds its output into every node it feeds that is not muted.
-    @noheap fn void render() {
+    @noheap fn void render(ref Ring<Event, AudioMemory> events) {
         int64 at = 0;
         while (at < this.ordered) {
             int64 slot = slotOf(id: this.order[at]);
@@ -258,7 +267,16 @@ type resource Engine {
             match (held) {
                 case Some(value: n): {
                     match (n.kind) {
-                        case Constant(offset: o): { this.renderConstant(slot: slot, offset: o, start: n.start); }
+                        case Constant(offset: o): {
+                            this.renderConstant(slot: slot, offset: o, start: n.start, stop: n.stop);
+                            if (n.start >= 0 && !n.ended && n.stop >= 0 && n.stop <= this.clock + QUANTUM) {
+                                EngineNode now = n;
+                                now.ended = true;
+                                bool set = this.nodes.set(id: id, value: now);
+                                bool reported = events.stage(item: Event::Ended(node: id));   // always room: see the file's head
+                                this.released = true;   // ended, a released source can sound no more: the walk is due
+                            }
+                        }
                         case Gain: { }
                         case Destination: { }
                     };
@@ -270,15 +288,17 @@ type resource Engine {
         }
     }
 
-    // A constant source: from its start's frame on, one channel of `offset`; before it, silence, and before the quantum
-    // its start falls in, nothing at all.
-    @noheap fn void renderConstant(int64 slot, float32 offset, int64 start) {
+    // A constant source: one channel of `offset` from its start's frame up to its stop's; silence around them in the
+    // quantum, and nothing at all in a quantum it does not play in.
+    @noheap fn void renderConstant(int64 slot, float32 offset, int64 start, int64 stop) {
         if (start < 0 || start >= this.clock + QUANTUM) { return; }
         int64 from = start > this.clock ? start - this.clock : 0;
+        int64 to = stop >= 0 && stop < this.clock + QUANTUM ? stop - this.clock : QUANTUM;
+        if (to <= from) { return; }
         int64 first = this.sampleAt(slot: slot, channel: 0);
         int64 i = 0;
         while (i < QUANTUM) {
-            this.blocks[first + i] = i < from ? 0 : offset;
+            this.blocks[first + i] = i < from || i >= to ? 0 : offset;
             i = i + 1;
         }
         this.outputs[slot].channels = 1;
@@ -393,6 +413,26 @@ type resource Engine {
                                 this.lateCount = this.lateCount + 1;
                             } else {
                                 now.start = f;
+                            }
+                            bool set = this.nodes.set(id: id, value: now);
+                        }
+                    }
+                    case None: { this.refusedCount = this.refusedCount + 1; }
+                };
+            }
+            case Stop(node: id, frame: f): {
+                Optional<EngineNode> held = this.nodes.at(id: id);
+                match (held) {
+                    case Some(value: n): {
+                        if (!n.kind.isSource() || n.start < 0) {
+                            this.refusedCount = this.refusedCount + 1;
+                        } else if (!n.ended) {
+                            EngineNode now = n;
+                            if (f < this.clock) {
+                                now.stop = this.clock;
+                                this.lateCount = this.lateCount + 1;
+                            } else {
+                                now.stop = f;
                             }
                             bool set = this.nodes.set(id: id, value: now);
                         }
@@ -574,15 +614,15 @@ type resource Engine {
         };
     }
 
-    // How many starts it applied late, their frame already rendered when their command landed (decision 32).
+    // How many starts and stops it applied late, their frame already rendered when their command landed (decision 32).
     public const fn int64 late() { return this.lateCount; }
 
     // Whether the node `id` names can sound of itself: while the program holds it, or, released, while it is a source
-    // that has started (a constant plays as long as the render runs). A tail still ringing joins it when it comes.
+    // that has started and not ended. A tail still ringing joins it when it comes.
     @noheap const fn bool canSound(int64 id) {
         Optional<EngineNode> held = this.nodes.at(id: id);
         return match (held) {
-            case Some(value: n): !n.released || n.start >= 0;
+            case Some(value: n): !n.released || (n.start >= 0 && !n.ended);
             case None: false;
         };
     }

@@ -39,8 +39,9 @@ type enum NodeKind {
 // An id's generation 1 (decision 34): the high 32 bits of an id, over its slot's low 32.
 comptime int64 FIRST_GENERATION_ID = 4294967296;
 
-// A row's source state: its start sent.
+// A row's source state: its start sent, and its end read on the way back.
 comptime uint8 STARTED = 1;
+comptime uint8 ENDED = 2;
 
 // A call's command (decision 7): flat bytes, so it crosses a ring or a transferred buffer as it is, and typed, so the
 // audio side applies each kind by name. A node is named by its row's id, its slot and generation (decision 34), and a
@@ -49,10 +50,11 @@ type enum Command {
     Made(int64 node, NodeKind kind),
     Connect(int64 from, int64 to),
     Start(int64 node, int64 frame),
+    Stop(int64 node, int64 frame),
     Release(int64 node);
 
     // The command as text, for a test's or a log's reading: `made gain 0:1`, `connect 0:1 to 1:1`, `start 0:1 at 256`,
-    // `release 0:1`, each node as its slot and generation.
+    // `stop 0:1 at 300`, `release 0:1`, each node as its slot and generation.
     public const fn string describe() {
         return match (this) {
             case Made(node: n, kind: k): {
@@ -73,6 +75,11 @@ type enum Command {
                 int64 generation = generationOf(id: n);
                 return "start ${slot}:${generation} at ${f}";
             }
+            case Stop(node: n, frame: f): {
+                int64 slot = slotOf(id: n);
+                int64 generation = generationOf(id: n);
+                return "stop ${slot}:${generation} at ${f}";
+            }
             case Release(node: n): {
                 int64 slot = slotOf(id: n);
                 int64 generation = generationOf(id: n);
@@ -91,7 +98,7 @@ type resource ContextState {
     Engine engine;
     Shared<Samples, AudioMemory> rendering;   // an offline render's output, its length the context's
     Slots<int64, AudioMemory> suspends;       // the frames a render will stop at, ascending, in [0, suspendCount)
-    Slots<uint8, AudioMemory> sources;        // by row: STARTED once a source's start is sent
+    Slots<uint8, AudioMemory> sources;        // by row: STARTED once a source's start is sent, ENDED once its end is read
     float32 rate = 0;
     int64 destinationId = 0;                  // the context's own node, at the slot past the table's rows
     int64 perUpdate = 1;                      // the frames an update renders at least, in whole quanta (decision 37)
@@ -290,6 +297,25 @@ type resource ContextState {
         return Result::Ok(value: Unit::Unit);
     }
 
+    // Stops the source in row `node` at `stopTime`, in seconds (Web Audio's `stop(when)`): the time's frame by decision
+    // 3's rule, sent in its command (decision 32); a later stop replaces an earlier one while the source plays.
+    // `InvalidState` before its start, `Range` for a time negative, not finite or past 2^51 frames, `TooManyCommands`
+    // with the backlog full, in Web Audio's order, and a refusal changes nothing.
+    public fn Result<Unit, AudioError> stopSource(int64 node, float64 stopTime) {
+        if ((this.sources[slotOf(id: node)] & STARTED) == 0) { return Result::Err(error: AudioError::InvalidState); }
+        Optional<int64> at = frameAt(time: stopTime, sampleRate: this.rate);
+        int64 frame = match (at) {
+            case Some(value: f): f;
+            case None: { return Result::Err(error: AudioError::Range); }
+        };
+        if (!this.canSend()) { return Result::Err(error: AudioError::TooManyCommands); }
+        bool sent = this.send(command: Command::Stop(node: node, frame: frame));
+        return Result::Ok(value: Unit::Unit);
+    }
+
+    // Whether the source in row `node` has ended: its end read on the way back.
+    public const fn bool sourceEnded(int64 node) { return (this.sources[slotOf(id: node)] & ENDED) != 0; }
+
     // How many starts the audio side applied late.
     public const fn int64 late() { return this.engine.late(); }
 
@@ -345,9 +371,10 @@ type resource ContextState {
     // flushes published, applied, and their reports published on the way back. Answers how many it applied.
     public fn isize renderQuantum() { return this.engine.renderQuantum(commands: this.commands, events: this.events); }
 
-    // The way back read (decision 9): each report the audio side published, in the order it made them. A node freed
-    // takes its connections with it, and gives its row back to the table, which reuses it at the next generation
-    // (decision 34). Every node connected into it was freed in the same walk, so their reports take those connections.
+    // The way back read (decision 9): each report the audio side published, in the order it made them. A source's end
+    // is kept in its row's state. A node freed takes its connections with it, and gives its row back to the table, which
+    // reuses it at the next generation (decision 34). Every node connected into it was freed in the same walk, so their
+    // reports take those connections. A node's end comes before its freeing, so it never reaches a row taken again.
     // Answers how many rows came back.
     public fn isize poll() {
         isize freed = 0;
@@ -360,6 +387,10 @@ type resource ContextState {
                         case Freed(node: id): {
                             isize gone = this.links.removeFrom(from: id);
                             if (this.nodes.free(id: id)) { freed = freed + 1; }
+                        }
+                        case Ended(node: id): {
+                            int64 slot = slotOf(id: id);
+                            this.sources[slot] = this.sources[slot] | ENDED;
                         }
                     };
                 }
@@ -377,8 +408,8 @@ type resource ContextState {
 }
 
 // A context's state drawn from `memory` (decision 36), each part only once the one before it fit: its slot table of
-// `nodeCapacity` rows, its command ring of `ringCapacity`, its backlog of `backlogCapacity`, the way back of
-// `nodeCapacity` (decision 9: a report for every row at once), its connections (`connectionCapacity`, and a list head
+// `nodeCapacity` rows, its command ring of `ringCapacity`, its backlog of `backlogCapacity`, the way back of twice
+// `nodeCapacity` (decision 9: a node's end and its freeing for every row at once), its connections (`connectionCapacity`, and a list head
 // for each row and the destination), the audio side (`engineFrom`, its nodes carrying at most `channelCapacity`
 // channels, or the context's when more), the offline render's output of `channels` channels of `length` frames
 // (`samplesFrom`), its `suspendCapacity` suspends, a source state for each row, then the block that holds them. A part
@@ -410,8 +441,9 @@ fn Result<Shared<ContextState, AudioMemory>, AudioError> stateFrom(AudioMemory m
         case Ok(value: w): give w;
         case Err(error: e): { return Result::Err(error: AudioError::OutOfMemory); }
     };
+    // Two reports a row: a node's end and its freeing (decision 9). The guard above keeps it within an isize.
     Result<Ring<Event, AudioMemory>, CapacityError> back =
-        Ring::<Event, AudioMemory>.withCapacityAndAllocator(allocator: memory, capacity: nodeCapacity);
+        Ring::<Event, AudioMemory>.withCapacityAndAllocator(allocator: memory, capacity: nodeCapacity * 2);
     Ring<Event, AudioMemory> events = match (give back) {
         case Ok(value: r): give r;
         case Err(error: e): { return Result::Err(error: AudioError::OutOfMemory); }
@@ -518,6 +550,11 @@ type resource NodeHold implements Copyable<This>(bare: give) {
 
     // The node's context and id, as `AudioNode.linkFor` answers them.
     public unsafe const fn NodeLink link() { return NodeLink.make(state: this.state.where(), id: this.row); }
+
+    // Stops this source at `stopTime` (`ContextState.stopSource`), and whether it has ended.
+    public fn Result<Unit, AudioError> stop(float64 stopTime) { return this.state.stopSource(node: this.row, stopTime: stopTime); }
+
+    public const fn bool ended() { return this.state.sourceEnded(node: this.row); }
 
     // Starts this source at `startTime` (`ContextState.startSource`).
     public fn Result<Unit, AudioError> start(float64 startTime) { return this.state.startSource(node: this.row, startTime: startTime); }

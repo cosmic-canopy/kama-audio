@@ -5,6 +5,9 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `ConstantSourceNode.stop(stopTime:)`, Web Audio's `stop(when)`, and `ended()`, Web Audio's `ended` event polled: a
+  source renders up to its stop's frame, reports its end on the way back, and, released, is freed once it ends. The way
+  back holds two reports a row (2026-11-19).
 - `AudioNode.numberOfInputs()` and `numberOfOutputs()`, Web Audio's. Fixed: a connect to a source was taken, so a
   `ConstantSourceNode` that was not playing passed its input on; it is `AudioError::IndexSize` now, Web Audio's
   `IndexSizeError`, checked after another context's `InvalidAccess` (2026-11-19).

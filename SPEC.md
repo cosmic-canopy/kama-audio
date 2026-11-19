@@ -399,10 +399,11 @@ so a quantum is a call.
   slot that holds a node; a connection naming a node it does not hold at that generation, one it holds already, or one
   past its declared connections; and a release of a node it does not hold at that generation, or has released. No
   call can send one, so each would be the package's bug, and the count is how it is seen.
-- **The way back** is a `Ring` of `audio::graph::Event`, so far one kind, `Freed(node)`. Each later kind arrives with
-  what sends it (decision 9): a sound's end, an error, a block handed back. **It always has room for a report:** its
-  capacity is the node capacity, and a slot is reported freed at most once before the program side reads the report,
-  since only that read lets the slot be taken again. A refused command reports nothing, so it takes no report's room.
+- **The way back** is a `Ring` of `audio::graph::Event`: `Freed(node)`, and a source's `Ended(node)` (§ The render and
+  the first source). Each later kind arrives with what sends it (decision 9): an error, a block handed back. **It always
+  has room for a report:** its capacity is twice the node capacity, and a node reports its end at most once and its
+  freeing at most once before the program side reads the reports, since only that read lets its slot be taken again. A
+  refused command reports nothing, so it takes no report's room.
 - **The program side's read,** `ContextState.poll()`, takes each report in the order the audio side made them, and a
   node freed gives its row back to the table at the next generation. Its public caller is `update()` (AUD-5). Until the
   read, the row stays held, so a context whose rows are all released refuses a make.
@@ -714,8 +715,18 @@ Audio's `AudioDestinationNode`, its `destination` attribute, and its rendering a
   infinite or past 2^51 frames is the new `AudioError::Range`, Web Audio's `RangeError`; a full backlog is
   `TooManyCommands`. The program side keeps whether a row's source has started, a byte a row, cleared when the row is
   taken.
-- **A started source can sound** (decision 4): released, it is kept and goes on sounding, as long as the render runs
-  while it has no stop; released before its start, it is freed.
+- **`stop(stopTime:)` is Web Audio's `stop(when)`,** under the same name rule: a `Stop` command carries its frame, and
+  the source renders from its start's frame up to its stop's. A stop at or before the start renders nothing, and a
+  later stop replaces an earlier one while the source plays. Its refusals, in Web Audio's order, change nothing: before
+  a start, `InvalidState`; a bad time, `Range`; a full backlog, `TooManyCommands`. A stop already past when it lands
+  stops the source at the quantum it lands in, counted late.
+- **Its end is Web Audio's `ended` event, polled:** in the quantum that renders up to its stop, the source reports
+  `Event::Ended` on the way back (decision 9), and `ended()` answers true once an `update()` has read it, kept in its
+  row's source state. A source with no stop never ends.
+- **A started source can sound until it ends** (decision 4): released, it is kept and goes on sounding; once it ends,
+  the walk is due and frees it. Released before its start, it is freed.
+- **The way back holds two reports a row,** twice `nodeCapacity`: a node reports its end at most once and its freeing at
+  most once before the program reads them, and an update may render many quanta before it does.
 - **Tested** (`tests/src/constant_tests.kama`, the `constant` cases, 13 of them, each seen red against a stub first,
   or, for the last three, against the mutations they were written for):
   - the offset is 1 by default;
@@ -736,6 +747,18 @@ Audio's `AudioDestinationNode`, its `destination` attribute, and its rendering a
     offset;
   - a destination that a cycle takes in mid-render falls silent from the quantum the cycle lands in;
   - a make sends its kind and a start its frame: `made constant 0:1`, then `start 0:1 at 1000`.
+
+- **Stopping, tested** (`tests/src/stop_tests.kama`, the `stop` cases, 6 of them, each seen red against a stub first):
+  - a source renders up to its stop's frame (from 100 to 1,000), a stop at its start renders nothing, and a second stop
+    (800) replaces the first (500);
+  - its refusals change nothing: before a start `InvalidState`, a full backlog `TooManyCommands`, and −1 s, NaN and
+    infinity `Range`;
+  - a stop already past stops the source at the quantum it lands in, counted late;
+  - `ended()` is false before the render and through the update before its stop, true once the update that renders
+    its stop has read the way back, and never true for a source with no stop;
+  - a released source is kept while it plays and freed once it ends, its row back;
+  - four released sources that end and are freed within one update, in a context of four rows, all come back: the
+    way back held their eight reports.
 
   The `nodes` cases cover the eighteen parts, `channelCapacity`'s default and range, and, with every part refused in
   turn, a budget that steps by 4 bytes, the rows' source states being a byte a row. A `render` case covers the bytes:

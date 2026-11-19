@@ -11,7 +11,7 @@
 import { Tally, named, letGo, rowsHeldIn, audio::OfflineAudioContext, audio::OfflineAudioContextOptions,
          audio::AudioError, audio::GainNode };
 
-export { commandsTests, flushIn, sentIn };
+export { commandsTests, flushIn, sentIn, CommandsCase, withCommands, gainIn, letGoOf, flushSends };
 
 // The package's seam into a context: a flush, and the next command the audio side would take from the ring.
 fn isize flushIn(ref OfflineAudioContext context) { return context.flush(); }

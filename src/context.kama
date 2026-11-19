@@ -12,8 +12,8 @@
 //   as Web Audio's `NotSupportedError`; memory with no room for a declared capacity is `OutOfMemory`; and a node made
 //   when every row is held is `TooManyNodes`.
 
-import { audio::graph::ContextState, audio::graph::ContextKey, audio::graph::Command, audio::graph::stateFrom,
-         AudioMemory, std::memory::Shared };
+import { audio::graph::ContextState, audio::graph::ContextKey, audio::graph::Command, audio::graph::NodeKind,
+         audio::graph::stateFrom, AudioMemory, std::memory::Shared };
 
 export { BaseAudioContext, OfflineAudioContext, OfflineAudioContextOptions, AudioError };
 
@@ -66,11 +66,17 @@ type resource OfflineAudioContext implements BaseAudioContext {
     int32 channels = 1;
     int64 frames = 1;
 
-    // The package's one test seam into a context: the tests program reads its rows and its due releases.
+    // The package's one test seam into a context: the tests program reads its rows and its due releases, flushes it,
+    // reads its ring as the audio side would, renders a quantum on its audio side and reads the way back.
     friend audiotests::rowsHeldIn[rowsHeld];
     friend audiotests::releaseDueIn[releaseDue];
     friend audiotests::flushIn[flush];
     friend audiotests::sentIn[sent];
+    friend audiotests::quantumIn[renderQuantum];
+    friend audiotests::pollIn[poll];
+    friend audiotests::audioHeldIn[audioHeld];
+    friend audiotests::refusedIn[refused];
+    friend audiotests::forgeIn[forge];
 
     private ctor adopt(Shared<ContextState, AudioMemory> state, int32 channels, int64 frames) {
         this.state = give state;
@@ -118,5 +124,23 @@ type resource OfflineAudioContext implements BaseAudioContext {
             case Some(value: c): Optional::Some(value: c.describe());
             case None: Optional::None;
         };
+    }
+
+    // One render quantum on the audio side: answers how many commands it applied.
+    private fn isize renderQuantum() { return this.state.renderQuantum(); }
+
+    // The way back read on the program's side: answers how many rows its reports freed.
+    private fn isize poll() { return this.state.poll(); }
+
+    // The nodes the audio side holds.
+    private const fn isize audioHeld() { return this.state.audioHeld(); }
+
+    // The commands the audio side refused, each naming a node it did not hold.
+    private const fn int64 refused() { return this.state.refused(); }
+
+    // A command no call would send, added to the backlog: a make (`made`) or a release of `node`, any id at all.
+    private fn bool forge(bool made, int64 node) {
+        if (made) { return this.state.send(command: Command::Made(node: node, kind: NodeKind::Gain)); }
+        return this.state.send(command: Command::Release(node: node));
     }
 }

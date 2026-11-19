@@ -1,0 +1,300 @@
+// audio side: the engine that applies a context's commands, and the way back (AUD-1, AUD-2 and AUD-3; AGENTS.audio.md
+// decisions 4, 5, 9, 32, 34 and 35).
+// - A render quantum drains the command ring at its top and applies every command published before it, in order, once
+//   (decision 32). Nothing a flush has not published reaches it.
+// - The audio side keeps each node it is told of in its own array of slots, at the id's slot, and only the id crosses
+//   (decisions 4 and 34).
+// - A release follows Web Audio's lifetime rule: the audio side keeps a node while it can still sound, and a gain with
+//   no input cannot, so it is freed at once. Its report goes on the way back, which the program side reads to free the
+//   row, so a row comes back only once the audio side has let the node go (decisions 4, 9 and 35).
+// - The way back holds a report for every row at once, so none is ever refused (decision 9).
+// - A command naming a node the audio side does not hold at that generation, or making one into a slot it holds, is
+//   refused and counted, never applied to another node, never a trap (decision 34).
+// The tests reach the audio side through the package's seam (`friend` grants in `src/context.kama`). An offline
+// context's audio side runs on the program's thread, so a quantum is a call.
+
+import { Tally, named, letGo, rowsHeldIn, idAt, CommandsCase, withCommands, gainIn, letGoOf, flushSends,
+         audio::OfflineAudioContext, audio::AudioError, audio::GainNode };
+
+export { audioSideTests, quantumIn, pollIn, audioHeldIn, refusedIn, forgeIn };
+
+// The package's seam into a context's audio side and its way back.
+fn isize quantumIn(ref OfflineAudioContext context) { return context.renderQuantum(); }
+
+fn isize pollIn(ref OfflineAudioContext context) { return context.poll(); }
+
+fn isize audioHeldIn(ref OfflineAudioContext context) { return context.audioHeld(); }
+
+fn int64 refusedIn(ref OfflineAudioContext context) { return context.refused(); }
+
+fn bool forgeIn(ref OfflineAudioContext context, bool made, int64 node) { return context.forge(made: made, node: node); }
+
+// ---- helpers ----------------------------------------------------------------------------------------------------------
+
+fn string quantumApplies(ref OfflineAudioContext context, isize want) {
+    isize applied = quantumIn(context: context);
+    return applied == want ? "" : "a quantum applied ${applied} commands where ${want} were due";
+}
+
+fn string audioHolds(ref OfflineAudioContext context, isize want) {
+    isize held = audioHeldIn(context: context);
+    return held == want ? "" : "the audio side held ${held} nodes where ${want} were due";
+}
+
+fn string pollFrees(ref OfflineAudioContext context, isize want) {
+    isize freed = pollIn(context: context);
+    return freed == want ? "" : "reading the way back freed ${freed} rows where ${want} were due";
+}
+
+fn string rowsHeld(ref OfflineAudioContext context, isize want) {
+    isize held = rowsHeldIn(context: context);
+    return held == want ? "" : "the program side held ${held} rows where ${want} were due";
+}
+
+fn string refusedSoFar(ref OfflineAudioContext context, int64 want) {
+    int64 refused = refusedIn(context: context);
+    return refused == want ? "" : "the audio side refused ${refused} commands where ${want} were due";
+}
+
+// A forged command flushed and applied: one command published, one applied.
+fn string forgeApplied(ref OfflineAudioContext context, bool made, int64 node) {
+    if (!forgeIn(context: context, made: made, node: node)) { return "the backlog refused a forged command"; }
+    string why = flushSends(context: context, want: 1);
+    if (!why.isEmpty()) { return "the forged command's flush: ${why}"; }
+    return quantumApplies(context: context, want: 1);
+}
+
+// ---- the cases --------------------------------------------------------------------------------------------------------
+
+// A quantum applies what flushes have published before it, each command once, and nothing still in the backlog. With
+// a ring of 2, the third make waits for the next flush, and the next quantum applies it.
+fn string appliesPublished(ref OfflineAudioContext context) {
+    Optional<GainNode> a = gainIn(context: context);
+    Optional<GainNode> b = gainIn(context: context);
+    Optional<GainNode> c = gainIn(context: context);
+    if (!a.isSome() || !b.isSome() || !c.isSome()) { return "a node was refused"; }
+    string why = quantumApplies(context: context, want: 0);
+    if (!why.isEmpty()) { return "before a flush: ${why}"; }
+    why = audioHolds(context: context, want: 0);
+    if (!why.isEmpty()) { return "before a flush: ${why}"; }
+    why = flushSends(context: context, want: 2);
+    if (!why.isEmpty()) { return why; }
+    why = quantumApplies(context: context, want: 2);
+    if (!why.isEmpty()) { return "after the first flush: ${why}"; }
+    why = audioHolds(context: context, want: 2);
+    if (!why.isEmpty()) { return "after the first flush: ${why}"; }
+    why = quantumApplies(context: context, want: 0);
+    if (!why.isEmpty()) { return "a second quantum with nothing published: ${why}"; }
+    why = flushSends(context: context, want: 1);
+    if (!why.isEmpty()) { return "the second flush, into a ring the quantum emptied: ${why}"; }
+    why = quantumApplies(context: context, want: 1);
+    if (!why.isEmpty()) { return "after the second flush: ${why}"; }
+    why = audioHolds(context: context, want: 3);
+    if (!why.isEmpty()) { return why; }
+    return refusedSoFar(context: context, want: 0);
+}
+
+// A gain released has no input, so the audio side frees it at once and reports it. The row stays held until the
+// program side reads the report, which frees it once.
+fn string releaseFrees(ref OfflineAudioContext context) {
+    Optional<GainNode> a = gainIn(context: context);
+    if (!a.isSome()) { return "the node was refused"; }
+    letGoOf(node: give a);
+    string why = flushSends(context: context, want: 2);
+    if (!why.isEmpty()) { return why; }
+    why = pollFrees(context: context, want: 0);
+    if (!why.isEmpty()) { return "before the audio side ran: ${why}"; }
+    why = rowsHeld(context: context, want: 1);
+    if (!why.isEmpty()) { return "before the audio side ran: ${why}"; }
+    why = quantumApplies(context: context, want: 2);
+    if (!why.isEmpty()) { return why; }
+    why = audioHolds(context: context, want: 0);
+    if (!why.isEmpty()) { return "after the release: ${why}"; }
+    why = rowsHeld(context: context, want: 1);
+    if (!why.isEmpty()) { return "before the way back was read: ${why}"; }
+    why = pollFrees(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    why = rowsHeld(context: context, want: 0);
+    if (!why.isEmpty()) { return "after the way back was read: ${why}"; }
+    why = pollFrees(context: context, want: 0);
+    if (!why.isEmpty()) { return "a second read: ${why}"; }
+    return refusedSoFar(context: context, want: 0);
+}
+
+// A node made in one quantum and released in a later one is freed in that later one.
+fn string releaseLater(ref OfflineAudioContext context) {
+    Optional<GainNode> a = gainIn(context: context);
+    if (!a.isSome()) { return "the node was refused"; }
+    string why = flushSends(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    why = quantumApplies(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    why = audioHolds(context: context, want: 1);
+    if (!why.isEmpty()) { return "while the program held it: ${why}"; }
+    letGoOf(node: give a);
+    why = quantumApplies(context: context, want: 0);
+    if (!why.isEmpty()) { return "a drop reached the audio side before a flush: ${why}"; }
+    why = audioHolds(context: context, want: 1);
+    if (!why.isEmpty()) { return "before the release's flush: ${why}"; }
+    why = flushSends(context: context, want: 1);
+    if (!why.isEmpty()) { return "the release's flush: ${why}"; }
+    why = quantumApplies(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    why = audioHolds(context: context, want: 0);
+    if (!why.isEmpty()) { return "after the release: ${why}"; }
+    why = pollFrees(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    return rowsHeld(context: context, want: 0);
+}
+
+// A copy's drop sends nothing, so the audio side keeps the node and reports nothing.
+fn string copyKeeps(ref OfflineAudioContext context) {
+    Optional<GainNode> a = gainIn(context: context);
+    match (give a) {
+        case Some(value: na): {
+            GainNode other = copy na;
+            letGo(node: give other);
+            string why = flushSends(context: context, want: 1);
+            if (!why.isEmpty()) { return why; }
+            why = quantumApplies(context: context, want: 1);
+            if (!why.isEmpty()) { return why; }
+            why = audioHolds(context: context, want: 1);
+            if (!why.isEmpty()) { return "after a copy's drop: ${why}"; }
+            why = pollFrees(context: context, want: 0);
+            if (!why.isEmpty()) { return "after a copy's drop: ${why}"; }
+            return rowsHeld(context: context, want: 1);
+        }
+        case None: { return "the node was refused"; }
+    };
+}
+
+// Every row released in one quantum is reported: the way back holds a report for each row at once, so none is refused,
+// and every row comes back.
+fn string everyRowAtOnce(ref OfflineAudioContext context) {
+    Optional<GainNode> a = gainIn(context: context);
+    Optional<GainNode> b = gainIn(context: context);
+    Optional<GainNode> c = gainIn(context: context);
+    Optional<GainNode> d = gainIn(context: context);
+    if (!a.isSome() || !b.isSome() || !c.isSome() || !d.isSome()) { return "a node was refused"; }
+    letGoOf(node: give a);
+    letGoOf(node: give b);
+    letGoOf(node: give c);
+    letGoOf(node: give d);
+    string why = flushSends(context: context, want: 8);
+    if (!why.isEmpty()) { return why; }
+    why = quantumApplies(context: context, want: 8);
+    if (!why.isEmpty()) { return why; }
+    why = audioHolds(context: context, want: 0);
+    if (!why.isEmpty()) { return why; }
+    why = pollFrees(context: context, want: 4);
+    if (!why.isEmpty()) { return why; }
+    why = rowsHeld(context: context, want: 0);
+    if (!why.isEmpty()) { return why; }
+    Optional<GainNode> e = gainIn(context: context);
+    if (!e.isSome()) { return "a make was refused with every row back"; }
+    return "";
+}
+
+// With one row, a freed slot comes back only through the way back. The next node takes it at the next generation, and a
+// release naming the earlier generation is refused and cannot reach it.
+fn string slotReused(ref OfflineAudioContext context) {
+    Optional<GainNode> a = gainIn(context: context);
+    if (!a.isSome()) { return "the first node was refused"; }
+    letGoOf(node: give a);
+    string why = flushSends(context: context, want: 2);
+    if (!why.isEmpty()) { return why; }
+    why = quantumApplies(context: context, want: 2);
+    if (!why.isEmpty()) { return why; }
+    Result<GainNode, AudioError> early = GainNode.make(context: context);
+    match (give early) {
+        case Ok(value: n): { return "the row was taken again before the way back was read"; }
+        case Err(error: e): {
+            string got = named(e: e);
+            if (got != "TooManyNodes") { return "a make before the way back was read answered ${got}"; }
+        }
+    };
+    why = pollFrees(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    Optional<GainNode> b = gainIn(context: context);
+    if (!b.isSome()) { return "the second node was refused with its row back"; }
+    why = flushSends(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    why = quantumApplies(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    why = audioHolds(context: context, want: 1);
+    if (!why.isEmpty()) { return "the second node, at the next generation: ${why}"; }
+    why = refusedSoFar(context: context, want: 0);
+    if (!why.isEmpty()) { return "the second node's make: ${why}"; }
+    why = forgeApplied(context: context, made: false, node: idAt(slot: 0, generation: 1));
+    if (!why.isEmpty()) { return why; }
+    why = audioHolds(context: context, want: 1);
+    if (!why.isEmpty()) { return "the earlier generation's release reached the node now in its slot: ${why}"; }
+    why = refusedSoFar(context: context, want: 1);
+    if (!why.isEmpty()) { return "the earlier generation's release: ${why}"; }
+    why = pollFrees(context: context, want: 0);
+    if (!why.isEmpty()) { return "the earlier generation's release was reported: ${why}"; }
+    letGoOf(node: give b);
+    why = flushSends(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    why = quantumApplies(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    why = audioHolds(context: context, want: 0);
+    if (!why.isEmpty()) { return "the second node's own release: ${why}"; }
+    return pollFrees(context: context, want: 1);
+}
+
+// A release of a node never made, a release at a later generation, and a make into a slot that holds a node are each
+// refused and counted, and change nothing.
+fn string strangersRefused(ref OfflineAudioContext context) {
+    Optional<GainNode> a = gainIn(context: context);
+    if (!a.isSome()) { return "the node was refused"; }
+    string why = flushSends(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    why = quantumApplies(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    why = forgeApplied(context: context, made: false, node: idAt(slot: 1, generation: 1));
+    if (!why.isEmpty()) { return why; }
+    why = refusedSoFar(context: context, want: 1);
+    if (!why.isEmpty()) { return "a release of a node never made: ${why}"; }
+    why = forgeApplied(context: context, made: false, node: idAt(slot: 0, generation: 2));
+    if (!why.isEmpty()) { return why; }
+    why = refusedSoFar(context: context, want: 2);
+    if (!why.isEmpty()) { return "a release at a later generation: ${why}"; }
+    why = audioHolds(context: context, want: 1);
+    if (!why.isEmpty()) { return "a release at a later generation reached the node: ${why}"; }
+    why = forgeApplied(context: context, made: true, node: idAt(slot: 0, generation: 1));
+    if (!why.isEmpty()) { return why; }
+    why = refusedSoFar(context: context, want: 3);
+    if (!why.isEmpty()) { return "a make into a held slot: ${why}"; }
+    why = audioHolds(context: context, want: 1);
+    if (!why.isEmpty()) { return "after a make into a held slot: ${why}"; }
+    why = pollFrees(context: context, want: 0);
+    if (!why.isEmpty()) { return "a refused command was reported as a node freed: ${why}"; }
+    letGoOf(node: give a);
+    why = flushSends(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    why = quantumApplies(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    why = audioHolds(context: context, want: 0);
+    if (!why.isEmpty()) { return "the node's own release, after the refusals: ${why}"; }
+    why = pollFrees(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    return refusedSoFar(context: context, want: 3);
+}
+
+fn void audioSideTests(ref Tally t) {
+    withCommands(t: t, name: "audio side: a quantum applies what a flush published before it, each command once",
+                 nodes: 4, ring: 2, backlog: 8, body: appliesPublished);
+    withCommands(t: t, name: "audio side: a gain released has no input, so it is freed at once, and its row comes back when the way back is read",
+                 nodes: 2, ring: 8, backlog: 8, body: releaseFrees);
+    withCommands(t: t, name: "audio side: a node released in a later quantum is freed in that quantum", nodes: 2, ring: 8,
+                 backlog: 8, body: releaseLater);
+    withCommands(t: t, name: "audio side: a copy's drop sends nothing, and the audio side keeps the node", nodes: 2,
+                 ring: 8, backlog: 8, body: copyKeeps);
+    withCommands(t: t, name: "audio side: every row released in one quantum is reported, the way back holding a report for each",
+                 nodes: 4, ring: 8, backlog: 8, body: everyRowAtOnce);
+    withCommands(t: t, name: "audio side: a freed slot's next node takes the next generation, and the earlier one's release cannot reach it",
+                 nodes: 1, ring: 8, backlog: 8, body: slotReused);
+    withCommands(t: t, name: "audio side: a command naming a node it does not hold, or making one into a held slot, is refused and counted",
+                 nodes: 2, ring: 8, backlog: 8, body: strangersRefused);
+}

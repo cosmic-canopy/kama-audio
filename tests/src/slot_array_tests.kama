@@ -10,7 +10,7 @@
 
 import { Tally, Counting, audio::rt::SlotArray, audio::rt::CapacityError };
 
-export { slotArrayTests };
+export { slotArrayTests, idAt };
 
 // The id of `slot` at `generation`, as the program side's table makes it: the slot in the low 32 bits.
 fn int64 idAt(int64 slot, int64 generation) {

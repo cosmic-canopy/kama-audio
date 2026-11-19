@@ -1,0 +1,89 @@
+// audio::graph::Engine, the audio side (decisions 1, 4, 5, 9, 32 and 34), and audio::graph::Event, what it reports on
+// the way back.
+//
+// - **A render quantum drains the command ring at its top** and applies every command published before it, in order,
+//   each in that quantum (decision 32). Nothing a flush has not published reaches it.
+// - **It keeps each node it is told of in its own `SlotArray`,** at the id's slot, and checks the id's generation, so a
+//   command naming a node it no longer holds never reaches the node now in that slot (decisions 4 and 34). Its array's
+//   capacity is the context's node capacity, drawn with the rest of the context on the program's side, so the audio
+//   side never allocates (decision 5).
+// - **A command it cannot apply is refused and counted,** never a trap: a make into a slot that holds a node, or a
+//   release of a node it does not hold at that generation. Neither can come from a call; each would be the package's
+//   bug, and the count is how it is seen.
+// - **A release follows Web Audio's lifetime rule** (decision 4): the audio side keeps a node while it can still sound,
+//   and frees it once it cannot. A gain with no input cannot, so it is freed at once. The report goes on the way back
+//   (decision 9), and the program side's read of it gives the row back to its table (decision 35).
+// - **The way back always has room for a report:** its capacity is the node capacity, and a slot is reported freed at
+//   most once before the program side reads the report, since only that read lets the slot be taken again. So a
+//   report is never refused, and a row never leaks.
+//
+// It runs on the audio thread for a real-time context, and on the program's thread for an offline render. Either way it
+// is handed the two rings it reads and writes, and owns only its array.
+
+import { audio::AudioMemory, audio::rt::Ring, audio::rt::SlotArray, Command, NodeKind };
+
+export { Engine, Event, EngineNode };
+
+// What the audio side reports on the way back (decision 9). Each kind arrives with what sends it: a sound's end with
+// the first source, an error and a block handed back with theirs.
+type enum Event {
+    Freed(int64 node);
+}
+
+// What the audio side keeps of a node, at its id's slot.
+type value EngineNode {
+    public NodeKind kind = NodeKind::Gain;
+
+    public ctor make(NodeKind kind) { this.kind = kind; }
+}
+
+type resource Engine {
+    SlotArray<EngineNode, AudioMemory> nodes;
+    int64 refusedCount = 0;
+
+    public ctor make(SlotArray<EngineNode, AudioMemory> nodes) {
+        this.nodes = give nodes;
+        this.refusedCount = 0;
+    }
+
+    // One render quantum: every command published before it applied in order, and the reports they make published on
+    // the way back with one store. Answers how many commands it applied.
+    @noheap public fn isize renderQuantum(ref Ring<Command, AudioMemory> commands, ref Ring<Event, AudioMemory> events) {
+        isize applied = 0;
+        bool more = true;
+        while (more) {
+            Optional<Command> got = commands.pop();
+            match (got) {
+                case Some(value: c): {
+                    this.apply(command: c, events: events);
+                    applied = applied + 1;
+                }
+                case None: { more = false; }
+            };
+        }
+        events.publish();
+        return applied;
+    }
+
+    @noheap fn void apply(Command command, ref Ring<Event, AudioMemory> events) {
+        match (command) {
+            case Made(node: id, kind: k): {
+                if (!this.nodes.put(id: id, value: EngineNode.make(kind: k))) { this.refusedCount = this.refusedCount + 1; }
+            }
+            case Release(node: id): {
+                // Every node so far is a gain, and no node has an input yet, so a released node can sound no more.
+                if (!this.nodes.remove(id: id)) {
+                    this.refusedCount = this.refusedCount + 1;
+                } else {
+                    bool reported = events.stage(item: Event::Freed(node: id));   // always room: see the file's head
+                }
+            }
+        };
+    }
+
+    // How many nodes the audio side holds.
+    public const fn isize held() { return this.nodes.length(); }
+
+    // How many commands it has refused.
+    public const fn int64 refused() { return this.refusedCount; }
+}

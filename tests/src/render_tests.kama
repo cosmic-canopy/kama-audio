@@ -25,11 +25,12 @@ fn bool markIn(ref OfflineAudioContext context, int32 channel, int64 frame, floa
 
 // ---- helpers ----------------------------------------------------------------------------------------------------------
 
-// The frames rendered so far, -1 when the render is ready.
+// The frames rendered so far, -1 when the render is ready, -2 when it is suspended.
 fn int64 pendingAt(ref RenderRequest r) {
     RenderStatus s = r.poll();
     return match (give s) {
         case Pending(framesRendered: n): n;
+        case Suspended(framesRendered: n): -2;
         case Ready(buffer: b): -1;
     };
 }
@@ -38,6 +39,7 @@ fn int64 pendingAt(ref RenderRequest r) {
 fn string expectPending(ref RenderRequest r, int64 want, const ref string moment) {
     int64 at = pendingAt(r: r);
     if (at == -1) { return "${moment}: the render was ready where ${want} frames were due"; }
+    if (at == -2) { return "${moment}: the render was suspended where ${want} frames were due"; }
     return at == want ? "" : "${moment}: the render was pending at ${at} frames where ${want} were due";
 }
 
@@ -46,6 +48,7 @@ fn Optional<AudioBuffer> readyBuffer(ref RenderRequest r) {
     RenderStatus s = r.poll();
     return match (give s) {
         case Pending(framesRendered: n): Optional::None;
+        case Suspended(framesRendered: n): Optional::None;
         case Ready(buffer: b): Optional::Some(value: give b);
     };
 }

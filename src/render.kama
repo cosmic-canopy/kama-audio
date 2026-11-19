@@ -3,8 +3,8 @@
 //
 // - **`OfflineAudioContext.startRendering()` answers one,** and the context's `update()` advances the render, once a
 //   frame, by its declared frames per update.
-// - **`poll()` answers where the render is:** `Pending` with the frames rendered so far, or `Ready` with the
-//   `AudioBuffer`, again at every poll after.
+// - **`poll()` answers where the render is:** `Pending` with the frames rendered so far, `Suspended` at a suspend's
+//   frame until `resume()`, or `Ready` with the `AudioBuffer`, again at every poll after.
 
 import { audio::graph::ContextState, AudioBuffer, AudioMemory, std::memory::Shared };
 
@@ -13,6 +13,7 @@ export { RenderRequest, RenderStatus };
 // Where an offline render is.
 type enum RenderStatus {
     Pending(int64 framesRendered),
+    Suspended(int64 framesRendered),
     Ready(AudioBuffer buffer);
 }
 
@@ -24,6 +25,7 @@ type resource RenderRequest {
 
     public fn RenderStatus poll() {
         if (this.state.renderDone()) { return RenderStatus::Ready(buffer: AudioBuffer.of(samples: this.state.output())); }
+        if (this.state.renderSuspended()) { return RenderStatus::Suspended(framesRendered: this.state.framesRendered()); }
         return RenderStatus::Pending(framesRendered: this.state.framesRendered());
     }
 }

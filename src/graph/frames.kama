@@ -1,0 +1,25 @@
+// audio::graph::frameAt, decision 3's one rule: a time, in Web Audio's float64 seconds, becomes the int64 frame it takes
+// effect at, once, at the API.
+//
+// - **The frame is the first whose own time, the frame divided by the rate in float64, is at or after the time.** So a
+//   time a program makes from a frame, `frame / rate`, lands on that frame: about one frame in six at 48 kHz multiplies
+//   back off by a little (322,579 of the first 2,000,000), and a plain round-up of `time × rate` would put each of those
+//   a frame late, a whole quantum late on a quantum's edge. A time between two frames' times lands on the later, as Web
+//   Audio's event at a time takes effect at the first frame at or after it.
+// - **A negative time, NaN, and a time whose frame is past what an int64 counts answer `None`,** and the call says what
+//   that means for it.
+
+import { std::math::floor };
+
+export { frameAt };
+
+fn Optional<int64> frameAt(float64 time, float32 sampleRate) {
+    if (!(time >= 0)) { return Optional::None; }
+    float64 rate = cast<float64>(sampleRate);
+    float64 product = time * rate;
+    if (!(product < 4000000000000000000.0)) { return Optional::None; }
+    int64 frame = cast<int64>(floor(x: product));
+    while (frame > 0 && cast<float64>(frame - 1) / rate >= time) { frame = frame - 1; }
+    while (cast<float64>(frame) / rate < time) { frame = frame + 1; }
+    return Optional::Some(value: frame);
+}

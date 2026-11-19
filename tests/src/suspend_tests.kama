@@ -1,0 +1,318 @@
+// suspend: an offline render suspended at a frame and resumed (decision 37, with decisions 3 and 6; Web Audio's
+// `OfflineAudioContext.suspend(suspendTime)` and `resume()`).
+// - `suspend(suspendTime:)` schedules a stop at a time, quantized up to a quantum. It is refused as `InvalidState`, as
+//   Web Audio's `InvalidStateError`, when the frame is negative, at or before the current time, at or past the end, or
+//   held by another suspend. Every suspend scheduled waits in a declared capacity (decision 6), and one past it is
+//   `TooManySuspends`.
+// - A time becomes a frame by decision 3's one rule: the first frame whose own time, the frame divided by the rate in
+//   float64, is at or after it. So a time made from a frame lands on that frame, though its product with the rate is
+//   off by a little for about one frame in six.
+// - The render stops at the frame, whatever the update's declared frames: `poll()` answers `Suspended`, and updates
+//   render nothing until `resume()`, which is `InvalidState` before the start. Calls made while it is suspended land in
+//   the quantum at that frame.
+
+import { Tally, named, letGo, countedIn, audioHeldIn, audio::OfflineAudioContext, audio::OfflineAudioContextOptions,
+         audio::AudioError, audio::AudioBuffer, audio::RenderRequest, audio::RenderStatus, audio::GainNode,
+         audio::AudioMemory };
+
+export { suspendTests };
+
+// ---- helpers ----------------------------------------------------------------------------------------------------------
+
+// Where a request is, as text: `pending 256`, `suspended 256` or `ready`.
+fn string statusOf(ref RenderRequest r) {
+    RenderStatus s = r.poll();
+    return match (give s) {
+        case Pending(framesRendered: n): "pending ${n}";
+        case Suspended(framesRendered: n): "suspended ${n}";
+        case Ready(buffer: b): "ready";
+    };
+}
+
+fn string expectStatus(ref RenderRequest r, const ref string want, const ref string moment) {
+    string got = statusOf(r: r);
+    return got == want ? "" : "${moment}: the render was ${got} where ${want} was due";
+}
+
+// "" when a call was taken, or what it answered.
+fn string taken(Result<Unit, AudioError> r, const ref string what) {
+    return match (r) {
+        case Ok(value: u): "";
+        case Err(error: e): {
+            string n = named(e: e);
+            return "${what} answered ${n}";
+        }
+    };
+}
+
+// "" when a call was refused with `want`, or what happened instead.
+fn string refusedAs(Result<Unit, AudioError> r, const ref string want, const ref string what) {
+    return match (r) {
+        case Ok(value: u): "${what} was taken where ${want} was due";
+        case Err(error: e): {
+            string n = named(e: e);
+            return n == want ? "" : "${what} answered ${n} where ${want} was due";
+        }
+    };
+}
+
+// The time of frame `frame` at `rate`, as a program would make it: the frame divided by the rate.
+fn float64 timeOf(int64 frame, float64 rate) { return cast<float64>(frame) / rate; }
+
+fnptr string SuspendCase(ref OfflineAudioContext context);
+
+// Runs `body` on a context of one channel of `length` frames at `rate`, rendering `framesPerUpdate` an update, with
+// `suspends` declared suspends, from the tests' poisoning allocator.
+unsafe fn void withSuspends(ref Tally t, const ref string name, float32 rate, int64 length, int64 framesPerUpdate,
+                            isize suspends, SuspendCase body) {
+    InlineArray<int64>#(4) cells = [0; (4)];
+    cells[3] = -1;
+    UnsafePtr<int64> c = addr(of: cells[0]);
+    string why = "";
+    {
+        OfflineAudioContextOptions o = OfflineAudioContextOptions.make(length: length, sampleRate: rate);
+        o.framesPerUpdate = framesPerUpdate;
+        o.suspendCapacity = suspends;
+        o.memory = countedIn(cells: c);
+        o.nodeCapacity = 4;
+        o.ringCapacity = 16;
+        o.backlogCapacity = 16;
+        o.connectionCapacity = 4;
+        Result<OfflineAudioContext, AudioError> made = OfflineAudioContext.make(options: o);
+        match (give made) {
+            case Ok(value: c0): {
+                OfflineAudioContext context = give c0;
+                why = body(context: context);
+            }
+            case Err(error: e): {
+                string m = named(e: e);
+                why = "the context was not made: ${m}";
+            }
+        };
+    }
+    int64 blocks = cells[0];
+    if (why.isEmpty() && blocks != 0) { why = "${blocks} blocks were still out after the case"; }
+    t.verdict(name: name, why: why);
+}
+
+// ---- the cases --------------------------------------------------------------------------------------------------------
+
+// The options declare 64 suspends by default.
+fn string defaults() {
+    OfflineAudioContextOptions o = OfflineAudioContextOptions.make(length: 128, sampleRate: 48000);
+    isize suspends = o.suspendCapacity;
+    return suspends == 64 ? "" : "the default was ${suspends} suspends";
+}
+
+// The render stops at the frame though the update's declared frames would take it to the end; updates render nothing
+// while it is suspended; once resumed, it renders on to the end.
+fn string stopsAndResumes(ref OfflineAudioContext context) {
+    string why = taken(r: context.suspend(suspendTime: timeOf(frame: 256, rate: 48000)), what: "a suspend at frame 256");
+    if (!why.isEmpty()) { return why; }
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) { case Ok(value: q): give q; case Err(error: e): { return "the start was refused"; } };
+    context.update();
+    why = expectStatus(r: r, want: "suspended 256", moment: "after an update of the whole length");
+    if (!why.isEmpty()) { return why; }
+    context.update();
+    why = expectStatus(r: r, want: "suspended 256", moment: "after another update, suspended");
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: context.resume(), what: "the resume");
+    if (!why.isEmpty()) { return why; }
+    why = expectStatus(r: r, want: "pending 256", moment: "resumed, before an update");
+    if (!why.isEmpty()) { return why; }
+    context.update();
+    return expectStatus(r: r, want: "ready", moment: "after the update once resumed");
+}
+
+// A call made while the render is suspended lands in the quantum at the suspend's frame: not before the resume, and in
+// the first quantum after it.
+fn string callLandsAtTheFrame(ref OfflineAudioContext context) {
+    string why = taken(r: context.suspend(suspendTime: timeOf(frame: 256, rate: 48000)), what: "a suspend at frame 256");
+    if (!why.isEmpty()) { return why; }
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) { case Ok(value: q): give q; case Err(error: e): { return "the start was refused"; } };
+    context.update();
+    context.update();
+    why = expectStatus(r: r, want: "suspended 256", moment: "after two updates of 128");
+    if (!why.isEmpty()) { return why; }
+    Result<GainNode, AudioError> rg = GainNode.make(context: context);
+    GainNode g = match (give rg) { case Ok(value: x): give x; case Err(error: e): { return "the node was refused"; } };
+    context.update();
+    isize held = audioHeldIn(context: context);
+    if (held != 0) { return "a make while suspended was applied before the resume: the audio side held ${held}"; }
+    why = taken(r: context.resume(), what: "the resume");
+    if (!why.isEmpty()) { return why; }
+    context.update();
+    held = audioHeldIn(context: context);
+    if (held != 1) { return "the first quantum after the resume left the audio side holding ${held} where the made node was due"; }
+    return expectStatus(r: r, want: "pending 384", moment: "after the quantum at frame 256");
+}
+
+// A time is quantized up to a quantum: frame 100 and frame 128 stop at 128, frame 129 at 256, and a time between
+// frames, 1,024.4, at 1,152, the first quantum at or after it. Suspends scheduled out of order stop in order.
+fn string quantizedUp(ref OfflineAudioContext context) {
+    string why = taken(r: context.suspend(suspendTime: (1024.4) / 48000), what: "a suspend at frame 1,024.4");
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: context.suspend(suspendTime: timeOf(frame: 129, rate: 48000)), what: "a suspend at frame 129");
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: context.suspend(suspendTime: timeOf(frame: 100, rate: 48000)), what: "a suspend at frame 100");
+    if (!why.isEmpty()) { return why; }
+    why = refusedAs(r: context.suspend(suspendTime: timeOf(frame: 128, rate: 48000)), want: "InvalidState",
+                    what: "a suspend at frame 128, the quantum frame 100's already holds");
+    if (!why.isEmpty()) { return why; }
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) { case Ok(value: q): give q; case Err(error: e): { return "the start was refused"; } };
+    context.update();
+    why = expectStatus(r: r, want: "suspended 128", moment: "the first stop");
+    if (!why.isEmpty()) { return why; }
+    Result<Unit, AudioError> r1 = context.resume();
+    context.update();
+    why = expectStatus(r: r, want: "suspended 256", moment: "the second stop");
+    if (!why.isEmpty()) { return why; }
+    Result<Unit, AudioError> r2 = context.resume();
+    context.update();
+    why = expectStatus(r: r, want: "suspended 1152", moment: "the third stop");
+    if (!why.isEmpty()) { return why; }
+    Result<Unit, AudioError> r3 = context.resume();
+    context.update();
+    return expectStatus(r: r, want: "ready", moment: "after the last stop");
+}
+
+// Every quantum's own time, the frame divided by the rate, stops the render at that quantum and not the next, though
+// about one frame in six multiplies back off by a little: at 48 kHz and at 44.1 kHz, 255 suspends, one at every quantum.
+fn string everyQuantumBoundary(ref OfflineAudioContext context) {
+    float64 rate = cast<float64>(context.sampleRate());
+    int64 k = 1;
+    while (k < 256) {
+        string why = taken(r: context.suspend(suspendTime: timeOf(frame: k * 128, rate: rate)), what: "the suspend at quantum ${k}");
+        if (!why.isEmpty()) { return why; }
+        k = k + 1;
+    }
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) { case Ok(value: q): give q; case Err(error: e): { return "the start was refused"; } };
+    k = 1;
+    while (k < 256) {
+        context.update();
+        int64 frame = k * 128;
+        string why = expectStatus(r: r, want: "suspended ${frame}", moment: "the stop at quantum ${k}");
+        if (!why.isEmpty()) { return why; }
+        Result<Unit, AudioError> again = context.resume();
+        k = k + 1;
+    }
+    context.update();
+    return expectStatus(r: r, want: "ready", moment: "after the last quantum's stop");
+}
+
+// Each of Web Audio's refusals is InvalidState, and changes nothing: a negative time, NaN, the frame at or before the
+// current time (frame 0 before the start; once rendered to 256, frames 128 and 256), a frame at or past the end, and a
+// frame another suspend holds.
+fn string refusals(ref OfflineAudioContext context) {
+    string why = refusedAs(r: context.suspend(suspendTime: -0.001), want: "InvalidState", what: "a negative time");
+    if (!why.isEmpty()) { return why; }
+    float64 zero = 0;
+    why = refusedAs(r: context.suspend(suspendTime: zero / zero), want: "InvalidState", what: "NaN");
+    if (!why.isEmpty()) { return why; }
+    why = refusedAs(r: context.suspend(suspendTime: 0), want: "InvalidState", what: "frame 0, the current time");
+    if (!why.isEmpty()) { return why; }
+    why = refusedAs(r: context.suspend(suspendTime: timeOf(frame: 1024, rate: 48000)), want: "InvalidState",
+                    what: "frame 1,024, the end");
+    if (!why.isEmpty()) { return why; }
+    why = refusedAs(r: context.suspend(suspendTime: timeOf(frame: 1000, rate: 48000)), want: "InvalidState",
+                    what: "frame 1,000, quantized to the end");
+    if (!why.isEmpty()) { return why; }
+    why = refusedAs(r: context.suspend(suspendTime: 1000000), want: "InvalidState", what: "a time far past the end");
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: context.suspend(suspendTime: timeOf(frame: 512, rate: 48000)), what: "a suspend at frame 512");
+    if (!why.isEmpty()) { return why; }
+    why = refusedAs(r: context.suspend(suspendTime: timeOf(frame: 500, rate: 48000)), want: "InvalidState",
+                    what: "frame 500, which frame 512's suspend holds");
+    if (!why.isEmpty()) { return why; }
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) { case Ok(value: q): give q; case Err(error: e): { return "the start was refused"; } };
+    context.update();
+    context.update();
+    why = expectStatus(r: r, want: "pending 256", moment: "after two updates");
+    if (!why.isEmpty()) { return why; }
+    why = refusedAs(r: context.suspend(suspendTime: timeOf(frame: 128, rate: 48000)), want: "InvalidState",
+                    what: "frame 128, before the current time");
+    if (!why.isEmpty()) { return why; }
+    why = refusedAs(r: context.suspend(suspendTime: timeOf(frame: 256, rate: 48000)), want: "InvalidState",
+                    what: "frame 256, the current time");
+    if (!why.isEmpty()) { return why; }
+    context.update();
+    context.update();
+    return expectStatus(r: r, want: "suspended 512", moment: "after the refusals, at the one suspend taken");
+}
+
+// A resume before the start is InvalidState; one while the render runs is taken and changes nothing.
+fn string resumeRules(ref OfflineAudioContext context) {
+    string why = refusedAs(r: context.resume(), want: "InvalidState", what: "a resume before the start");
+    if (!why.isEmpty()) { return why; }
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) { case Ok(value: q): give q; case Err(error: e): { return "the start was refused"; } };
+    why = taken(r: context.resume(), what: "a resume while running");
+    if (!why.isEmpty()) { return why; }
+    context.update();
+    return expectStatus(r: r, want: "pending 128", moment: "after an update");
+}
+
+// The declared suspends all held, one more is TooManySuspends; a suspend reached gives its place back.
+fn string tooMany(ref OfflineAudioContext context) {
+    string why = taken(r: context.suspend(suspendTime: timeOf(frame: 128, rate: 48000)), what: "the first suspend");
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: context.suspend(suspendTime: timeOf(frame: 256, rate: 48000)), what: "the second suspend");
+    if (!why.isEmpty()) { return why; }
+    why = refusedAs(r: context.suspend(suspendTime: timeOf(frame: 384, rate: 48000)), want: "TooManySuspends",
+                    what: "a third, with two declared");
+    if (!why.isEmpty()) { return why; }
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) { case Ok(value: q): give q; case Err(error: e): { return "the start was refused"; } };
+    context.update();
+    why = expectStatus(r: r, want: "suspended 128", moment: "the first stop");
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: context.suspend(suspendTime: timeOf(frame: 384, rate: 48000)), what: "a third, once the first was reached");
+    if (!why.isEmpty()) { return why; }
+    Result<Unit, AudioError> r1 = context.resume();
+    context.update();
+    why = expectStatus(r: r, want: "suspended 256", moment: "the second stop");
+    if (!why.isEmpty()) { return why; }
+    Result<Unit, AudioError> r2 = context.resume();
+    context.update();
+    return expectStatus(r: r, want: "suspended 384", moment: "the third stop");
+}
+
+// The current time is the frames rendered over the rate: 0 before the start, and 256 / 48,000 s after two quanta.
+fn string currentTime(ref OfflineAudioContext context) {
+    float64 before = context.currentTime();
+    if (before != 0) { return "before the start the current time was ${before}"; }
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) { case Ok(value: q): give q; case Err(error: e): { return "the start was refused"; } };
+    context.update();
+    context.update();
+    float64 now = context.currentTime();
+    float64 want = timeOf(frame: 256, rate: 48000);
+    return now == want ? "" : "after 256 frames the current time was ${now} where ${want} was due";
+}
+
+unsafe fn void suspendTests(ref Tally t) {
+    t.verdict(name: "suspend: the options declare 64 suspends by default", why: defaults());
+    withSuspends(t: t, name: "suspend: the render stops at the frame, renders nothing while suspended, and goes on once resumed",
+                 rate: 48000, length: 1024, framesPerUpdate: 1024, suspends: 4, body: stopsAndResumes);
+    withSuspends(t: t, name: "suspend: a call made while suspended lands in the quantum at the suspend's frame", rate: 48000,
+                 length: 1024, framesPerUpdate: 128, suspends: 4, body: callLandsAtTheFrame);
+    withSuspends(t: t, name: "suspend: a time is quantized up to a quantum, and suspends stop in order", rate: 48000,
+                 length: 2048, framesPerUpdate: 2048, suspends: 4, body: quantizedUp);
+    withSuspends(t: t, name: "suspend: every quantum's own time stops the render at that quantum, at 48 kHz", rate: 48000,
+                 length: 32768, framesPerUpdate: 32768, suspends: 256, body: everyQuantumBoundary);
+    withSuspends(t: t, name: "suspend: every quantum's own time stops the render at that quantum, at 44.1 kHz", rate: 44100,
+                 length: 32768, framesPerUpdate: 32768, suspends: 256, body: everyQuantumBoundary);
+    withSuspends(t: t, name: "suspend: each of Web Audio's refusals is InvalidState, and changes nothing", rate: 48000,
+                 length: 1024, framesPerUpdate: 128, suspends: 4, body: refusals);
+    withSuspends(t: t, name: "suspend: a resume before the start is InvalidState, and one while running changes nothing",
+                 rate: 48000, length: 1024, framesPerUpdate: 128, suspends: 4, body: resumeRules);
+    withSuspends(t: t, name: "suspend: with every declared suspend held, one more is TooManySuspends, and a reached one frees its place",
+                 rate: 48000, length: 1024, framesPerUpdate: 1024, suspends: 2, body: tooMany);
+    withSuspends(t: t, name: "suspend: the current time is the frames rendered over the rate", rate: 48000, length: 1024,
+                 framesPerUpdate: 128, suspends: 4, body: currentTime);
+}

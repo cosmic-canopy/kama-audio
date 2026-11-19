@@ -1,6 +1,7 @@
 // audio::rt::Ring and audio::rt::Backlog, the command protocol's two halves (AUD-1; AGENTS.audio.md decisions 5 to 8,
-// 33), and audio::rt::SlotTable, the program side's table of slots with generations that a command names a node by
-// (AUD-2; decisions 4, 34 and 35). Every call's command is added to the backlog on the program's side; a flush moves as
+// 33), audio::rt::SlotTable, the program side's table of slots with generations that a command names a node by
+// (AUD-2; decisions 4, 34 and 35), and audio::rt::SlotArray, where the audio side keeps each node at its id's slot
+// (decisions 4, 5 and 34). Every call's command is added to the backlog on the program's side; a flush moves as
 // many as the ring has room for, and the audio side drains the ring at the top of each quantum. They are public because
 // a program's own DSP, and the packages built on this one's public API, move data between those two threads, and name
 // their own objects across it, the same way (decisions 31 and 34).
@@ -32,7 +33,7 @@
 
 import { std::concurrent::Atomic, std::concurrent::MemoryOrder };
 
-export { Ring, Backlog, SlotTable, CapacityError, slotOf, generationOf };
+export { Ring, Backlog, SlotTable, SlotArray, CapacityError, slotOf, generationOf };
 
 // Why a ring, a backlog or a slot table was not made.
 type enum CapacityError implements Error {
@@ -47,8 +48,8 @@ type enum CapacityError implements Error {
 }
 
 // Storage for a declared number of elements, taken once from an allocator and given back to it at the drop. The ring,
-// the backlog and the slot table hold one each. It is not exported. std's collections cannot serve here, since each traps when its
-// allocator has no room (KAMA_GAPS.md KAUD-7).
+// the backlog, the slot table and the slot array hold one each. It is not exported. std's collections cannot serve
+// here, since each traps when its allocator has no room (KAMA_GAPS.md KAUD-7).
 type resource Slots<T: value, A: Allocator> {
     UnsafePtr<T> data = null;
     int64 cap = 0;
@@ -428,4 +429,100 @@ type resource SlotTable<A: Allocator = GlobalAllocator> {
     public const fn isize retired() { return cast<isize>(this.gone); }
 
     private fn void ageTo(int64 slot, int64 generation) { this.rows[slot].generation = generation; }
+}
+
+// ---- the audio side's array of slots (AUD-2; decisions 4, 5, 34) ----------------------------------------------------
+
+// One slot of a `SlotArray`: the generation its value was put at, or 0 while it holds none.
+type value SlotCell<T: value> {
+    public int64 generation = 0;
+    public T value;
+}
+
+// **The audio side's array of slots** (decisions 4, 5 and 34): what the audio side keeps of each node the program side's
+// `SlotTable` names, at the id's slot. The DAW and speech packages keep their own objects' audio-side state the same way.
+// - **Its capacity is declared,** at most 2^32 slots, and its storage is taken once from the allocator it is handed, on
+//   the program's side, as the ring's is. Nothing is allocated per value, so the audio thread never allocates
+//   (decision 5).
+// - **A value is put at the slot an id names, at the id's generation,** and only into an empty slot.
+// - **A read or a removal names the generation the value was put at.** An id of any other generation is refused, so a
+//   command that names a node the audio side no longer holds never reaches the node now in its slot (decision 34).
+// - **An id that names no slot of the array, or generation 0, is refused** with `false` or `None`, never a trap: no
+//   live id has generation 0, which marks an empty slot.
+type resource SlotArray<T: value, A: Allocator = GlobalAllocator> {
+    Slots<SlotCell<T>, A> cells;
+    int64 held = 0;
+
+    private ctor adopt(Slots<SlotCell<T>, A> cells) {
+        this.cells = give cells;
+        int64 n = this.cells.count();
+        int64 i = 0;
+        while (i < n) {
+            this.cells[i].generation = 0;
+            i = i + 1;
+        }
+        this.held = 0;
+    }
+
+    // An array of `capacity` slots on the global heap.
+    public ctor Result<SlotArray<T, A>, CapacityError> withCapacity(isize capacity) when [A: default] {
+        A allocator = A.default();
+        return SlotArray::<T, A>.withCapacityAndAllocator(allocator: allocator, capacity: capacity);
+    }
+
+    // An array of `capacity` slots whose storage comes from `allocator`. More slots than a 32-bit slot can name are
+    // refused as `BadCapacity`, before the allocator is asked.
+    public ctor Result<SlotArray<T, A>, CapacityError> withCapacityAndAllocator(A allocator, isize capacity) {
+        if (cast<int64>(capacity) > MOST_SLOTS) { return Result::Err(error: CapacityError::BadCapacity); }
+        Result<Slots<SlotCell<T>, A>, CapacityError> taken = Slots::<SlotCell<T>, A>.take(allocator: allocator, capacity: capacity);
+        return match (give taken) {
+            case Ok(value: c): Result::Ok(value: SlotArray::<T, A>.adopt(cells: give c));
+            case Err(error: e): Result::Err(error: e);
+        };
+    }
+
+    // The slot `id` names when it holds a value at the id's generation, or NONE.
+    private const fn int64 cellOf(int64 id) {
+        int64 slot = slotOf(id: id);
+        int64 generation = generationOf(id: id);
+        if (slot >= this.cells.count() || generation == 0) { return NONE; }
+        if (this.cells[slot].generation != generation) { return NONE; }
+        return slot;
+    }
+
+    // Puts `value` at the slot `id` names, at the id's generation. False when the slot already holds a value, or `id`
+    // names no slot of the array or generation 0, and then nothing changes.
+    public fn bool put(int64 id, T value) {
+        int64 slot = slotOf(id: id);
+        int64 generation = generationOf(id: id);
+        if (slot >= this.cells.count() || generation == 0) { return false; }
+        if (this.cells[slot].generation != 0) { return false; }
+        this.cells[slot].value = value;
+        this.cells[slot].generation = generation;
+        this.held = this.held + 1;
+        return true;
+    }
+
+    // The value at the slot `id` names, when it was put there at the id's generation; otherwise `None`.
+    public const fn Optional<T> at(int64 id) {
+        int64 slot = this.cellOf(id: id);
+        if (slot == NONE) { return Optional::None; }
+        return Optional::Some(value: this.cells[slot].value);
+    }
+
+    // Takes away the value `id` names, leaving its slot empty. False when the slot holds no value at the id's
+    // generation, and then nothing changes.
+    public fn bool remove(int64 id) {
+        int64 slot = this.cellOf(id: id);
+        if (slot == NONE) { return false; }
+        this.cells[slot].generation = 0;
+        this.held = this.held - 1;
+        return true;
+    }
+
+    // How many slots hold a value.
+    public const fn isize length() { return cast<isize>(this.held); }
+
+    // How many slots it was made with.
+    public const fn isize capacity() { return cast<isize>(this.cells.count()); }
 }

@@ -1,0 +1,297 @@
+// slot array: audio::rt::SlotArray, the audio side's array of slots (AUD-2; AGENTS.audio.md decisions 4, 5, 6 and 34).
+// The program side's `SlotTable` picks a node's id; the audio side keeps the node's state in a `SlotArray` at the id's
+// slot, and only the id crosses between them, never a pointer.
+// - Its capacity is declared, and its storage comes from the injected allocator once, never grown (decisions 5, 6).
+// - A value is put at the slot an id names, at the id's generation, only into an empty slot.
+// - A read or a removal names the generation it was put at: an id of another generation is refused, so a command that
+//   names a node the audio side no longer holds can never reach the node now in its slot (decision 34).
+// - An id that names no slot of the array, or generation 0, which no live id has, is refused with an answer, never a
+//   trap.
+
+import { Tally, Counting, audio::rt::SlotArray, audio::rt::CapacityError };
+
+export { slotArrayTests };
+
+// The id of `slot` at `generation`, as the program side's table makes it: the slot in the low 32 bits.
+fn int64 idAt(int64 slot, int64 generation) {
+    return truncate<int64>((cast<uint64>(generation) << 32) | cast<uint64>(slot));
+}
+
+fnptr string ArrayCase(ref SlotArray<int64, GlobalAllocator> a);
+
+// Runs `body` on a fresh array of `capacity` on the global heap.
+fn void withArray(ref Tally t, const ref string name, isize capacity, ArrayCase body) {
+    Result<SlotArray<int64, GlobalAllocator>, CapacityError> made =
+        SlotArray::<int64, GlobalAllocator>.withCapacity(capacity: capacity);
+    match (give made) {
+        case Ok(value: a0): {
+            SlotArray<int64, GlobalAllocator> a = give a0;
+            string why = body(a: a);
+            t.verdict(name: name, why: why);
+        }
+        case Err(error: e): {
+            string m = e.message();
+            t.verdict(name: name, why: "the array was not made: ${m}");
+        }
+    };
+}
+
+// Says what is wrong with the value at `id`, or "" when it is `want`.
+fn string expectAt(ref SlotArray<int64, GlobalAllocator> a, int64 id, int64 want, const ref string what) {
+    Optional<int64> got = a.at(id: id);
+    return match (got) {
+        case Some(value: v): v == want ? "" : "${what} held ${v} where ${want} was put";
+        case None: "${what} held nothing where ${want} was put";
+    };
+}
+
+// Says what is wrong when `id` names a value, or "".
+fn string expectNothingAt(ref SlotArray<int64, GlobalAllocator> a, int64 id, const ref string what) {
+    Optional<int64> got = a.at(id: id);
+    return match (got) {
+        case Some(value: v): "${what} answered ${v} where it names no value";
+        case None: "";
+    };
+}
+
+// ---- its capacity and its memory --------------------------------------------------------------------------------------
+
+fn string freshIsEmpty(ref SlotArray<int64, GlobalAllocator> a) {
+    isize cap = a.capacity();
+    if (cap != 4) { return "its capacity is ${cap}, not the 4 declared"; }
+    isize n = a.length();
+    if (n != 0) { return "a fresh array holds ${n}"; }
+    int64 slot = 0;
+    while (slot < 4) {
+        string why = expectNothingAt(a: a, id: idAt(slot: slot, generation: 1), what: "a fresh array's slot");
+        if (!why.isEmpty()) { return why; }
+        slot = slot + 1;
+    }
+    return "";
+}
+
+fn void badCapacity(ref Tally t) {
+    Result<SlotArray<int64, GlobalAllocator>, CapacityError> zero = SlotArray::<int64, GlobalAllocator>.withCapacity(capacity: 0);
+    Result<SlotArray<int64, GlobalAllocator>, CapacityError> negative =
+        SlotArray::<int64, GlobalAllocator>.withCapacity(capacity: -1);
+    bool zeroRefused = match (zero) { case Ok(value: a): false; case Err(error: e): e == CapacityError::BadCapacity; };
+    bool negativeRefused = match (negative) { case Ok(value: a): false; case Err(error: e): e == CapacityError::BadCapacity; };
+    string why = zeroRefused && negativeRefused ? "" : "zero refused: ${zeroRefused}, -1 refused: ${negativeRefused}";
+    t.verdict(name: "slot array: a capacity below one is refused as BadCapacity", why: why);
+}
+
+// A slot is 32 bits, so an array of more than 2^32 slots could not be named by ids. An allocator with no room shows
+// that the bound is checked first: past it, BadCapacity, never OutOfMemory. On a 32-bit target no isize is past it.
+unsafe fn void tooManySlots(ref Tally t) {
+    string why = "";
+    if (sizeof(isize) >= 8) {
+        isize most = 65536;
+        most = most * 65536;
+        isize past = most + 1;
+        InlineArray<int64>#(5) cells = [0; (5)];
+        Counting c = Counting.make(cells: addr(of: cells[0]), room: false);
+        Result<SlotArray<int64, Counting>, CapacityError> over =
+            SlotArray::<int64, Counting>.withCapacityAndAllocator(allocator: c, capacity: past);
+        Result<SlotArray<int64, Counting>, CapacityError> at =
+            SlotArray::<int64, Counting>.withCapacityAndAllocator(allocator: c, capacity: most);
+        bool overRefused = match (over) { case Ok(value: a): false; case Err(error: e): e == CapacityError::BadCapacity; };
+        bool atAsked = match (at) { case Ok(value: a): false; case Err(error: e): e == CapacityError::OutOfMemory; };
+        if (!overRefused) { why = "an array of 2^32 + 1 slots was not refused as BadCapacity"; }
+        else if (!atAsked) { why = "an array of 2^32 slots was refused before its allocator was asked"; }
+    }
+    t.verdict(name: "slot array: more slots than 32 bits can name are refused as BadCapacity, before the allocator is asked",
+              why: why);
+}
+
+// Makes an array of 16 through `c`, uses it, and drops it when it returns. "" when it was made and used.
+unsafe fn string useArrayFrom(Counting c) {
+    Result<SlotArray<int64, Counting>, CapacityError> made =
+        SlotArray::<int64, Counting>.withCapacityAndAllocator(allocator: c, capacity: 16);
+    return match (give made) {
+        case Ok(value: a0): {
+            SlotArray<int64, Counting> a = give a0;
+            bool put = a.put(id: idAt(slot: 15, generation: 1), value: 7);
+            return put ? "" : "a put into it was refused";
+        }
+        case Err(error: e): {
+            string m = e.message();
+            return "the array was not made: ${m}";
+        }
+    };
+}
+
+// Each slot holds its value and the generation it was put at, so 16 slots of an int64 take at least 16 × 16 bytes.
+unsafe fn void fromTheAllocator(ref Tally t) {
+    InlineArray<int64>#(5) cells = [0; (5)];
+    Counting c = Counting.make(cells: addr(of: cells[0]), room: true);
+    string used = useArrayFrom(c: c);
+    string why = give used;
+    if (why.isEmpty() && (cells[0] != 1 || cells[1] < 16 * 16)) {
+        int64 n = cells[0];
+        int64 b = cells[1];
+        why = "${n} allocations of ${b} bytes, not one for 16 slots";
+    }
+    if (why.isEmpty() && (cells[2] != 1 || cells[3] != cells[1])) {
+        int64 n = cells[2];
+        int64 b = cells[3];
+        int64 want = cells[1];
+        why = "${n} frees of ${b} bytes after the drop, not one of ${want}";
+    }
+    if (why.isEmpty() && cells[4] != 0) { why = "it reallocated, and an array never grows"; }
+    t.verdict(name: "slot array: its storage comes from the injected allocator, once, and goes back to it at the drop",
+              why: why);
+}
+
+unsafe fn void noRoom(ref Tally t) {
+    InlineArray<int64>#(5) cells = [0; (5)];
+    Counting c = Counting.make(cells: addr(of: cells[0]), room: false);
+    Result<SlotArray<int64, Counting>, CapacityError> made =
+        SlotArray::<int64, Counting>.withCapacityAndAllocator(allocator: c, capacity: 16);
+    bool refused = match (made) { case Ok(value: a): false; case Err(error: e): e == CapacityError::OutOfMemory; };
+    string why = refused ? "" : "an array was made with no memory to hold it";
+    t.verdict(name: "slot array: an allocator with no room refuses the array as OutOfMemory, and none is made", why: why);
+}
+
+// ---- putting, reading and removing ------------------------------------------------------------------------------------
+
+// A value put at an id is read back at that id, and only there.
+fn string putThenAt(ref SlotArray<int64, GlobalAllocator> a) {
+    if (!a.put(id: idAt(slot: 0, generation: 1), value: 10)) { return "a put into slot 0 was refused"; }
+    if (!a.put(id: idAt(slot: 2, generation: 1), value: 30)) { return "a put into slot 2 was refused"; }
+    string why = expectAt(a: a, id: idAt(slot: 0, generation: 1), want: 10, what: "slot 0");
+    if (!why.isEmpty()) { return why; }
+    why = expectAt(a: a, id: idAt(slot: 2, generation: 1), want: 30, what: "slot 2");
+    if (!why.isEmpty()) { return why; }
+    why = expectNothingAt(a: a, id: idAt(slot: 1, generation: 1), what: "slot 1, never put");
+    if (!why.isEmpty()) { return why; }
+    why = expectNothingAt(a: a, id: idAt(slot: 3, generation: 1), what: "slot 3, never put");
+    if (!why.isEmpty()) { return why; }
+    isize n = a.length();
+    return n == 2 ? "" : "it holds ${n} after two puts";
+}
+
+// Every slot can hold a value at once.
+fn string fills(ref SlotArray<int64, GlobalAllocator> a) {
+    int64 slot = 0;
+    while (slot < 3) {
+        if (!a.put(id: idAt(slot: slot, generation: 1), value: 100 + slot)) { return "a put into slot ${slot} was refused"; }
+        slot = slot + 1;
+    }
+    isize n = a.length();
+    if (n != 3) { return "it holds ${n} with every slot put"; }
+    slot = 0;
+    while (slot < 3) {
+        string why = expectAt(a: a, id: idAt(slot: slot, generation: 1), want: 100 + slot, what: "slot ${slot}");
+        if (!why.isEmpty()) { return why; }
+        slot = slot + 1;
+    }
+    return "";
+}
+
+// A slot that holds a value refuses a put, at its own generation or another, and keeps what it holds.
+fn string heldRefusesPut(ref SlotArray<int64, GlobalAllocator> a) {
+    if (!a.put(id: idAt(slot: 0, generation: 1), value: 10)) { return "the first put was refused"; }
+    if (a.put(id: idAt(slot: 0, generation: 1), value: 11)) { return "a held slot took a second put at its own generation"; }
+    if (a.put(id: idAt(slot: 0, generation: 2), value: 12)) { return "a held slot took a put at the next generation"; }
+    string why = expectAt(a: a, id: idAt(slot: 0, generation: 1), want: 10, what: "the held slot");
+    if (!why.isEmpty()) { return why; }
+    why = expectNothingAt(a: a, id: idAt(slot: 0, generation: 2), what: "the refused put's id");
+    if (!why.isEmpty()) { return why; }
+    isize n = a.length();
+    return n == 1 ? "" : "the refused puts left it holding ${n}";
+}
+
+// A read names the generation the value was put at: any other answers nothing. Generations run to the last a 32-bit
+// field holds.
+fn string atChecksGeneration(ref SlotArray<int64, GlobalAllocator> a) {
+    if (!a.put(id: idAt(slot: 0, generation: 2), value: 20)) { return "a put at generation 2 was refused"; }
+    string why = expectNothingAt(a: a, id: idAt(slot: 0, generation: 1), what: "the earlier generation");
+    if (!why.isEmpty()) { return why; }
+    why = expectNothingAt(a: a, id: idAt(slot: 0, generation: 3), what: "the later generation");
+    if (!why.isEmpty()) { return why; }
+    why = expectAt(a: a, id: idAt(slot: 0, generation: 2), want: 20, what: "the put's own generation");
+    if (!why.isEmpty()) { return why; }
+    if (!a.put(id: idAt(slot: 1, generation: 4294967295), value: 40)) { return "a put at the last generation was refused"; }
+    why = expectAt(a: a, id: idAt(slot: 1, generation: 4294967295), want: 40, what: "the last generation");
+    if (!why.isEmpty()) { return why; }
+    return expectNothingAt(a: a, id: idAt(slot: 1, generation: 4294967294), what: "the generation before the last");
+}
+
+// A removal names the generation the value was put at: any other is refused and changes nothing. A slot removed holds
+// nothing, and a second removal is refused.
+fn string removeChecksGeneration(ref SlotArray<int64, GlobalAllocator> a) {
+    if (!a.put(id: idAt(slot: 0, generation: 2), value: 20)) { return "the put was refused"; }
+    if (a.remove(id: idAt(slot: 0, generation: 1))) { return "a removal at the earlier generation was taken"; }
+    if (a.remove(id: idAt(slot: 0, generation: 3))) { return "a removal at the later generation was taken"; }
+    string why = expectAt(a: a, id: idAt(slot: 0, generation: 2), want: 20, what: "the slot after refused removals");
+    if (!why.isEmpty()) { return why; }
+    isize before = a.length();
+    if (before != 1) { return "the refused removals left it holding ${before}"; }
+    if (!a.remove(id: idAt(slot: 0, generation: 2))) { return "the removal at the put's generation was refused"; }
+    why = expectNothingAt(a: a, id: idAt(slot: 0, generation: 2), what: "the removed slot");
+    if (!why.isEmpty()) { return why; }
+    isize after = a.length();
+    if (after != 0) { return "it holds ${after} after the removal"; }
+    if (a.remove(id: idAt(slot: 0, generation: 2))) { return "a removed slot was removed again"; }
+    return "";
+}
+
+// A removed slot takes a put again, at the next generation, and the earlier generation's id names nothing.
+fn string reuse(ref SlotArray<int64, GlobalAllocator> a) {
+    if (!a.put(id: idAt(slot: 0, generation: 1), value: 10)) { return "the first put was refused"; }
+    if (!a.remove(id: idAt(slot: 0, generation: 1))) { return "the removal was refused"; }
+    if (!a.put(id: idAt(slot: 0, generation: 2), value: 20)) { return "the removed slot refused a put at the next generation"; }
+    string why = expectAt(a: a, id: idAt(slot: 0, generation: 2), want: 20, what: "the slot put again");
+    if (!why.isEmpty()) { return why; }
+    why = expectNothingAt(a: a, id: idAt(slot: 0, generation: 1), what: "the earlier generation");
+    if (!why.isEmpty()) { return why; }
+    if (a.remove(id: idAt(slot: 0, generation: 1))) { return "the earlier generation's removal took the value put again"; }
+    isize n = a.length();
+    return n == 1 ? "" : "it holds ${n} after a put, a removal and a put";
+}
+
+// An id of a slot past the array, of generation 0, which no live id has, or -1 is refused by every call.
+fn string strangersRefused(ref SlotArray<int64, GlobalAllocator> a) {
+    int64 atBound = idAt(slot: 2, generation: 1);   // the first slot past an array of 2
+    int64 past = idAt(slot: 7, generation: 1);
+    int64 noGeneration = idAt(slot: 1, generation: 0);
+    if (a.put(id: atBound, value: 1)) { return "a put just past the array was taken"; }
+    if (a.put(id: past, value: 1)) { return "a put past the array was taken"; }
+    if (a.put(id: noGeneration, value: 1)) { return "a put at generation 0 was taken"; }
+    if (a.put(id: 0, value: 1)) { return "a put at the id 0 was taken"; }
+    if (a.put(id: -1, value: 1)) { return "a put at the id -1 was taken"; }
+    isize n = a.length();
+    if (n != 0) { return "the refused puts left it holding ${n}"; }
+    string why = expectNothingAt(a: a, id: atBound, what: "the slot just past the array");
+    if (!why.isEmpty()) { return why; }
+    why = expectNothingAt(a: a, id: noGeneration, what: "generation 0");
+    if (!why.isEmpty()) { return why; }
+    why = expectNothingAt(a: a, id: 0, what: "the id 0");
+    if (!why.isEmpty()) { return why; }
+    why = expectNothingAt(a: a, id: -1, what: "the id -1");
+    if (!why.isEmpty()) { return why; }
+    if (a.remove(id: atBound) || a.remove(id: past) || a.remove(id: noGeneration) || a.remove(id: 0) || a.remove(id: -1)) {
+        return "a stranger's removal was taken";
+    }
+    return "";
+}
+
+unsafe fn void slotArrayTests(ref Tally t) {
+    withArray(t: t, name: "slot array: a fresh array is empty, at its declared capacity", capacity: 4, body: freshIsEmpty);
+    badCapacity(t: t);
+    tooManySlots(t: t);
+    fromTheAllocator(t: t);
+    noRoom(t: t);
+    withArray(t: t, name: "slot array: a value put at an id is read back at that id, and only there", capacity: 4,
+              body: putThenAt);
+    withArray(t: t, name: "slot array: every slot can hold a value at once", capacity: 3, body: fills);
+    withArray(t: t, name: "slot array: a slot that holds a value refuses a put, and keeps what it holds", capacity: 2,
+              body: heldRefusesPut);
+    withArray(t: t, name: "slot array: a read names the generation the value was put at", capacity: 2,
+              body: atChecksGeneration);
+    withArray(t: t, name: "slot array: a removal names the generation the value was put at, and a removed slot holds nothing",
+              capacity: 1, body: removeChecksGeneration);
+    withArray(t: t, name: "slot array: a removed slot takes a put again at the next generation", capacity: 1, body: reuse);
+    withArray(t: t, name: "slot array: an id past the array, of generation 0, or -1 is refused by every call", capacity: 2,
+              body: strangersRefused);
+}

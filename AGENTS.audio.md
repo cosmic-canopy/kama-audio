@@ -25,8 +25,8 @@ It is the audio half of kyoten's rule that each engine module is built on a gene
 
 **Seeded on 2026-11-13 with `kama seed` on kama 0.9.938+g94365be5 (kyoten's pin). The design pass is done
 (2026-11-15): areas 1 to 5 are decided (§ Decided, 1 to 30), and so are the first slice's module cut (31) and its
-command protocol's timing (32 and 33), its slots (34 and 35) and the program's memory (36),** on the
-evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This repository's documents, each to one purpose:
+command protocol's timing (32 and 33), its slots (34 and 35), the program's memory (36) and the offline render
+(37),** on the evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This repository's documents, each to one purpose:
 - [FEATURES.md](FEATURES.md) is every feature the library will have, with its rungs, status, example, test and budget
   (decision 27);
 - [ROADMAP.md](ROADMAP.md) is the order, by example (decision 28), and [ROADMAP_DETAIL.md](ROADMAP_DETAIL.md) its
@@ -229,7 +229,8 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
   - on 2026-11-16, AUD-2's four questions: a node's count in the program side's slot table, a public `audio::rt`
     primitive, its ids 32 + 32 bits (34), and a dropped node's release sent after the backlog (35);
   - on 2026-11-18, the program's memory as callbacks, `AudioMemory` (36), and kyoten's pin at 0.9.978 on both
-    machines, for `try new` into a `Shared` (KR-399 to KR-402).
+    machines, for `try new` into a `Shared` (KR-399 to KR-402);
+  - on 2026-11-19, the offline render as a request the program polls, advanced by `update()` (37).
 - **Found on the way: KAUD-7, KAUD-8, KAUD-9 and KAUD-10.**
   - std's collections trap when their allocator has no room (KAUD-7, kama's KR-403, briefed). So every declared
     capacity takes its storage as the ring's does, through `Slots`, since 2026-11-18 in the internal module
@@ -1236,6 +1237,39 @@ Those questions stay in kyoten's `audio.md`.
         (`.scratch/aud2-callbacks/`).
     - **Later:** once a generic function's instance binds to an `fnptr` (KAUD-9), the package can write the callbacks
       for any allocator (`AudioMemory.of(allocator:)`). That adds to the API and changes nothing in it.
+37. **Decided on 2026-11-19: an offline render is a request the program polls, advanced by `update()`** (AUD-29, the
+    render; AUD-5 and AUD-9). Web Audio's `startRendering()` is a promise the browser fulfils from its own thread, kama
+    has no promises, and the package starts no thread (decision 10), so something had to say who runs the render's
+    quanta and when. Offered a render the program steps with a one-call form, one call only, or stepped only, the owner
+    asked: "I assume option 1 is the production answer? I know we already had answered similar questions regarding lack
+    of promises in kama where we decided the best answer was a poll mechanism per frame?" Told that it was, and how the
+    stepped render lines up with `@kama/gpu`'s polling, the owner said: "yes record it and build the first slice".
+    - **`startRendering()` answers a request,** as `@kama/gpu`'s `requestAdapter(options:)` does, and starts the render
+      without rendering anything. A second start is Web Audio's `InvalidStateError`.
+    - **The program's `update()` does the work,** once a frame (decision 10): it flushes, renders whole quanta on the
+      calling thread until it has rendered the context's declared frames per update, or the end, and reads the way back
+      (decision 9). Unlike a GPU request, which the browser or the driver works on while the program polls, an offline
+      render has no one else to run it, so the per-frame call that polls also advances it.
+    - **`request.poll()` answers where it is:** pending, with the frames rendered so far, or ready, with the
+      `AudioBuffer`. A poll after ready answers ready again.
+    - **The frames per update are a declared option of the context** (decision 6), so the stall one update can cause is
+      bounded. A golden or a short bounce declares the whole length, and one `update()` renders it all.
+    - **Web Audio's `suspend()` and `resume()` keep their names,** in a step of their own: the render stops at the frame
+      asked, `poll()` answers suspended, the program makes its calls, and `resume()` carries on, so a change lands at
+      that exact frame.
+    - **The output buffer is a declared part,** sized by the context's length and channels and drawn at the make with
+      the rest (decision 6). The `AudioBuffer` handed over is a counted resource that outlives the context, as Web Audio's
+      does.
+    - **Why:**
+      - It is the one asynchronous pattern the siblings share: what kama cannot await is polled, never a callback into
+        kama (`@kama/gpu`'s SPEC; decision 9).
+      - The program owns the thread and the pacing (decision 10): a game advances a long bounce a little each frame, and
+        a test or a tool renders the whole length in one update.
+      - A render in one call would stall a game's frame for the whole length (a 3-minute bounce is about 67,000 quanta),
+        and would leave Web Audio's `suspend()` nowhere to run.
+      - It gives FEATURES.md's "an open length rendered in chunks" its mechanism.
+    - **What it pulls forward:** `update()` (AUD-5) becomes the offline render's driver as well as the way back's reader,
+      and the flush and the read become public through it.
 
 ## Where the truth is
 

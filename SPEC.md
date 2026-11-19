@@ -24,11 +24,11 @@ Decision 31 sets the first cut:
 
 | Module | What it holds |
 |---|---|
-| `audio` | the lower tier, Web Audio's graph under Web Audio's names: `AudioMemory`, `BaseAudioContext`, `OfflineAudioContext`, `OfflineAudioContextOptions`, `AudioError`, `AudioNode`, `AudioDestinationNode`, `GainNode`, `AudioBuffer`, `RenderRequest`, `RenderStatus` |
+| `audio` | the lower tier, Web Audio's graph under Web Audio's names: `AudioMemory`, `BaseAudioContext`, `OfflineAudioContext`, `OfflineAudioContextOptions`, `AudioError`, `AudioNode`, `AudioDestinationNode`, `GainNode`, `ConstantSourceNode`, `ConstantSourceOptions`, `AudioBuffer`, `RenderRequest`, `RenderStatus` |
 | `audio::sound` | the upper tier: sounds, voices, buses, snapshots and emitters. Not made yet |
 | `audio::rt` | the real-time primitives that the engine and a program's own DSP share: `Ring`, `Backlog`, `SlotTable`, `SlotArray`, `CapacityError`, `slotOf`, `generationOf` |
 | `audio::store` | **internal**: `Slots`, the storage under every declared capacity, taken once from the allocator a part is handed and never grown. std's collections cannot serve, since each traps when its allocator has no room (KAMA_GAPS.md KAUD-7). Its indexer masks a ring's counter at the array, and an index already in the array, as every part kept by slot uses, skips the division |
-| `audio::graph` | **internal**: what a context and its nodes share, `ContextState`, `NodeHold`, `NodeLink`, the commands (`Command` and `NodeKind`), `Connections` and `Samples`; and the audio side, `Engine`, `EngineNode`, the marks of the lifetime walk and the order's search (`Mark`) and the way back's `Event`. The package's own modules import it, and no program can |
+| `audio::graph` | **internal**: what a context and its nodes share, `ContextState`, `NodeHold`, `NodeLink`, the commands (`Command` and `NodeKind`), `Connections` and `Samples`; and the audio side, `Engine`, `EngineNode`, a slot's `Output`, the marks of the lifetime walk and the order's search (`Mark`) and the way back's `Event`. The package's own modules import it, and no program can |
 
 ## The command protocol's two halves
 
@@ -272,19 +272,25 @@ it. Its members:
     (decision 6);
   - `framesPerUpdate`, the frames an `update()` renders at least, in whole quanta, 8,192 by default (decision 37);
   - `suspendCapacity`, the suspends its render can have scheduled at once, 64 by default (decisions 6 and 37);
+  - `channelCapacity`, the most channels a node carries, 2 by default; the context uses its `numberOfChannels` when
+    that is more (decision 38);
   - `memory`, `AudioMemory.global()` by default.
-- **What a make takes:** sixteen parts, drawn from `options.memory` once each and in this order: the slot table, the
+- **What a make takes:** eighteen parts, drawn from `options.memory` once each and in this order: the slot table, the
   command ring, the backlog, the way back, the program side's connections (the connections and a list head for each
   slot, two allocations), the audio side (its array of nodes, its connections, two allocations, the marks of the
-  lifetime walk and the order's search, the render's order, and its block, a quantum for each channel), the render's
-  output (its samples and the box that counts them), its suspends, then the state. The way back has `nodeCapacity`
-  places; the array, the list heads, the marks and the order have one more, the destination's slot. The
+  lifetime walk and the order's search, the render's order, the slots' states, and their blocks, a quantum for each of
+  the channels a node carries, decision 38), the render's output (its samples and the box that counts them), its
+  suspends, the rows' source states, a byte each, then the state. The way back and the source states have
+  `nodeCapacity` places; the array, the list heads, the marks, the order, the states and the blocks have one more, the
+  destination's slot. The blocks are the render's sample memory: 1 MiB at 1,024 rows in stereo, 16 MiB at 32 channels.
+  The
   state is one `Shared`, made by `try new(allocator:)`, that holds the rest. All go back with the last hold, but the
   output's, which an `AudioBuffer` may still hold.
 - **What a make answers instead** (`audio::AudioError`), with nothing left allocated:
   - `NotSupported` for an option outside Web Audio's ranges, as Web Audio's `NotSupportedError`: 1 to 32 channels, a
     length of at least one frame, a sample rate from 3,000 to 768,000 Hz. A node, ring, backlog or connection capacity
-    below one is the same, and so is a `framesPerUpdate` or a `suspendCapacity` below one;
+    below one is the same, and so is a `framesPerUpdate` or a `suspendCapacity` below one, and a `channelCapacity`
+    outside 1 to 32;
   - `OutOfMemory` when the memory has no room for a part. Every part taken before it goes back. A capacity whose
     bytes no `usize` can hold, and an output whose samples no `isize` can count, are `OutOfMemory` too, before the
     allocator is asked: never a size that overflowed. So is a `nodeCapacity` of 2^32 or more, which would leave the
@@ -292,7 +298,7 @@ it. Its members:
 - **What it answers:** `sampleRate()`, `length()` and `numberOfChannels()`, as it was made, and `destination()`.
 - **Its render:** `startRendering()`, `update()`, `suspend(suspendTime:)`, `resume()` and `currentTime()` (§ The offline
   render).
-- **The test seam:** thirteen `friend` grants to the tests program:
+- **The test seam:** fourteen `friend` grants to the tests program:
   - `audiotests::rowsHeldIn` reads its rows held;
   - `audiotests::releaseDueIn` takes its next release due straight from the table;
   - `audiotests::flushIn` flushes it;
@@ -305,7 +311,9 @@ it. Its members:
   - `audiotests::markIn` writes a value into its render's output at a channel and frame in range, where silence could
     not show a render's overrun or a read of the wrong channel or frame;
   - `audiotests::orderAtIn` reads the node at a position in its render's order, and `audiotests::mutedIn` whether a
-    node is muted.
+    node is muted;
+  - `audiotests::lateIn` reads how many starts its audio side applied late, until playback statistics make the count
+    public.
 
 ### `audio::GainNode`
 
@@ -521,9 +529,10 @@ deleted once nothing references it and then disconnects its outputs).
   - reads the way back (decision 9).
 - **`RenderRequest.poll()`** answers `RenderStatus`: `Pending(framesRendered)`; `Suspended(framesRendered)`, stopped at
   a suspend's frame until `resume()`; or `Ready(buffer)` with the `AudioBuffer`, again at every poll after.
-- **What the render makes:** each quantum is rendered into the engine's block, a quantum for each channel, then copied
-  into the output. No node renders samples yet, so it is silence, written: the tests' allocator poisons every block
-  it hands out. A quantum is Web Audio's 128 frames until the engine's declared block (decision 15, AUD-9).
+- **What the render makes:** each quantum the render runs the order over a block per node (§ The render and the first
+  source), and the destination's block is copied into the output: its sum, or silence, written, when nothing reaches
+  it (the tests' allocator poisons every block it hands out). A quantum is Web Audio's 128 frames until the engine's
+  declared block (decision 15, AUD-9).
 - **`suspend(suspendTime:)`,** Web Audio's `suspend(suspendTime)`, schedules a stop at the time's frame, quantized up
   to a quantum. It answers `Result<Unit, AudioError>`:
   - Web Audio's four refusals are `InvalidState`: a frame negative (or a time NaN, infinite, or past 2^51 frames), at
@@ -661,6 +670,66 @@ Audio's `AudioDestinationNode`, its `destination` attribute, and its rendering a
   - a make, a connect and a free each re-order the graph, and a slot taken again holds a node that is not muted.
 
   The `nodes` cases cover the sixteenth part.
+
+## The render and the first source
+
+**The render runs the order over a block per node, and `ConstantSourceNode` makes its first samples** (decisions 3, 4,
+32, 38 and 39; Web Audio's rendering algorithm, its channel up-mixing, and its `ConstantSourceNode`).
+
+### The render
+
+- **A block per node** (decision 38): each slot has `capacity` channels of 128 frames, drawn with the context at the
+  make, where `capacity` is `channelCapacity`, or the context's channels when more; and a state: the channels its
+  block holds this quantum, the channels its input is fixed to, whether it is silent, and whether it is muted.
+- **Each quantum, every node in the order starts silent;** then each in turn renders into its block (a source), or
+  leaves its input there (a gain, which passes it until parameters bring its `gain`, and the destination), and adds
+  its output into the block of every node it feeds that is not muted. So when a node's turn comes, its block holds the
+  sum of its inputs, and the destination's is the quantum's output.
+- **A silent node writes nothing and adds nothing,** Chromium's silent flag, so silence costs a flag. A muted node, out
+  of the order, renders nothing and is fed nothing.
+- **Channels, Web Audio's way:** a node's input carries the most channels of its inputs (Web Audio's `max`), the
+  destination's the context's (`explicit`), at most `capacity`. One channel reaches more by the speaker rules: stereo
+  and quad take it left and right, 5.1 in its centre, and any other count in its first (Web Audio's discrete). Equal
+  counts add channel by channel. A sum that must carry more channels than it held is first mixed up to them, the same
+  as mixing each input before summing, since every rule is linear. No node can carry more than one channel or the
+  context's yet, so the speakers' down-mixes, and the capacity's down-mix with its count, come with the first source of
+  more channels, the buffer player.
+
+### `audio::ConstantSourceNode`
+
+- **Web Audio's `ConstantSourceNode`,** made like every node (decisions 4, 34 and 35):
+  `ConstantSourceNode.make(context:, options:)`, with `ConstantSourceOptions.make()`, whose `offset` is 1 by default.
+  The offset travels in the make's command (`NodeKind::Constant(offset)`); the `AudioParam` that makes it a parameter
+  comes with parameters. It connects as every node does.
+- **Its output is one channel of the offset, from its start's frame;** before it, and never started, silence.
+- **`start(startTime:)` is Web Audio's `start(when)`:** kama reserves `when` (KAMA_GAPS.md KAUD-11), so the time takes
+  the name Web Audio gives its other times. It is seconds on the context's clock, made a frame once by decision 3's rule
+  (`frameAt`) and sent in a `Start` command (decision 32), and the source keeps it: its output begins at that frame,
+  inside a quantum or at its edge, and a time between two frames' times lands on the later. A start already past when
+  its command lands begins at once, at the quantum it lands in, and the audio side counts it late (decision 32).
+- **Its refusals, in Web Audio's order, change nothing:** a second start is `InvalidState`; a time negative, NaN,
+  infinite or past 2^51 frames is the new `AudioError::Range`, Web Audio's `RangeError`; a full backlog is
+  `TooManyCommands`. The program side keeps whether a row's source has started, a byte a row, cleared when the row is
+  taken.
+- **A started source can sound** (decision 4): released, it is kept and goes on sounding, as long as the render runs
+  while it has no stop; released before its start, it is freed.
+- **Tested** (`tests/src/constant_tests.kama`, the `constant` cases, 9 of them, each seen red against a stub first):
+  - the offset is 1 by default;
+  - a started constant renders its offset into the destination through every quantum and the last partial one;
+  - inputs sum, at the destination and at a gain that passes them (0.25 + 0.5 + 2 + 4);
+  - one channel reaches the destination's by the speaker rules: stereo both, quad left and right, 5.1 its centre, and
+    three channels its first;
+  - a start begins at its frame: 1,000, inside a quantum; 256, at an edge; and 300.4 frames' time, at frame 301;
+  - a constant never started, one connected to nothing, and one feeding a cycle that feeds the destination are silence;
+  - start's refusals change nothing: a full backlog is `TooManyCommands` and the source is not started; −1 s, NaN and
+    infinity are `Range`; a second start, also at −1 s, is `InvalidState`, and the first still plays;
+  - a start already past begins at the quantum it lands in, counted late, and one ahead begins at its frame;
+  - a released constant that started is kept and sounds on; one never started is freed.
+
+  The `nodes` cases cover the eighteen parts, `channelCapacity`'s default and range, and, with every part refused in
+  turn, a budget that steps by 4 bytes, the rows' source states being a byte a row. A `render` case covers the bytes:
+  two channels take 4,000 more than one, the output's, and three 6,560 more than two, a quantum more for each of 5
+  slots. A `destination` case declares 4 node rows, where 32 channels at the default 1,024 would draw 16 MiB.
 
 ## Proved by mutation
 

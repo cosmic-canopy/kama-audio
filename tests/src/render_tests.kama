@@ -429,16 +429,21 @@ unsafe fn string lessThanAQuantumLeft(ref OfflineAudioContext context) {
     };
 }
 
-// The bytes a context takes for its render: each channel adds a quantum to the engine's block and its length to the
-// output, 4 bytes a sample, so two channels of 1,000 frames take 128 × 4 + 1,000 × 4 = 4,512 bytes more than one. Both
-// contexts are held while their bytes out are read.
+// The bytes a context takes for its render, 4 a sample: each channel adds its length to the output, and each channel a
+// node carries adds a quantum to every slot's block (decision 38). Every node carries two channels by default, so two
+// channels of 1,000 frames take 4,000 bytes more than one; three make every node carry three, a quantum more for each of
+// the 5 slots (4 node rows and the destination), 4,000 + 5 × 512 = 6,560 bytes more than two. The contexts are held
+// while their bytes out are read.
 unsafe fn void bytesPerChannel(ref Tally t) {
     InlineArray<int64>#(4) one = [0; (4)];
     InlineArray<int64>#(4) two = [0; (4)];
+    InlineArray<int64>#(4) three = [0; (4)];
     one[3] = -1;
     two[3] = -1;
+    three[3] = -1;
     UnsafePtr<int64> c1 = addr(of: one[0]);
     UnsafePtr<int64> c2 = addr(of: two[0]);
+    UnsafePtr<int64> c3 = addr(of: three[0]);
     string why = "";
     {
         Result<OfflineAudioContext, AudioError> m1 =
@@ -447,17 +452,27 @@ unsafe fn void bytesPerChannel(ref Tally t) {
         Result<OfflineAudioContext, AudioError> m2 =
             OfflineAudioContext.make(options: renderOptions(memory: countedIn(cells: c2), channels: 2, length: 1000,
                                                             framesPerUpdate: 256));
+        Result<OfflineAudioContext, AudioError> m3 =
+            OfflineAudioContext.make(options: renderOptions(memory: countedIn(cells: c3), channels: 3, length: 1000,
+                                                            framesPerUpdate: 256));
         bool made1 = match (m1) { case Ok(value: x): true; case Err(error: e): false; };
         bool made2 = match (m2) { case Ok(value: x): true; case Err(error: e): false; };
-        if (!made1 || !made2) { why = "a context was not made"; }
+        bool made3 = match (m3) { case Ok(value: x): true; case Err(error: e): false; };
+        if (!made1 || !made2 || !made3) { why = "a context was not made"; }
         int64 bytes1 = one[1];
         int64 bytes2 = two[1];
+        int64 bytes3 = three[1];
         int64 more = bytes2 - bytes1;
-        if (why.isEmpty() && more != 4512) {
-            why = "two channels took ${more} bytes more than one where 4,512 were due, a quantum of block and 1,000 frames of output";
+        int64 most = bytes3 - bytes2;
+        if (why.isEmpty() && more != 4000) {
+            why = "two channels took ${more} bytes more than one where 4,000 were due, 1,000 frames of output";
+        }
+        if (why.isEmpty() && most != 6560) {
+            why = "three channels took ${most} bytes more than two where 6,560 were due, 1,000 frames of output and a quantum for each of 5 slots";
         }
     }
-    t.verdict(name: "render: each channel adds a quantum to the engine's block and its length to the output", why: why);
+    t.verdict(name: "render: each channel adds its length to the output, and each a node carries a quantum to every slot",
+              why: why);
 }
 
 // The end of a buffer: it is moved in, and dropped when this returns.

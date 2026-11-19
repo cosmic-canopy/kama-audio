@@ -5,6 +5,14 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `audio::ConstantSourceNode`, Web Audio's, with `ConstantSourceOptions` (`offset`, 1 by default) and
+  `start(startTime:)`, Web Audio's `start(when)` under the name of its other times, since kama reserves `when`: the
+  render's first samples (decision 39). A start's refusals are `InvalidState` and the new `AudioError::Range`; a start
+  already past begins at once, counted late (2026-11-19).
+- The render runs the order over a block per node (decision 38): each node's output is added into the nodes it feeds,
+  the destination's sum is the output, one channel reaches the destination's by Web Audio's speaker rules, and a
+  silent node costs a flag. `OfflineAudioContextOptions.channelCapacity` (2 by default, at least the context's
+  channels) declares the channels a node carries; a context draws eighteen parts (2026-11-19).
 - `audio::AudioDestinationNode`, Web Audio's, and `destination()` on `BaseAudioContext` and `OfflineAudioContext`: the
   context's own node, made with it, whose channel count is the context's (`channelCount()`, `maxChannelCount()`). A
   node connects to it and it connects onward; nothing releases it, and it takes no node row, so `nodeCapacity` counts

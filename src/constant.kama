@@ -1,0 +1,54 @@
+// audio::ConstantSourceNode, Web Audio's `ConstantSourceNode` (decisions 3, 32 and 39): a source whose output is one
+// channel of a constant, from its start.
+//
+// - **Made like every node** (decisions 4, 34 and 35): `ConstantSourceNode.make(context:, options:)` takes a row and
+//   sends its make, with its `offset` from `ConstantSourceOptions`, 1 by default as Web Audio's. The `AudioParam` that
+//   makes the offset a parameter comes with parameters.
+// - **`start(startTime:)`, Web Audio's `start(when)`:** kama reserves `when`, so the time takes the name Web Audio
+//   gives its other times (`startTime`, `suspendTime`; KAMA_GAPS.md KAUD-11). The time, in seconds on the context's
+//   clock, becomes a frame by decision 3's one rule once, here, and travels in its command (decision 32); the source
+//   keeps it, and its output begins at that frame, inside a quantum or at its edge. A time already past when the command lands starts it at once, counted late.
+//   Refusals, in Web Audio's order, changing nothing: a second start is `InvalidState`; a time negative, not finite or
+//   past 2^51 frames is `Range`, Web Audio's `RangeError`; a full backlog is `TooManyCommands`.
+// - **A started source can sound** (decision 4): released, it is kept while it plays. With no stop, it plays as long as
+//   the context renders.
+
+import { audio::graph::NodeHold, audio::graph::NodeKind, audio::graph::NodeLink, audio::graph::ContextKey, AudioNode,
+         BaseAudioContext, AudioError };
+
+export { ConstantSourceNode, ConstantSourceOptions };
+
+// Web Audio's `ConstantSourceOptions`.
+type value ConstantSourceOptions {
+    public float32 offset = 1;
+
+    public ctor make() { this.offset = 1; }
+}
+
+type resource ConstantSourceNode implements AudioNode, Copyable<This>(bare: give) {
+    NodeHold hold;
+
+    private ctor adopt(NodeHold hold) { this.hold = give hold; }
+
+    // A constant source in `context`, its make sent with its offset. `TooManyCommands` when the context's backlog is
+    // full, or `TooManyNodes` when every node row it declared is held, and then nothing changes.
+    public ctor Result<ConstantSourceNode, AudioError> make(BaseAudioContext context, ConstantSourceOptions options) {
+        Result<NodeHold, AudioError> taken = NodeHold.take(context: context, kind: NodeKind::Constant(offset: options.offset));
+        return match (give taken) {
+            case Ok(value: h): Result::Ok(value: ConstantSourceNode.adopt(hold: give h));
+            case Err(error: e): Result::Err(error: e);
+        };
+    }
+
+    public ctor copy(ref ConstantSourceNode source) { this.hold = copy source.hold; }
+
+    // Starts the source at `startTime`, in seconds on the context's clock (Web Audio's `start(when)`). `InvalidState` when it
+    // has started already, `Range` for a time negative, not finite or past 2^51 frames, `TooManyCommands` with the
+    // backlog full, and a refusal changes nothing.
+    public fn Result<Unit, AudioError> start(float64 startTime) { return this.hold.start(startTime: startTime); }
+
+    // Connects this node's output to `destination`'s input (`AudioNode`'s contract).
+    public fn Result<Unit, AudioError> connect(AudioNode destination) { return this.hold.connect(destination: destination); }
+
+    public unsafe const fn NodeLink linkFor(ContextKey key) { return this.hold.link(); }
+}

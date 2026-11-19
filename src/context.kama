@@ -22,11 +22,11 @@ export { BaseAudioContext, OfflineAudioContext, OfflineAudioContextOptions, Audi
 // Why a context or a node was not made.
 type enum AudioError implements Error {
     NotSupported, OutOfMemory, TooManyNodes, TooManyCommands, TooManyConnections, InvalidAccess, InvalidState, IndexSize,
-    TooManySuspends;
+    TooManySuspends, Range;
 
     public const fn string message() {
         return match (this) {
-            case NotSupported: "an option is outside what Web Audio allows: 1 to 32 channels, a length of at least one frame, a sample rate from 3,000 to 768,000 Hz, and at least one of each declared capacity";
+            case NotSupported: "an option is outside what Web Audio allows: 1 to 32 channels, a length of at least one frame, a sample rate from 3,000 to 768,000 Hz, 1 to 32 channels a node, and at least one of each declared capacity";
             case OutOfMemory: "the program's memory had no room for the context's declared capacities";
             case TooManyNodes: "every node row the context declared is held; a dropped node's row comes back once the audio side frees it";
             case TooManyCommands: "the context's backlog is full: every command it declared is waiting for the next flush";
@@ -35,6 +35,7 @@ type enum AudioError implements Error {
             case InvalidState: "the render is not in a state for the call, as Web Audio's InvalidStateError: started already, not started, or a suspend's frame at or before the current time, at or past the end, or taken";
             case IndexSize: "an index is outside what the buffer holds: a channel it does not have, or a frame below 0";
             case TooManySuspends: "every suspend the context declared is scheduled; one is free again once the render reaches it";
+            case Range: "a value is outside its range, as Web Audio's RangeError: a time negative, not finite, or past 2^51 frames";
         };
     }
 }
@@ -61,6 +62,7 @@ type value OfflineAudioContextOptions {
     public isize connectionCapacity = 4096;  // the connections between its nodes at once, four for each node row (decision 6)
     public int64 framesPerUpdate = 8192;     // the frames an update renders at least, in whole quanta (decision 37)
     public isize suspendCapacity = 64;       // the suspends a render can have scheduled at once (decisions 6 and 37)
+    public int32 channelCapacity = 2;        // the most channels a node carries, or numberOfChannels when more (decision 38)
     public AudioMemory memory = AudioMemory.global();
 
     public ctor make(int64 length, float32 sampleRate) {
@@ -96,6 +98,7 @@ type resource OfflineAudioContext implements BaseAudioContext {
     friend audiotests::markIn[mark];
     friend audiotests::orderAtIn[orderAt];
     friend audiotests::mutedIn[muted];
+    friend audiotests::lateIn[late];
 
     private ctor adopt(Shared<ContextState, AudioMemory> state, int32 channels, int64 frames) {
         this.state = give state;
@@ -109,13 +112,14 @@ type resource OfflineAudioContext implements BaseAudioContext {
         if (options.numberOfChannels < 1 || options.numberOfChannels > MOST_CHANNELS || options.length < 1
             || options.sampleRate < LOWEST_RATE || options.sampleRate > HIGHEST_RATE || options.nodeCapacity < 1
             || options.ringCapacity < 1 || options.backlogCapacity < 1 || options.connectionCapacity < 1
-            || options.framesPerUpdate < 1 || options.suspendCapacity < 1) {
+            || options.framesPerUpdate < 1 || options.suspendCapacity < 1 || options.channelCapacity < 1
+            || options.channelCapacity > MOST_CHANNELS) {
             return Result::Err(error: AudioError::NotSupported);
         }
         Result<Shared<ContextState, AudioMemory>, AudioError> state =
             stateFrom(memory: options.memory, nodeCapacity: options.nodeCapacity, ringCapacity: options.ringCapacity,
                       backlogCapacity: options.backlogCapacity, connectionCapacity: options.connectionCapacity,
-                      channels: options.numberOfChannels, length: options.length,
+                      channels: options.numberOfChannels, channelCapacity: options.channelCapacity, length: options.length,
                       framesPerUpdate: options.framesPerUpdate, suspendCapacity: options.suspendCapacity,
                       sampleRate: options.sampleRate);
         return match (give state) {
@@ -209,6 +213,9 @@ type resource OfflineAudioContext implements BaseAudioContext {
 
     // Whether `node` is muted, in a cycle.
     private const fn bool muted(int64 node) { return this.state.muted(id: node); }
+
+    // The starts the audio side applied late.
+    private const fn int64 late() { return this.state.late(); }
 
     // A connection no call would send, added to the backlog: from `from`'s output to `to`'s input, any ids at all.
     private fn bool forgeConnect(int64 from, int64 to) { return this.state.send(command: Command::Connect(from: from, to: to)); }

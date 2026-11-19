@@ -97,6 +97,7 @@ fn string channels() {
         int32 want = counts[k];
         OfflineAudioContextOptions o = OfflineAudioContextOptions.make(length: 128, sampleRate: 48000);
         o.numberOfChannels = want;
+        o.nodeCapacity = 4;   // every slot's block carries the context's channels: 32 of them at 1,024 rows is 16 MiB
         Result<OfflineAudioContext, AudioError> made = OfflineAudioContext.make(options: o);
         OfflineAudioContext context = match (give made) {
             case Ok(value: c): give c;

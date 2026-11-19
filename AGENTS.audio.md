@@ -131,7 +131,18 @@ where a node's samples live (38) and the first source (39),** on the evidence in
       seen red against a stub first, or, for the cycles reached through their feeder, against the mutation it was
       written for.
 
-  133 cases, green on every leg: native debug and release, wasm debug and release.
+  - on 2026-11-19, **the render over a block per node, and `ConstantSourceNode`** (decisions 38 and 39, with 3, 4 and
+    32; SPEC.md § The render and the first source):
+    - the engine's render: every node's block summed into the nodes it feeds, the destination's into the output, one
+      channel up-mixed by the speaker rules, a silent flag per slot; `OfflineAudioContextOptions.channelCapacity`;
+      eighteen parts;
+    - `audio::ConstantSourceNode` and `ConstantSourceOptions` (`src/constant.kama`), `start(startTime:)`, a `Start`
+      command carrying its frame, late starts counted, and a started source kept while it can sound;
+      `AudioError::Range`;
+    - 9 `constant` cases (`tests/src/constant_tests.kama`), each seen red against a stub first; the `nodes`, `render`
+      and `destination` cases sharpened.
+
+  142 cases, green on every leg: native debug and release, wasm debug and release.
 - **Settled while building the table, reported to the owner to object to** (each within decisions 34 and 35):
   - the name `SlotTable`, and its calls: `take()`, `countUp(id:)`, `countDown(id:)`, `nextRelease()`, `free(id:)`,
     `countOf(id:)`, `length()`, `capacity()`, `retired()`;
@@ -281,6 +292,28 @@ where a node's samples live (38) and the first source (39),** on the evidence in
     past the end still takes it, and every element is the same;
   - **two more seams, thirteen in all:** `audiotests::orderAtIn` and `mutedIn`. `audioHeldIn` counts the program's
     nodes the audio side holds, the destination not among them.
+- **Settled while building the render and the first source, reported to the owner to object to** (each within
+  decisions 3, 4, 32, 38 and 39, on Web Audio's text):
+  - **`start(startTime:)`, where decision 3 wrote `start(when:)`:** kama reserves `when`, as it does `out` and `in`
+    (KAMA_GAPS.md KAUD-11, with its ask), so the time takes the name Web Audio gives its other times
+    (`setValueAtTime(value, startTime)`, `suspend(suspendTime)`); `stop` will take `stopTime:`. MDN's page still
+    describes it, under another label;
+  - **a time Web Audio refuses is the new `AudioError::Range`,** for its `RangeError`, negative; NaN and infinity,
+    which Web Audio's IDL refuses as a `TypeError`, are folded into it, as is a time past 2^51 frames;
+  - **the option is `channelCapacity`, 2 by default, 1 to 32 or `NotSupported`,** and a context uses its
+    `numberOfChannels` when that is more, so the destination always fits;
+  - **a node's input is summed by its feeders:** each adds its output into the block of the node it feeds as soon as
+    it renders, so a node's block is its input and then its output, and no node keeps a second block for its sum;
+  - **only the up-mixes a node can reach are built:** one channel by the speaker rules, equal counts, and discrete
+    otherwise. The speakers' down-mixes, and decision 38's down-mix at the capacity with its count, come with the
+    buffer player, the first source of more channels, since no node can pass the capacity before it;
+  - **`ConstantSourceOptions.make()`, its `offset` a field, 1 by default,** sent in the make's own command as
+    `NodeKind::Constant(offset)`, so a make and its offset land together; the `AudioParam` comes with parameters;
+  - **a constant starts on a frame:** decision 3's sub-frame fraction is a buffer source's, and comes with it;
+  - **the late count is on the audio side,** read through a fourteenth seam, `audiotests::lateIn`, until playback
+    statistics make it public;
+  - **the program side keeps a byte a row for its source's state,** the eighteenth part, so a second start is refused at
+    the call; it is cleared when the row is taken.
 - **Proved by mutation:**
   - the destination and the render's order (`.scratch/aud29/mutate_order.py`, through the whole gate): **72 of 77
     caught,** 3 by a hang, none refused by kama, the other 5 equivalent. The first pass caught 71 of 78. One miss showed
@@ -353,19 +386,21 @@ where a node's samples live (38) and the first source (39),** on the evidence in
   - std's `FixedArray` traps when its allocator has no room, as KAUD-7's collections do, so the slot array takes its
     storage through `Slots` too.
 - **Next:**
-  - **the render's next slices** (decisions 37 to 39): the render running the order over a block per node (38), each
-    node summing its inputs, the destination's sum copied into the output; then `ConstantSourceNode` (39), so a render
-    is not silence; then the buffer player and the first golden. **The first node that renders different samples into different channels
-    brings the case that catches `blockAt` reading channel 0,** the one mutation of the render's first slice no case
-    can see yet, **and the first timed call brings the case that catches `frameAt` taking a negative time,** equivalent
-    for suspend; **The `AudioBuffer`'s sample memory is the owner's question,** asked when a
-    buffer is made to be played: how its samples count against decision 6's sample memory;
+  - **the render and the first source proved by mutation** (`.scratch/aud29/mutate_render2.py`, to write). Feeding a
+    muted node is one of two guards on a cycle's silence (a muted node is also out of the order), so its mutation is
+    likely equivalent;
+  - **then `stop(stopTime:)` and a source's end** (decisions 4, 9 and 32): the end reported on the way back as Web
+    Audio's `ended`, a released source freed once it ends, and the walk due when one does; then `AudioParam` and the
+    gain's `gain`; then the buffer player and the first golden. **Two mutations earlier passes could not see now have
+    cases, to be proved by the next pass:** `blockAt` reading channel 0 for every channel (the constant's 5.1 up-mix
+    sounds only in the centre) and `frameAt` taking a negative time (a start at −1 s is `Range`). **The `AudioBuffer`'s
+    sample memory is the owner's question,** asked when a buffer is made to be played: how its samples count against
+    decision 6's sample memory;
   - **the rest of AUD-1's commands, each with its call:** `disconnect()` and its forms, each needing a name of its own
-    since kama has no overloading; a source's start with its frame, which keeps a released source until it ends; a
-    parameter's events with `AudioParam`. The late count is a timed call's rule (decision 32), so it lands with the
-    first one, on the audio side's clock;
+    since kama has no overloading; a stop; a parameter's events with `AudioParam`. The late count landed with the first
+    timed call, on the audio side's clock;
   - then the context's options and memory (AUD-4) and `update()` (AUD-5).
-- **Read first:** § Decided (4, 6, 9 and 32 to 37 above all), SPEC.md § Contexts and nodes, § The commands, § The
+- **Read first:** § Decided (4, 6, 9 and 32 to 39 above all), SPEC.md § Contexts and nodes, § The commands, § The
   audio side and the way back, § Connections and § The offline render, ROADMAP_DETAIL.md § AUD-29, and the probes it starts from (`aud-probe-cmd` for the
   commands and the way back, `aud-probe-routes` for slots and a block split at a frame).
 - **Each slice checks the owner's games for code it can take** (2026-11-18, after the owner asked why audio came so

@@ -22,25 +22,37 @@ import { audio::AudioMemory, audio::AudioError, audio::BaseAudioContext, audio::
 
 export { ContextState, NodeHold, ContextKey, NodeLink, Command, NodeKind, stateFrom };
 
-// The kind of node a `Made` command makes.
+// The kind of node a `Made` command makes, with what its make sets: a constant source's offset (decision 39).
 type enum NodeKind {
-    Gain, Destination;
+    Gain, Destination, Constant(float32 offset);
 
-    public const fn string name() { return match (this) { case Gain: "gain"; case Destination: "destination"; }; }
+    public const fn string name() {
+        return match (this) { case Gain: "gain"; case Destination: "destination"; case Constant(offset: o): "constant"; };
+    }
+
+    // Whether the node is a source a start schedules.
+    public const fn bool isSource() {
+        return match (this) { case Gain: false; case Destination: false; case Constant(offset: o): true; };
+    }
 }
 
 // An id's generation 1 (decision 34): the high 32 bits of an id, over its slot's low 32.
 comptime int64 FIRST_GENERATION_ID = 4294967296;
 
+// A row's source state: its start sent.
+comptime uint8 STARTED = 1;
+
 // A call's command (decision 7): flat bytes, so it crosses a ring or a transferred buffer as it is, and typed, so the
-// audio side applies each kind by name. A node is named by its row's id, its slot and generation (decision 34).
+// audio side applies each kind by name. A node is named by its row's id, its slot and generation (decision 34), and a
+// call's time travels as the frame decision 3's rule gave it (decision 32).
 type enum Command {
     Made(int64 node, NodeKind kind),
     Connect(int64 from, int64 to),
+    Start(int64 node, int64 frame),
     Release(int64 node);
 
-    // The command as text, for a test's or a log's reading: `made gain 0:1`, `connect 0:1 to 1:1`, `release 0:1`, each
-    // node as its slot and generation.
+    // The command as text, for a test's or a log's reading: `made gain 0:1`, `connect 0:1 to 1:1`, `start 0:1 at 256`,
+    // `release 0:1`, each node as its slot and generation.
     public const fn string describe() {
         return match (this) {
             case Made(node: n, kind: k): {
@@ -55,6 +67,11 @@ type enum Command {
                 int64 toSlot = slotOf(id: t);
                 int64 toGeneration = generationOf(id: t);
                 return "connect ${fromSlot}:${fromGeneration} to ${toSlot}:${toGeneration}";
+            }
+            case Start(node: n, frame: f): {
+                int64 slot = slotOf(id: n);
+                int64 generation = generationOf(id: n);
+                return "start ${slot}:${generation} at ${f}";
             }
             case Release(node: n): {
                 int64 slot = slotOf(id: n);
@@ -74,6 +91,7 @@ type resource ContextState {
     Engine engine;
     Shared<Samples, AudioMemory> rendering;   // an offline render's output, its length the context's
     Slots<int64, AudioMemory> suspends;       // the frames a render will stop at, ascending, in [0, suspendCount)
+    Slots<uint8, AudioMemory> sources;        // by row: STARTED once a source's start is sent
     float32 rate = 0;
     int64 destinationId = 0;                  // the context's own node, at the slot past the table's rows
     int64 perUpdate = 1;                      // the frames an update renders at least, in whole quanta (decision 37)
@@ -85,7 +103,7 @@ type resource ContextState {
     public ctor make(SlotTable<AudioMemory> nodes, Ring<Command, AudioMemory> commands,
                      Backlog<Command, AudioMemory> waiting, Ring<Event, AudioMemory> events, Connections links,
                      Engine engine, Shared<Samples, AudioMemory> output, Slots<int64, AudioMemory> suspends,
-                     int64 destination, int64 framesPerUpdate, float32 sampleRate) {
+                     Slots<uint8, AudioMemory> sources, int64 destination, int64 framesPerUpdate, float32 sampleRate) {
         this.nodes = give nodes;
         this.commands = give commands;
         this.waiting = give waiting;
@@ -94,6 +112,7 @@ type resource ContextState {
         this.engine = give engine;
         this.rendering = give output;
         this.suspends = give suspends;
+        this.sources = give sources;
         this.destinationId = destination;
         this.perUpdate = framesPerUpdate;
         this.renderedSoFar = 0;
@@ -241,8 +260,36 @@ type resource ContextState {
 
     public const fn float32 sampleRate() { return this.rate; }
 
-    // A row for a new node, counted once, or `None` when every row is held.
-    public fn Optional<int64> takeRow() { return this.nodes.take(); }
+    // A row for a new node, counted once, its source state cleared, or `None` when every row is held.
+    public fn Optional<int64> takeRow() {
+        Optional<int64> taken = this.nodes.take();
+        match (taken) {
+            case Some(value: id): { this.sources[slotOf(id: id)] = 0; }
+            case None: { }
+        };
+        return taken;
+    }
+
+    // Starts the source in row `node` at `startTime`, in seconds (Web Audio's `start(when)`): the time's frame by decision
+    // 3's rule, sent in its command (decision 32). `InvalidState` when it has started already, `Range` for a time
+    // negative, not finite or past 2^51 frames, `TooManyCommands` with the backlog full, in Web Audio's order, and a
+    // refusal changes nothing.
+    public fn Result<Unit, AudioError> startSource(int64 node, float64 startTime) {
+        int64 slot = slotOf(id: node);
+        if ((this.sources[slot] & STARTED) != 0) { return Result::Err(error: AudioError::InvalidState); }
+        Optional<int64> at = frameAt(time: startTime, sampleRate: this.rate);
+        int64 frame = match (at) {
+            case Some(value: f): f;
+            case None: { return Result::Err(error: AudioError::Range); }
+        };
+        if (!this.canSend()) { return Result::Err(error: AudioError::TooManyCommands); }
+        bool sent = this.send(command: Command::Start(node: node, frame: frame));
+        this.sources[slot] = this.sources[slot] | STARTED;
+        return Result::Ok(value: Unit::Unit);
+    }
+
+    // How many starts the audio side applied late.
+    public const fn int64 late() { return this.engine.late(); }
 
     // A copy of the node `id` names.
     public fn bool countUp(int64 id) { return this.nodes.countUp(id: id); }
@@ -330,12 +377,14 @@ type resource ContextState {
 // A context's state drawn from `memory` (decision 36), each part only once the one before it fit: its slot table of
 // `nodeCapacity` rows, its command ring of `ringCapacity`, its backlog of `backlogCapacity`, the way back of
 // `nodeCapacity` (decision 9: a report for every row at once), its connections (`connectionCapacity`, and a list head
-// for each row and the destination), the audio side (`engineFrom`), the offline render's output of `channels` channels
-// of `length` frames (`samplesFrom`), its `suspendCapacity` suspends, then the block that holds them. A part with no
-// room is `OutOfMemory`, and every part taken before it goes back when this returns.
+// for each row and the destination), the audio side (`engineFrom`, its nodes carrying at most `channelCapacity`
+// channels, or the context's when more), the offline render's output of `channels` channels of `length` frames
+// (`samplesFrom`), its `suspendCapacity` suspends, a source state for each row, then the block that holds them. A part
+// with no room is `OutOfMemory`, and every part taken before it goes back when this returns.
 fn Result<Shared<ContextState, AudioMemory>, AudioError> stateFrom(AudioMemory memory, isize nodeCapacity,
                                                                    isize ringCapacity, isize backlogCapacity,
-                                                                   isize connectionCapacity, int32 channels, int64 length,
+                                                                   isize connectionCapacity, int32 channels,
+                                                                   int32 channelCapacity, int64 length,
                                                                    int64 framesPerUpdate, isize suspendCapacity,
                                                                    float32 sampleRate) {
     // The destination takes the slot past the table's rows, which must fit an id's 32 bits: 2^32 rows or more leave it
@@ -375,8 +424,10 @@ fn Result<Shared<ContextState, AudioMemory>, AudioError> stateFrom(AudioMemory m
         case Ok(value: l): give l;
         case Err(error: e): { return Result::Err(error: AudioError::OutOfMemory); }
     };
+    // A node carries at most the declared channels, and at least the destination's (decision 38).
+    int32 capacity = channelCapacity > channels ? channelCapacity : channels;
     Result<Engine, AudioError> audio = engineFrom(memory: memory, slots: slots, connectionCapacity: connectionCapacity,
-                                                  channels: channels, destination: destination);
+                                                  channels: channels, capacity: capacity, destination: destination);
     // The engine is bound before the `try new`, never built in its argument list: a box with no room drops what it was
     // given from a local, and leaks a temporary built there (KAMA_GAPS.md KAUD-10).
     Engine engine = match (give audio) {
@@ -394,11 +445,17 @@ fn Result<Shared<ContextState, AudioMemory>, AudioError> stateFrom(AudioMemory m
         case Ok(value: s): give s;
         case Err(error: e): { return Result::Err(error: AudioError::OutOfMemory); }
     };
+    Result<Slots<uint8, AudioMemory>, CapacityError> kept = Slots::<uint8, AudioMemory>.take(allocator: memory, capacity: nodeCapacity);
+    Slots<uint8, AudioMemory> sources = match (give kept) {
+        case Ok(value: k): give k;
+        case Err(error: e): { return Result::Err(error: AudioError::OutOfMemory); }
+    };
     Optional<Shared<ContextState, AudioMemory>> state =
         try new(allocator: memory) ContextState.make(nodes: give nodes, commands: give commands, waiting: give waiting,
                                                      events: give events, links: give links, engine: give engine,
                                                      output: give output, suspends: give suspends,
-                                                     destination: destination, framesPerUpdate: framesPerUpdate,
+                                                     sources: give sources, destination: destination,
+                                                     framesPerUpdate: framesPerUpdate,
                                                      sampleRate: sampleRate);
     return match (give state) {
         case Some(value: s): Result::Ok(value: give s);
@@ -459,6 +516,9 @@ type resource NodeHold implements Copyable<This>(bare: give) {
 
     // The node's context and id, as `AudioNode.linkFor` answers them.
     public unsafe const fn NodeLink link() { return NodeLink.make(state: this.state.where(), id: this.row); }
+
+    // Starts this source at `startTime` (`ContextState.startSource`).
+    public fn Result<Unit, AudioError> start(float64 startTime) { return this.state.startSource(node: this.row, startTime: startTime); }
 
     // Connects this node's output to `destination`'s input (`AudioNode.connect`, `ContextState.connectFrom`).
     public unsafe fn Result<Unit, AudioError> connect(AudioNode destination) {

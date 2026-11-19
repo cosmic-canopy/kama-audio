@@ -32,6 +32,17 @@
 //   in a quantum whose commands or walk changed the graph (a make, a connection, a free), after the walk.
 // - **The destination is the context's own node,** placed at the make at the slot past the program side's rows, so no
 //   command makes it and no release names it; never released, it can always sound.
+// - **The render runs the order over a block per node** (decision 38): each slot has a block of `capacity` channels,
+//   drawn at the make, and a state saying how many channels it holds this quantum and whether it is silent. A quantum
+//   starts every node in the order silent; a node renders into its block (a source) or leaves its input there (a gain
+//   of 1, the destination), then adds its output into the block of every node it feeds that is not muted. So when a
+//   node's turn comes, its block holds the sum of its inputs, and the destination's is the quantum's output.
+// - **Channels, Web Audio's way:** a node's input carries the most channels of its inputs (Web Audio's "max"), the
+//   destination's the context's ("explicit"), at most `capacity`. One channel reaches more by the speaker rules (stereo
+//   and quad left and right, 5.1 its centre), equal counts channel by channel, and any other count discretely: the
+//   first channels, the rest silence. A silent node writes nothing and adds nothing, as Chromium's silent flag.
+// - **A source keeps its start's frame** (decision 32), and renders from it, inside a quantum or at its edge. A start
+//   already past when it lands begins at the quantum it lands in, counted late.
 // - **The way back always has room for a report:** its capacity is the node capacity, and a slot is reported freed at
 //   most once before the program side reads the report, since only that read lets the slot be taken again. So a
 //   report is never refused, and a row never leaks.
@@ -42,7 +53,7 @@
 import { audio::AudioMemory, audio::AudioError, audio::rt::Ring, audio::rt::SlotArray, audio::rt::CapacityError,
          audio::rt::slotOf, audio::store::Slots, Command, NodeKind, Connections, NO_CONNECTION };
 
-export { Engine, Event, EngineNode, Mark, engineFrom, QUANTUM };
+export { Engine, Event, EngineNode, Output, Mark, engineFrom, QUANTUM };
 
 // The frames of one render quantum: Web Audio's 128, until the engine's declared block (decision 15, AUD-9) makes it the
 // program's setting.
@@ -58,11 +69,28 @@ type enum Event {
 type value EngineNode {
     public NodeKind kind = NodeKind::Gain;
     public bool released = false;    // the program holds it no more
-    public bool muted = false;       // in a cycle: left out of the render's order
+    public int64 start = -1;         // a source's first frame, or -1 before its start
 
     public ctor make(NodeKind kind) {
         this.kind = kind;
         this.released = false;
+        this.start = -1;
+    }
+}
+
+// A slot's block this quantum, and the node's place in the render: the channels its block holds, the channels its input
+// is fixed to (0 for the most of its inputs'), whether the block holds nothing, and whether the node is muted, in a
+// cycle.
+type value Output {
+    public int32 channels = 1;
+    public int32 fixed = 0;
+    public bool silent = true;
+    public bool muted = false;
+
+    public ctor make(int32 fixed) {
+        this.channels = 1;
+        this.fixed = fixed;
+        this.silent = true;
         this.muted = false;
     }
 }
@@ -81,10 +109,11 @@ type value Mark {
 
 // The audio side drawn from `memory`, each part only once the one before it fit: its array of `slots` nodes, its
 // connections (`connectionCapacity`, and a list head for each slot), the marks of the walk and the search, one a slot,
-// the render's order, one a slot, then its block, a quantum for each of `channels` channels. `OutOfMemory` when a part
-// has no room, and every part taken before it goes back. The destination, `destination`, is held from the start.
+// the render's order, one a slot, the slots' states, then their blocks, a quantum for each of `capacity` channels a
+// slot (decision 38). `OutOfMemory` when a part has no room, and every part taken before it goes back. The destination,
+// `destination`, is held from the start, its input fixed to the context's `channels`.
 fn Result<Engine, AudioError> engineFrom(AudioMemory memory, isize slots, isize connectionCapacity, int32 channels,
-                                         int64 destination) {
+                                         int32 capacity, int64 destination) {
     Result<SlotArray<EngineNode, AudioMemory>, CapacityError> array =
         SlotArray::<EngineNode, AudioMemory>.withCapacityAndAllocator(allocator: memory, capacity: slots);
     SlotArray<EngineNode, AudioMemory> nodes = match (give array) {
@@ -107,14 +136,21 @@ fn Result<Engine, AudioError> engineFrom(AudioMemory memory, isize slots, isize 
         case Ok(value: o): give o;
         case Err(error: e): { return Result::Err(error: AudioError::OutOfMemory); }
     };
+    Result<Slots<Output, AudioMemory>, CapacityError> stated = Slots::<Output, AudioMemory>.take(allocator: memory, capacity: slots);
+    Slots<Output, AudioMemory> outputs = match (give stated) {
+        case Ok(value: o): give o;
+        case Err(error: e): { return Result::Err(error: AudioError::OutOfMemory); }
+    };
+    // A slot count past 2^32 was refused before, and a capacity is at most 32, so the samples cannot overflow.
     Result<Slots<float32, AudioMemory>, CapacityError> blockTaken =
-        Slots::<float32, AudioMemory>.take(allocator: memory, capacity: cast<isize>(channels) * cast<isize>(QUANTUM));
-    Slots<float32, AudioMemory> block = match (give blockTaken) {
+        Slots::<float32, AudioMemory>.take(allocator: memory, capacity: slots * cast<isize>(capacity) * cast<isize>(QUANTUM));
+    Slots<float32, AudioMemory> blocks = match (give blockTaken) {
         case Ok(value: b): give b;
         case Err(error: e): { return Result::Err(error: AudioError::OutOfMemory); }
     };
     return Result::Ok(value: Engine.make(nodes: give nodes, edges: give edges, marks: give marks, order: give order,
-                                         block: give block, channels: channels, destination: destination));
+                                         outputs: give outputs, blocks: give blocks, channels: channels,
+                                         capacity: capacity, destination: destination));
 }
 
 type resource Engine {
@@ -122,33 +158,49 @@ type resource Engine {
     Connections edges;
     Slots<Mark, AudioMemory> marks;
     Slots<int64, AudioMemory> order;     // the render's order: [0, ordered) the ids of the nodes it runs, in turn
-    Slots<float32, AudioMemory> block;   // the quantum rendered: each channel's QUANTUM frames after the one before it
-    int32 channelCount = 1;
+    Slots<Output, AudioMemory> outputs;  // by slot: its block's state this quantum, and whether it is muted
+    Slots<float32, AudioMemory> blocks;  // by slot: `capacity` channels of QUANTUM frames, each after the one before it
+    int32 channelCount = 1;              // the context's channels, the destination's input
+    int32 capacity = 1;                  // the most channels a node carries (decision 38)
+    int64 destinationSlot = 0;
+    int64 clock = 0;                     // the first frame of the next quantum
     int64 refusedCount = 0;
+    int64 lateCount = 0;
     int64 ordered = 0;
     bool released = false;   // a release applied this quantum, so the walk is due
     bool changed = true;     // the graph changed since the order was found, so the search is due
 
     public ctor make(SlotArray<EngineNode, AudioMemory> nodes, Connections edges, Slots<Mark, AudioMemory> marks,
-                     Slots<int64, AudioMemory> order, Slots<float32, AudioMemory> block, int32 channels,
-                     int64 destination) {
+                     Slots<int64, AudioMemory> order, Slots<Output, AudioMemory> outputs,
+                     Slots<float32, AudioMemory> blocks, int32 channels, int32 capacity, int64 destination) {
         this.nodes = give nodes;
         this.edges = give edges;
         this.marks = give marks;
         this.order = give order;
-        this.block = give block;
+        this.outputs = give outputs;
+        this.blocks = give blocks;
         this.channelCount = channels;
+        this.capacity = capacity;
+        this.destinationSlot = slotOf(id: destination);
+        this.clock = 0;
         this.refusedCount = 0;
+        this.lateCount = 0;
         this.ordered = 0;
         this.released = false;
         this.changed = true;
+        int64 slots = this.outputs.count();
+        int64 slot = 0;
+        while (slot < slots) {
+            this.outputs[slot] = Output.make(fixed: 0);
+            slot = slot + 1;
+        }
+        this.outputs[this.destinationSlot].fixed = channels;
         bool placed = this.nodes.put(id: destination, value: EngineNode.make(kind: NodeKind::Destination));
     }
 
     // One render quantum: every command published before it applied in order; then, if one was a release, the walk;
     // then, if the graph changed, the order's search; then the reports they made published on the way back with one
-    // store; then the quantum's samples into the block. No node renders samples yet, so they are silence. Answers how
-    // many commands it applied.
+    // store; then the render, the order run over the blocks. Answers how many commands it applied.
     @noheap public fn isize renderQuantum(ref Ring<Command, AudioMemory> commands, ref Ring<Event, AudioMemory> events) {
         isize applied = 0;
         bool more = true;
@@ -171,22 +223,151 @@ type resource Engine {
             this.changed = false;
         }
         events.publish();
-        int64 samples = this.block.count();
-        int64 i = 0;
-        while (i < samples) {
-            this.block[i] = 0;
-            i = i + 1;
-        }
+        this.render();
+        this.clock = this.clock + QUANTUM;
         return applied;
     }
 
-    // The sample the last quantum rendered for `channel` at `frame`, of QUANTUM.
-    public const fn float32 blockAt(int32 channel, int64 frame) { return this.block[cast<int64>(channel) * QUANTUM + frame]; }
+    // The sample the last quantum rendered for `channel` at `frame`, of QUANTUM: the destination's, or silence when it
+    // is silent or muted.
+    public const fn float32 blockAt(int32 channel, int64 frame) {
+        int64 slot = this.destinationSlot;
+        if (this.outputs[slot].silent || this.outputs[slot].muted) { return 0; }
+        return this.blocks[this.sampleAt(slot: slot, channel: cast<int64>(channel)) + frame];
+    }
+
+    // Where `slot`'s block holds `channel`'s first frame.
+    @noheap const fn int64 sampleAt(int64 slot, int64 channel) {
+        return (slot * cast<int64>(this.capacity) + channel) * QUANTUM;
+    }
+
+    // The render (decision 38): every node in the order starts silent; then each in turn renders into its block, or
+    // leaves its input there, and adds its output into every node it feeds that is not muted.
+    @noheap fn void render() {
+        int64 at = 0;
+        while (at < this.ordered) {
+            int64 slot = slotOf(id: this.order[at]);
+            this.outputs[slot].silent = true;
+            this.outputs[slot].channels = 1;
+            at = at + 1;
+        }
+        at = 0;
+        while (at < this.ordered) {
+            int64 id = this.order[at];
+            int64 slot = slotOf(id: id);
+            Optional<EngineNode> held = this.nodes.at(id: id);
+            match (held) {
+                case Some(value: n): {
+                    match (n.kind) {
+                        case Constant(offset: o): { this.renderConstant(slot: slot, offset: o, start: n.start); }
+                        case Gain: { }
+                        case Destination: { }
+                    };
+                }
+                case None: { }
+            };
+            if (!this.outputs[slot].silent) { this.feedFrom(slot: slot); }
+            at = at + 1;
+        }
+    }
+
+    // A constant source: from its start's frame on, one channel of `offset`; before it, silence, and before the quantum
+    // its start falls in, nothing at all.
+    @noheap fn void renderConstant(int64 slot, float32 offset, int64 start) {
+        if (start < 0 || start >= this.clock + QUANTUM) { return; }
+        int64 from = start > this.clock ? start - this.clock : 0;
+        int64 first = this.sampleAt(slot: slot, channel: 0);
+        int64 i = 0;
+        while (i < QUANTUM) {
+            this.blocks[first + i] = i < from ? 0 : offset;
+            i = i + 1;
+        }
+        this.outputs[slot].channels = 1;
+        this.outputs[slot].silent = false;
+    }
+
+    // Adds `slot`'s output into the input of every node it feeds that is not muted.
+    @noheap fn void feedFrom(int64 slot) {
+        int64 edge = this.edges.firstOut(slot: slot);
+        while (edge != NO_CONNECTION) {
+            int64 to = slotOf(id: this.edges.toOf(edge: edge));
+            if (!this.outputs[to].muted) { this.mixInto(from: slot, to: to); }
+            edge = this.edges.nextOut(edge: edge);
+        }
+    }
+
+    // How much of input channel `channel` of `inputs` goes to output channel `target` of `outputs`: one channel by the
+    // speaker rules (stereo and quad left and right, 5.1 its centre, any other count its first), equal counts channel
+    // by channel, and any other mix discretely, the first channels, the rest silence.
+    @noheap const fn float32 weight(int32 inputs, int32 outputs, int32 channel, int32 target) {
+        if (inputs == 1) {
+            if (outputs == 1 || outputs == 2) { return 1; }
+            if (outputs == 4) { return target < 2 ? 1 : 0; }
+            if (outputs == 6) { return target == 2 ? 1 : 0; }
+            return target == 0 ? 1 : 0;
+        }
+        return channel == target ? 1 : 0;
+    }
+
+    // Adds `from`'s output into `to`'s input, mixed to the channels `to` takes: its fixed count, or the most of its
+    // inputs', at most `capacity`. A sum that takes more channels than it held is first mixed up to them, which
+    // is the same as mixing each input up to them before summing, since every rule is linear.
+    @noheap fn void mixInto(int64 from, int64 to) {
+        int32 inputs = this.outputs[from].channels;
+        bool first = this.outputs[to].silent;
+        int32 had = first ? 0 : this.outputs[to].channels;
+        int32 fixed = this.outputs[to].fixed;
+        int32 count = fixed > 0 ? fixed : (inputs > had ? inputs : had);
+        if (count > this.capacity) { count = this.capacity; }
+        if (!first && count > had) { this.mixUp(slot: to, from: had, count: count); }
+        int32 target = 0;
+        while (target < count) {
+            int64 into = this.sampleAt(slot: to, channel: cast<int64>(target));
+            int32 channel = 0;
+            bool wrote = false;
+            while (channel < inputs) {
+                float32 w = this.weight(inputs: inputs, outputs: count, channel: channel, target: target);
+                if (w != 0) {
+                    int64 read = this.sampleAt(slot: from, channel: cast<int64>(channel));
+                    int64 i = 0;
+                    if (first && !wrote) {
+                        while (i < QUANTUM) { this.blocks[into + i] = w * this.blocks[read + i]; i = i + 1; }
+                    } else {
+                        while (i < QUANTUM) { this.blocks[into + i] = this.blocks[into + i] + w * this.blocks[read + i]; i = i + 1; }
+                    }
+                    wrote = true;
+                }
+                channel = channel + 1;
+            }
+            if (first && !wrote) {
+                int64 i = 0;
+                while (i < QUANTUM) { this.blocks[into + i] = 0; i = i + 1; }
+            }
+            target = target + 1;
+        }
+        this.outputs[to].channels = count;
+        this.outputs[to].silent = false;
+    }
+
+    // Mixes `slot`'s sum, `from` channels, up to `count` in place, by the rules `weight` gives: the highest channel
+    // first, so each is read before it is written.
+    @noheap fn void mixUp(int64 slot, int32 from, int32 count) {
+        int32 target = count - 1;
+        while (target >= 0) {
+            int64 into = this.sampleAt(slot: slot, channel: cast<int64>(target));
+            float32 w = from == 1 ? this.weight(inputs: 1, outputs: count, channel: 0, target: target) : (target < from ? 1 : 0);
+            int64 read = this.sampleAt(slot: slot, channel: from == 1 ? 0 : cast<int64>(target));
+            int64 i = 0;
+            while (i < QUANTUM) { this.blocks[into + i] = w * this.blocks[read + i]; i = i + 1; }
+            target = target - 1;
+        }
+    }
 
     @noheap fn void apply(Command command) {
         match (command) {
             case Made(node: id, kind: k): {
                 if (this.nodes.put(id: id, value: EngineNode.make(kind: k))) {
+                    this.outputs[slotOf(id: id)] = Output.make(fixed: 0);
                     this.changed = true;
                 } else {
                     this.refusedCount = this.refusedCount + 1;
@@ -200,6 +381,26 @@ type resource Engine {
                 } else {
                     this.changed = true;
                 }
+            }
+            case Start(node: id, frame: f): {
+                Optional<EngineNode> held = this.nodes.at(id: id);
+                match (held) {
+                    case Some(value: n): {
+                        if (!n.kind.isSource() || n.start >= 0) {
+                            this.refusedCount = this.refusedCount + 1;
+                        } else {
+                            EngineNode now = n;
+                            if (f < this.clock) {
+                                now.start = this.clock;
+                                this.lateCount = this.lateCount + 1;
+                            } else {
+                                now.start = f;
+                            }
+                            bool set = this.nodes.set(id: id, value: now);
+                        }
+                    }
+                    case None: { this.refusedCount = this.refusedCount + 1; }
+                };
             }
             case Release(node: id): {
                 Optional<EngineNode> held = this.nodes.at(id: id);
@@ -353,20 +554,9 @@ type resource Engine {
     // The search closes `slot`: muted when its component is a cycle, and otherwise next in the order.
     @noheap fn void close(int64 slot, bool muted) {
         this.marks[slot].open = false;
-        int64 id = this.nodes.idAt(slot: slot);
-        Optional<EngineNode> held = this.nodes.at(id: id);
-        match (held) {
-            case Some(value: n): {
-                if (n.muted != muted) {
-                    EngineNode now = n;
-                    now.muted = muted;
-                    bool set = this.nodes.set(id: id, value: now);
-                }
-            }
-            case None: { }
-        };
+        this.outputs[slot].muted = muted;
         if (!muted) {
-            this.order[this.ordered] = id;
+            this.order[this.ordered] = this.nodes.idAt(slot: slot);
             this.ordered = this.ordered + 1;
         }
     }
@@ -381,17 +571,20 @@ type resource Engine {
     public const fn bool isMuted(int64 id) {
         Optional<EngineNode> held = this.nodes.at(id: id);
         return match (held) {
-            case Some(value: n): n.muted;
+            case Some(value: n): this.outputs[slotOf(id: id)].muted;
             case None: false;
         };
     }
 
-    // Whether the node `id` names can sound of itself: so far, whether the program still holds it. A playing source and
-    // a tail still ringing join it when they come.
+    // How many starts it applied late, their frame already rendered when their command landed (decision 32).
+    public const fn int64 late() { return this.lateCount; }
+
+    // Whether the node `id` names can sound of itself: while the program holds it, or, released, while it is a source
+    // that has started (a constant plays as long as the render runs). A tail still ringing joins it when it comes.
     @noheap const fn bool canSound(int64 id) {
         Optional<EngineNode> held = this.nodes.at(id: id);
         return match (held) {
-            case Some(value: n): !n.released;
+            case Some(value: n): !n.released || n.start >= 0;
             case None: false;
         };
     }

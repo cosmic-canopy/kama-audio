@@ -120,7 +120,7 @@ that kind needs.
 | Playback rate and detune | `playbackRate`, `detune` | the resampling ladder's rungs | planned | sfx | playback-rate | — |
 | Loop counts and bidirectional loops | — | — | planned | asked | loop-modes | — |
 | Oscillator | `OscillatorNode`, `PeriodicWave` | band-limited, as the spec asks · a `PeriodicWave`'s own harmonics | planned | synth | oscillator | — |
-| Constant source | `ConstantSourceNode` | — | planned | synth | constant-source | — |
+| Constant source | `ConstantSourceNode` | — | planned | loop | constant-source | — |
 | Noise | — | white · pink | planned | synth | noise | — |
 | A source the program feeds | — | a ring of frames the program fills | planned | voice | fed-source | — |
 | Media-stream sources | `MediaStreamAudioSourceNode`, `MediaStreamTrackAudioSourceNode` | the web; natively, a capture device | planned | voice | stream-source | — |

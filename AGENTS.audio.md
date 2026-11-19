@@ -110,7 +110,18 @@ command protocol's timing (32 and 33), its slots (34 and 35), the program's memo
       red against a stub first but the start's, or, for the last three render cases, against the mutations they were
       written for. The tests' allocator now poisons every block it hands out.
 
-  110 cases, green on every leg: native debug and release, wasm debug and release.
+  - on 2026-11-19, **suspending and resuming a render** (decision 37, with decisions 3 and 6; SPEC.md § The offline
+    render):
+    - `OfflineAudioContext.suspend(suspendTime:)`, `resume()` and `currentTime()`; `RenderStatus::Suspended`;
+      `OfflineAudioContextOptions.suspendCapacity` and `AudioError::TooManySuspends`; the suspends a declared part, the
+      fifteenth;
+    - decision 3's one rounding rule, `audio::graph::frameAt`, its first use;
+    - 12 `suspend` cases (`tests/src/suspend_tests.kama`) and 4 `nodes` cases sharpened, each seen red against a stub
+      first, or, for the two at each quantum's first frame after its start, against the rule they were written for.
+      The first build reported pending where a suspend's frame was reached on an update's last quantum: the render now
+      checks after each quantum.
+
+  122 cases, green on every leg: native debug and release, wasm debug and release.
 - **Settled while building the table, reported to the owner to object to** (each within decisions 34 and 35):
   - the name `SlotTable`, and its calls: `take()`, `countUp(id:)`, `countDown(id:)`, `nextRelease()`, `free(id:)`,
     `countOf(id:)`, `length()`, `capacity()`, `retired()`;
@@ -226,6 +237,22 @@ command protocol's timing (32 and 33), its slots (34 and 35), the program's memo
     setting;
   - **one more seam, eleven in all:** `audiotests::markIn`, which writes a value into the render's output, where silence
     could not show an overrun or a read of the wrong channel.
+- **Settled while building suspend and resume, reported to the owner to object to** (each within decisions 3, 6 and
+  37, on Web Audio's text):
+  - **decision 3's one rounding rule:** a time takes effect at the first frame whose own time, the frame divided by the
+    rate in float64, is at or after it. A time made from a frame lands on that frame, where a plain round-up of
+    `time × rate` would put one frame in six at 48 kHz a frame late, a quantum late on a quantum's edge. It is
+    `audio::graph::frameAt`, and every later timed call uses it. A time past 2^51 frames, about 1,500 years at 48 kHz,
+    is refused, as negative, NaN and infinite times are;
+  - **`suspend(suspendTime:)` and `resume()` answer `Result<Unit, AudioError>`,** the program learning of the stop from
+    `poll()`, which answers `RenderStatus::Suspended(framesRendered)`. Web Audio's refusals are `InvalidState`, checked
+    first;
+  - **`suspendCapacity`, 64 by default,** at least one or `NotSupported`; every declared suspend held is the new
+    `AudioError::TooManySuspends`, and a suspend reached gives its place back;
+  - **the render stops after the quantum that reaches the frame,** so `poll()` says so at once, and updates while
+    suspended flush and read the way back but render nothing;
+  - **`currentTime()` is on `OfflineAudioContext`,** the frames rendered over the rate; `BaseAudioContext` gains it with
+    the real-time context.
 - **Proved by mutation:**
   - the ring and the backlog (`.scratch/aud29/mutate_ring.py`, through the whole gate): 38 of 39 mutations of
     `src/rt/ring.kama` are caught, none by a hang.
@@ -251,6 +278,11 @@ command protocol's timing (32 and 33), its slots (34 and 35), the program's memo
     a case too loose, now sharpened: the slot array's read past the array, which wraps onto slot 0, held nothing there;
     and no case had a command ring smaller than its rows, so the way back sized by the ring passed. The 52nd proves the
     no-room case, green against the stub.
+  - suspending and resuming (`.scratch/aud29/mutate_suspend.py`, through the whole gate): **35 of 37 caught,** none by a
+    hang, none refused by kama, the rule's edges held by the cases written for them before the pass. The other 2 are
+    equivalent for suspend, since a frame of 0 or below is always at or before the current time: `frameAt` taking a
+    negative time, and an unconvertible time read as frame 0. **The first guard waits for the first timed call:** a
+    source's `start(when:)` with a negative time, Web Audio's `RangeError`, brings the case that catches it.
   - the offline render's first slice (`.scratch/aud29/mutate_render.py`, through the whole gate): **54 of 55 caught,** 1 by
     a hang, none refused by kama. The first pass caught 45 of 54, silence hiding most misses; seven are caught by
     sharpened cases (a mark where the last quantum's overrun lands, a render with less than a quantum left, the bytes
@@ -286,11 +318,11 @@ command protocol's timing (32 and 33), its slots (34 and 35), the program's memo
   - std's `FixedArray` traps when its allocator has no room, as KAUD-7's collections do, so the slot array takes its
     storage through `Slots` too.
 - **Next:**
-  - **the render's next slices** (decision 37): `suspend()` and `resume()` at a frame; the `AudioDestinationNode`, which
-    the render sums into the output, with Web Audio's muting of a cycle that has no delay; then a source, so a render
+  - **the render's next slices** (decision 37): the `AudioDestinationNode`, which the render sums into the output, with Web Audio's muting of a cycle that has no delay; then a source, so a render
     is not silence, and the first golden. **The first node that renders different samples into different channels
     brings the case that catches `blockAt` reading channel 0,** the one mutation of the render's first slice no case
-    can see yet. **The `AudioBuffer`'s sample memory is the owner's question,** asked when a
+    can see yet, **and the first timed call brings the case that catches `frameAt` taking a negative time,** equivalent
+    for suspend; **The `AudioBuffer`'s sample memory is the owner's question,** asked when a
     buffer is made to be played: how its samples count against decision 6's sample memory;
   - **the rest of AUD-1's commands, each with its call:** `disconnect()` and its forms, each needing a name of its own
     since kama has no overloading; a source's start with its frame, which keeps a released source until it ends; a

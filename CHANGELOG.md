@@ -5,6 +5,11 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- An offline render suspends at a frame and resumes (decision 37): `OfflineAudioContext.suspend(suspendTime:)`, Web
+  Audio's, its four refusals `AudioError::InvalidState` and every declared suspend held the new `TooManySuspends`
+  against `OfflineAudioContextOptions.suspendCapacity` (64 by default); `resume()`; `currentTime()`; and
+  `RenderStatus::Suspended`. A time becomes a frame by decision 3's one rule: the first frame whose own time is at or
+  after it (2026-11-19).
 - An offline render is a request the program polls, advanced by `update()` (decision 37):
   `OfflineAudioContext.startRendering()` answers an `audio::RenderRequest` and renders nothing; `update()` flushes,
   renders whole quanta up to the new `OfflineAudioContextOptions.framesPerUpdate` (8,192 by default) and reads the way

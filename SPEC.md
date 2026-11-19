@@ -14,7 +14,8 @@ A node's make, its connections and its release travel as commands: the backlog, 
 side applies them: an engine stepped a quantum at a time keeps each node at its id's slot in an array of its own, with
 the connections between them, keeps a released node while a node that can sound feeds it, and frees it once nothing
 does, reporting it on the way back, whose read gives the row back to the table. An offline context renders its length
-as a request the program polls, advanced by `update()`, into an `AudioBuffer`. Each is tested natively and on wasm
+as a request the program polls, advanced by `update()`, into an `AudioBuffer`, and stops at a suspend's frame until
+resumed. Each is tested natively and on wasm
 under node, in debug and release. No node renders samples yet, so a render is silence. Not published.
 
 ## The modules
@@ -268,23 +269,25 @@ it. Its members:
   - `connectionCapacity`, the connections between its nodes at once, 4,096 by default, four for each node row
     (decision 6);
   - `framesPerUpdate`, the frames an `update()` renders at least, in whole quanta, 8,192 by default (decision 37);
+  - `suspendCapacity`, the suspends its render can have scheduled at once, 64 by default (decisions 6 and 37);
   - `memory`, `AudioMemory.global()` by default.
-- **What a make takes:** fourteen parts, drawn from `options.memory` once each and in this order: the slot table, the
+- **What a make takes:** fifteen parts, drawn from `options.memory` once each and in this order: the slot table, the
   command ring, the backlog, the way back, the program side's connections (the connections and a list head for each
   node row, two allocations), the audio side (its array of nodes, its connections, two allocations, the lifetime
   walk's marks, and its block, a quantum for each channel), the render's output (its samples and the box that counts
-  them), then the state. The way back, the array, the list heads and the marks each have `nodeCapacity` places. The
+  them), its suspends, then the state. The way back, the array, the list heads and the marks each have `nodeCapacity` places. The
   state is one `Shared`, made by `try new(allocator:)`, that holds the rest. All go back with the last hold, but the
   output's, which an `AudioBuffer` may still hold.
 - **What a make answers instead** (`audio::AudioError`), with nothing left allocated:
   - `NotSupported` for an option outside Web Audio's ranges, as Web Audio's `NotSupportedError`: 1 to 32 channels, a
     length of at least one frame, a sample rate from 3,000 to 768,000 Hz. A node, ring, backlog or connection capacity
-    below one is the same, and so is a `framesPerUpdate` below one;
+    below one is the same, and so is a `framesPerUpdate` or a `suspendCapacity` below one;
   - `OutOfMemory` when the memory has no room for a part. Every part taken before it goes back. A capacity whose
     bytes no `usize` can hold, and an output whose samples no `isize` can count, are `OutOfMemory` too, before the
     allocator is asked: never a size that overflowed.
 - **What it answers:** `sampleRate()`, `length()` and `numberOfChannels()`, as it was made.
-- **Its render:** `startRendering()` and `update()` (§ The offline render).
+- **Its render:** `startRendering()`, `update()`, `suspend(suspendTime:)`, `resume()` and `currentTime()` (§ The offline
+  render).
 - **The test seam:** eleven `friend` grants to the tests program:
   - `audiotests::rowsHeldIn` reads its rows held;
   - `audiotests::releaseDueIn` takes its next release due straight from the table;
@@ -510,12 +513,29 @@ deleted once nothing references it and then disconnects its outputs).
     end. The last quantum stops at the length. Before the start it renders nothing, and the flushed commands wait in
     the ring for the render's first quantum;
   - reads the way back (decision 9).
-- **`RenderRequest.poll()`** answers `RenderStatus`: `Pending(framesRendered)`, or `Ready(buffer)` with the
-  `AudioBuffer`, again at every poll after.
+- **`RenderRequest.poll()`** answers `RenderStatus`: `Pending(framesRendered)`; `Suspended(framesRendered)`, stopped at
+  a suspend's frame until `resume()`; or `Ready(buffer)` with the `AudioBuffer`, again at every poll after.
 - **What the render makes:** each quantum is rendered into the engine's block, a quantum for each channel, then copied
   into the output. No node renders samples yet, so it is silence, written: the tests' allocator poisons every block
   it hands out. A quantum is Web Audio's 128 frames until the engine's declared block (decision 15, AUD-9).
-- **Suspending at a frame** (Web Audio's `suspend()` and `resume()`) comes in a step of its own.
+- **`suspend(suspendTime:)`,** Web Audio's `suspend(suspendTime)`, schedules a stop at the time's frame, quantized up
+  to a quantum. It answers `Result<Unit, AudioError>`:
+  - Web Audio's four refusals are `InvalidState`: a frame negative (or a time NaN, infinite, or past 2^51 frames), at
+    or before the current time, at or past the end, or held by another suspend. They are checked first;
+  - every declared suspend held is `TooManySuspends` (decision 6). A suspend reached gives its place back.
+- **The render stops on reaching the frame,** after the quantum before it, whatever the update's declared frames:
+  `poll()` answers `Suspended` at once, and updates flush and read the way back but render nothing. The calls made
+  until `resume()` land in the quantum at that frame. Suspends scheduled out of order stop in order.
+- **`resume()`,** Web Audio's, goes on rendering. It is `InvalidState` before the start, and taken, changing nothing,
+  while the render runs.
+- **`currentTime()`,** Web Audio's `currentTime`, is the frames rendered over the sample rate, in seconds.
+- **A time becomes a frame by decision 3's one rule,** settled here, its first use: the first frame whose own time, the
+  frame divided by the rate in float64, is at or after the time (`audio::graph::frameAt`). A time made from a frame,
+  `frame / rate`, lands on that frame, though about one frame in six at 48 kHz multiplies back off by a little (322,579
+  of the first 2,000,000), which a plain round-up of `time × rate` would put a frame late, a quantum late on a quantum's
+  edge. A time between two frames' times lands on the later. The search steps only up from the floor of the product,
+  which a float64 cannot overshoot by a frame below 2^51 frames, about 1,500 years at 48 kHz; past that a time is
+  refused. Every later timed call, a source's start and a parameter's events, uses the same rule.
 
 ### `audio::AudioBuffer`
 
@@ -555,8 +575,24 @@ deleted once nothing references it and then disconnects its outputs).
   - each channel adds a quantum to the engine's block and its length to the output: two channels of 1,000 frames take
     4,512 bytes more than one.
 
-  The `nodes` cases cover the fourteen parts, a `framesPerUpdate` below one, and an output of 32 channels of 2^62
-  frames, `OutOfMemory`. A `command-ring` case covers a capacity whose bytes no `usize` can hold.
+  The `nodes` cases cover the fifteen parts, a `framesPerUpdate` or `suspendCapacity` below one, and an output of 32
+  channels of 2^62 frames, `OutOfMemory`. A `command-ring` case covers a capacity whose bytes no `usize` can hold.
+- **Suspending, tested** (`tests/src/suspend_tests.kama`, the `suspend` cases, 12 of them, each seen red against a
+  stub first, or, for the two at each quantum's first frame after its start, against the rule they were written for):
+  - the options declare 64 suspends by default;
+  - the render stops at the frame though the update's declared frames would take it to the end, renders nothing while
+    suspended, and goes on once resumed;
+  - a make while suspended is not applied before the resume, and is in the first quantum after it;
+  - frames 100 and 128 stop at 128, frame 129 at 256, and a time between frames, 1,024.4, at 1,152; frame 128 is
+    refused once frame 100's suspend holds its quantum; suspends scheduled out of order stop in order;
+  - every quantum's own time, `k × 128 / rate`, stops the render at that quantum, and every quantum's first frame after
+    its start, `k × 128 + 1`, at the next: 255 suspends each, at 48 and 44.1 kHz;
+  - Web Audio's refusals, each `InvalidState` and changing nothing: a negative time, NaN, 10^300 s, infinity, frame 0
+    before the start, the end and a frame quantized to it, a frame another suspend holds, and, once rendered to 256,
+    frames 128 and 256;
+  - a resume before the start is `InvalidState`, and one while running changes nothing;
+  - with every declared suspend held, one more is `TooManySuspends`, and a reached one frees its place;
+  - the current time is the frames rendered over the rate.
 
 ## Proved by mutation
 
@@ -679,3 +715,16 @@ them by a hang, and kama refuses none; the 55th waits for a node that renders.**
 - **`blockAt` reading channel 0 for every channel** is not equivalent, and no case can see it yet: only the engine
   writes its block, and it writes silence. The first node that renders different samples into different channels
   brings the case that catches it.
+
+### Suspending and resuming
+
+Each of 37 mutations of decision 3's rule (`src/graph/frames.kama`), scheduling, reaching and resuming a suspend and
+its part (`src/graph/graph.kama`), the option and the calls (`src/context.kama`) and the request's `Suspended`
+(`src/render.kama`) runs through the whole gate (`.scratch/aud29/mutate_suspend.py`), and each file is restored byte
+for byte after each. **35 turn a case red, none by a hang, and kama refuses none; the other 2 are equivalent for
+suspend.** The rule's edges were held before the pass by the cases written for them: a step past an exact frame, and
+no step up, each turns a quantum's boundary case red.
+- **`frameAt` taking a negative time, and an unconvertible time read as frame 0,** are equivalent here: a frame of 0
+  or below is always at or before the current time, which suspend refuses as `InvalidState` either way. The first
+  guard is `frameAt`'s answer for the timed calls to come, and the first of them, a source's `start(when:)` with a
+  negative time, Web Audio's `RangeError`, brings the case that catches it.

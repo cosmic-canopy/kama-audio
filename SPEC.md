@@ -748,17 +748,22 @@ Audio's `AudioDestinationNode`, its `destination` attribute, and its rendering a
   - a destination that a cycle takes in mid-render falls silent from the quantum the cycle lands in;
   - a make sends its kind and a start its frame: `made constant 0:1`, then `start 0:1 at 1000`.
 
-- **Stopping, tested** (`tests/src/stop_tests.kama`, the `stop` cases, 6 of them, each seen red against a stub first):
+- **Stopping, tested** (`tests/src/stop_tests.kama`, the `stop` cases, 8 of them, each seen red against a stub first,
+  or, for the last two, against the mutations they were written for):
   - a source renders up to its stop's frame (from 100 to 1,000), a stop at its start renders nothing, and a second stop
     (800) replaces the first (500);
-  - its refusals change nothing: before a start `InvalidState`, a full backlog `TooManyCommands`, and −1 s, NaN and
-    infinity `Range`;
+  - its refusals change nothing: before a start `InvalidState`, also at −1 s, checked first; a full backlog
+    `TooManyCommands`; and −1 s, NaN and infinity `Range`;
   - a stop already past stops the source at the quantum it lands in, counted late;
   - `ended()` is false before the render and through the update before its stop, true once the update that renders
-    its stop has read the way back, and never true for a source with no stop;
+    its stop has read the way back, a stop on a quantum's edge ending in the quantum it closes, and never true for a
+    source with no stop;
   - a released source is kept while it plays and freed once it ends, its row back;
   - four released sources that end and are freed within one update, in a context of four rows, all come back: the
-    way back held their eight reports.
+    way back held their eight reports;
+  - a stop after the end changes nothing;
+  - a source reports its end once: a held source that ended early does not fill the way back through sixteen more
+    quanta, so a released source ending at the last of them is freed.
 
   The `nodes` cases cover the eighteen parts, `channelCapacity`'s default and range, and, with every part refused in
   turn, a budget that steps by 4 bytes, the rows' source states being a byte a row. A `render` case covers the bytes:
@@ -955,3 +960,21 @@ only in the centre), and `frameAt` taking a negative time (a start at −1 s is 
   makes the same; `Slots`' rule is that a holder writes what it reads before it reads it.
 
 **69 of 81 caught, none by a hang; the other 12 equivalent or held by review.**
+
+### A source's stop and its end
+
+Each of 38 mutations of a stop on the audio side, the render up to it, the end, its report and the walk it makes due
+(`src/graph/engine.kama`), the program side's stop, its refusals, the end read on the way back, the way back's size and
+the command (`src/graph/graph.kama`) and the node's calls (`src/constant.kama`) runs through the whole gate
+(`.scratch/aud29/mutate_stop.py`), and each file is restored byte for byte after each. Four cases were written before
+the pass for the misses it would have had: a stop after the end, a stop on a quantum's edge, a stop's refusals at −1 s
+before a start, and a stop's command. **The pass caught 32 of 38, none by a hang, and kama refused none.** Of its 6
+misses:
+- **one showed a case too loose,** now written: an ended source reporting its end again every quantum, which the way
+  back had room for in every case. A held source that ended early, through an update of sixteen more quanta, now fills a
+  way back that reports it more than once, and a released source's reports are lost; the rerun catches it;
+- **five are equivalent:** three audio-side refusals of a stop no call can send (before a start, of a gain, of a node it
+  does not hold), an unstarted source ending, which no call can bring about, and a stop at or before its start written
+  as silence instead of flagged, which only costs.
+
+**33 of 38 caught, none by a hang; the other 5 equivalent.**

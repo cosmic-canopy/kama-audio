@@ -61,8 +61,8 @@ unsafe fn string stopsAtItsFrame() {
     return holds(b: b, channel: 0, from: 1000, to: 1200, want: 0);
 }
 
-// stop's refusals change nothing: before the start, InvalidState; −1 s, NaN and infinity, Range; with the backlog full,
-// TooManyCommands, and the source plays on to the end.
+// stop's refusals change nothing: before the start, InvalidState, also at −1 s, checked first; −1 s, NaN and infinity,
+// Range; with the backlog full, TooManyCommands, and the source plays on to the end.
 unsafe fn string stopRefusals() {
     OfflineAudioContextOptions o = OfflineAudioContextOptions.make(length: 256, sampleRate: 48000);
     o.framesPerUpdate = 256;
@@ -75,6 +75,8 @@ unsafe fn string stopRefusals() {
     ConstantSourceNode c1 = match (give r1) { case Some(value: n): give n; case None: { return "the constant was refused"; } };
     AudioDestinationNode d = context.destination();
     string why = refuses(r: c1.stop(stopTime: 0), want: "InvalidState", what: "a stop before the start");
+    if (!why.isEmpty()) { return why; }
+    why = refuses(r: c1.stop(stopTime: -1), want: "InvalidState", what: "a stop at -1 s before the start");
     if (!why.isEmpty()) { return why; }
     why = takes(r: c1.connect(destination: d), what: "the connect");
     if (!why.isEmpty()) { return why; }
@@ -129,7 +131,8 @@ unsafe fn string lateStop() {
 }
 
 // A source's end is read on the way back: ended() is false while it plays and through the update before its stop, and
-// true once the update that renders its stop has read the way back; a source with no stop never ends.
+// true once the update that renders its stop has read the way back, a stop on a quantum's edge (512) ending in the
+// quantum it closes; a source with no stop never ends.
 unsafe fn string endedOnceRead() {
     OfflineAudioContextOptions o = OfflineAudioContextOptions.make(length: 1024, sampleRate: 48000);
     o.framesPerUpdate = 256;
@@ -146,6 +149,12 @@ unsafe fn string endedOnceRead() {
     if (!why.isEmpty()) { return why; }
     why = takes(r: c2.start(startTime: 0), what: "2's start");
     if (!why.isEmpty()) { return why; }
+    Optional<ConstantSourceNode> r3 = constantIn(context: context, offset: 1);
+    ConstantSourceNode c3 = match (give r3) { case Some(value: n): give n; case None: { return "the third constant was refused"; } };
+    why = takes(r: c3.start(startTime: 0), what: "3's start");
+    if (!why.isEmpty()) { return why; }
+    why = takes(r: c3.stop(stopTime: 512.0 / 48000.0), what: "3's stop at frame 512, a quantum's edge");
+    if (!why.isEmpty()) { return why; }
     if (c1.ended()) { return "a source had ended before the render"; }
     Result<RenderRequest, AudioError> started = context.startRendering();
     RenderRequest r = match (give started) { case Ok(value: q): give q; case Err(error: e): { return "the start was refused"; } };
@@ -153,6 +162,7 @@ unsafe fn string endedOnceRead() {
     if (c1.ended()) { return "the source had ended at frame 256, before its stop at 300"; }
     context.update();
     if (!c1.ended()) { return "the source had not ended once the update that rendered its stop read the way back"; }
+    if (!c3.ended()) { return "a source stopped at frame 512 had not ended once frames up to 512 were rendered"; }
     context.update();
     context.update();
     return c2.ended() ? "a source with no stop ended" : "";
@@ -225,6 +235,74 @@ unsafe fn string twoReportsARow() {
     return rows == 0 ? "" : "${rows} rows were still held, so a report was lost on the way back";
 }
 
+// A stop after the end changes nothing: a source stopped at frame 200, then, once it has ended, stopped again at 600,
+// stays silent from 200.
+unsafe fn string stopAfterEnd() {
+    OfflineAudioContextOptions o = OfflineAudioContextOptions.make(length: 1024, sampleRate: 48000);
+    o.framesPerUpdate = 256;
+    o.nodeCapacity = 4;
+    Result<OfflineAudioContext, AudioError> made = OfflineAudioContext.make(options: o);
+    OfflineAudioContext context = match (give made) { case Ok(value: c): give c; case Err(error: e): { return "the context was refused"; } };
+    AudioDestinationNode d = context.destination();
+    Optional<ConstantSourceNode> r1 = constantIn(context: context, offset: 1);
+    ConstantSourceNode c1 = match (give r1) { case Some(value: n): give n; case None: { return "the constant was refused"; } };
+    string why = takes(r: c1.connect(destination: d), what: "the connect");
+    if (!why.isEmpty()) { return why; }
+    why = takes(r: c1.start(startTime: 0), what: "the start");
+    if (!why.isEmpty()) { return why; }
+    why = takes(r: c1.stop(stopTime: 200.0 / 48000.0), what: "the stop at frame 200");
+    if (!why.isEmpty()) { return why; }
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) { case Ok(value: q): give q; case Err(error: e): { return "the start was refused"; } };
+    context.update();
+    if (!c1.ended()) { return "the source had not ended by frame 256"; }
+    why = takes(r: c1.stop(stopTime: 600.0 / 48000.0), what: "a stop after the end");
+    if (!why.isEmpty()) { return why; }
+    context.update();
+    context.update();
+    context.update();
+    RenderStatus s = r.poll();
+    AudioBuffer b = match (give s) {
+        case Ready(buffer: x): give x;
+        case Pending(framesRendered: n): { return "the render was pending at ${n}"; }
+        case Suspended(framesRendered: n): { return "the render was suspended at ${n}"; }
+    };
+    why = holds(b: b, channel: 0, from: 0, to: 200, want: 1);
+    if (!why.isEmpty()) { return "before the stop: ${why}"; }
+    return holds(b: b, channel: 0, from: 200, to: 1024, want: 0);
+}
+
+// A source reports its end once: a held source that ended in an update's first quantum, in a context of two rows, does
+// not fill the way back in the update's sixteen quanta after, so a released source that ends at the last of them is
+// freed and its row back.
+unsafe fn string endReportedOnce() {
+    OfflineAudioContextOptions o = OfflineAudioContextOptions.make(length: 2304, sampleRate: 48000);
+    o.framesPerUpdate = 2304;
+    o.nodeCapacity = 2;
+    Result<OfflineAudioContext, AudioError> made = OfflineAudioContext.make(options: o);
+    OfflineAudioContext context = match (give made) { case Ok(value: c): give c; case Err(error: e): { return "the context was refused"; } };
+    Optional<ConstantSourceNode> r1 = constantIn(context: context, offset: 1);
+    ConstantSourceNode held = match (give r1) { case Some(value: n): give n; case None: { return "the held constant was refused"; } };
+    string why = takes(r: held.start(startTime: 0), what: "the held one's start");
+    if (!why.isEmpty()) { return why; }
+    why = takes(r: held.stop(stopTime: 64.0 / 48000.0), what: "the held one's stop at frame 64");
+    if (!why.isEmpty()) { return why; }
+    {
+        Optional<ConstantSourceNode> r2 = constantIn(context: context, offset: 1);
+        ConstantSourceNode c2 = match (give r2) { case Some(value: n): give n; case None: { return "the released constant was refused"; } };
+        why = takes(r: c2.start(startTime: 0), what: "the released one's start");
+        if (!why.isEmpty()) { return why; }
+        why = takes(r: c2.stop(stopTime: 2000.0 / 48000.0), what: "the released one's stop at frame 2,000");
+        if (!why.isEmpty()) { return why; }
+    }
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) { case Ok(value: q): give q; case Err(error: e): { return "the start was refused"; } };
+    context.update();
+    if (!held.ended()) { return "the held source had not ended"; }
+    isize rows = rowsHeldIn(context: context);
+    return rows == 1 ? "" : "${rows} rows were held where the held source's 1 was due, so a report was lost on the way back";
+}
+
 unsafe fn void stopTests(ref Tally t) {
     t.verdict(name: "stop: a source renders up to its stop's frame, a stop at its start renders nothing, a later stop replaces",
               why: stopsAtItsFrame());
@@ -233,5 +311,7 @@ unsafe fn void stopTests(ref Tally t) {
     t.verdict(name: "stop: a stop already past stops at the quantum it lands in, counted late", why: lateStop());
     t.verdict(name: "stop: a source's end is read on the way back, and one with no stop never ends", why: endedOnceRead());
     t.verdict(name: "stop: a released source is kept until it ends, then freed", why: keptUntilItEnds());
+    t.verdict(name: "stop: a stop after the end changes nothing", why: stopAfterEnd());
     t.verdict(name: "stop: the way back holds a node's end and its freeing, two reports a row", why: twoReportsARow());
+    t.verdict(name: "stop: a source reports its end once, so the way back keeps room", why: endReportedOnce());
 }

@@ -488,7 +488,7 @@ unsafe fn string mutedMidRender() {
     return holds(b: b, channel: 0, from: 128, to: 512, want: 0);
 }
 
-// A make sends its kind, and a start its frame: `made constant 0:1`, then `start 0:1 at 1000`.
+// A make sends its kind, a start and a stop their frames: `made constant 0:1`, `start 0:1 at 1000`, `stop 0:1 at 1500`.
 fn string sendsItsFrame() {
     Optional<OfflineAudioContext> got = contextOf(channels: 1, length: 128);
     OfflineAudioContext context = match (give got) { case Some(value: c): give c; case None: { return "the context was refused"; } };
@@ -496,11 +496,15 @@ fn string sendsItsFrame() {
     ConstantSourceNode c = match (give rc) { case Some(value: n): give n; case None: { return "the constant was refused"; } };
     string why = takes(r: c.start(startTime: 1000.0 / 48000.0), what: "the start at frame 1,000");
     if (!why.isEmpty()) { return why; }
-    why = flushSends(context: context, want: 2);
+    why = takes(r: c.stop(stopTime: 1500.0 / 48000.0), what: "the stop at frame 1,500");
+    if (!why.isEmpty()) { return why; }
+    why = flushSends(context: context, want: 3);
     if (!why.isEmpty()) { return why; }
     why = expectSent(context: context, want: "made constant 0:1");
     if (!why.isEmpty()) { return why; }
     why = expectSent(context: context, want: "start 0:1 at 1000");
+    if (!why.isEmpty()) { return why; }
+    why = expectSent(context: context, want: "stop 0:1 at 1500");
     if (!why.isEmpty()) { return why; }
     return expectNothingSent(context: context);
 }
@@ -522,5 +526,5 @@ unsafe fn void constantTests(ref Tally t) {
               why: noInput());
     t.verdict(name: "constant: a node feeding two feeds both", why: feedsTwo());
     t.verdict(name: "constant: a destination a cycle takes in mid-render falls silent", why: mutedMidRender());
-    t.verdict(name: "constant: a make sends its kind, and a start its frame", why: sendsItsFrame());
+    t.verdict(name: "constant: a make sends its kind, and a start and a stop their frames", why: sendsItsFrame());
 }

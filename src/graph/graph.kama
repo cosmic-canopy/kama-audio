@@ -16,7 +16,7 @@
 
 import { audio::AudioMemory, audio::AudioError, audio::BaseAudioContext, audio::AudioNode, audio::rt::SlotTable,
          audio::rt::Ring, audio::rt::Backlog, audio::rt::CapacityError, audio::rt::slotOf, audio::rt::generationOf,
-         std::memory::Shared, Engine, Event, Connections, engineFrom };
+         std::memory::Shared, Engine, Event, Connections, engineFrom, Samples, samplesFrom, QUANTUM };
 
 export { ContextState, NodeHold, ContextKey, NodeLink, Command, NodeKind, stateFrom };
 
@@ -67,19 +67,70 @@ type resource ContextState {
     Ring<Event, AudioMemory> events;
     Connections links;
     Engine engine;
+    Shared<Samples, AudioMemory> rendering;   // an offline render's output, its length the context's
     float32 rate = 0;
+    int64 perUpdate = 1;                      // the frames an update renders at least, in whole quanta (decision 37)
+    int64 renderedSoFar = 0;
+    bool started = false;
 
     public ctor make(SlotTable<AudioMemory> nodes, Ring<Command, AudioMemory> commands,
                      Backlog<Command, AudioMemory> waiting, Ring<Event, AudioMemory> events, Connections links,
-                     Engine engine, float32 sampleRate) {
+                     Engine engine, Shared<Samples, AudioMemory> output, int64 framesPerUpdate, float32 sampleRate) {
         this.nodes = give nodes;
         this.commands = give commands;
         this.waiting = give waiting;
         this.events = give events;
         this.links = give links;
         this.engine = give engine;
+        this.rendering = give output;
+        this.perUpdate = framesPerUpdate;
+        this.renderedSoFar = 0;
+        this.started = false;
         this.rate = sampleRate;
     }
+
+    // Starts the offline render (decision 37). False when it has started already, and then nothing changes.
+    public fn bool startRendering() {
+        if (this.started) { return false; }
+        this.started = true;
+        return true;
+    }
+
+    // The program's `update()` (decisions 10 and 37): the flush; then, while a started render has frames left, whole
+    // quanta until this update has rendered at least its declared frames, each copied into the output, the last
+    // stopping at its length; then the way back read.
+    public fn void update() {
+        isize sent = this.flush();
+        int64 length = this.rendering.frames();
+        int32 channels = this.rendering.channels();
+        int64 thisUpdate = 0;
+        while (this.started && this.renderedSoFar < length && thisUpdate < this.perUpdate) {
+            isize applied = this.renderQuantum();
+            int64 frames = length - this.renderedSoFar < QUANTUM ? length - this.renderedSoFar : QUANTUM;
+            int32 channel = 0;
+            while (channel < channels) {
+                int64 frame = 0;
+                while (frame < frames) {
+                    this.rendering.write(channel: channel, frame: this.renderedSoFar + frame,
+                                         value: this.engine.blockAt(channel: channel, frame: frame));
+                    frame = frame + 1;
+                }
+                channel = channel + 1;
+            }
+            this.renderedSoFar = this.renderedSoFar + frames;
+            thisUpdate = thisUpdate + frames;
+        }
+        isize freed = this.poll();
+    }
+
+    // Whether the render has rendered every frame of its length.
+    public const fn bool renderDone() { return this.started && this.renderedSoFar >= this.rendering.frames(); }
+
+    // The frames the render has rendered so far.
+    public const fn int64 framesRendered() { return this.renderedSoFar; }
+
+    // The render's output, shared with the `AudioBuffer` that hands it over.
+    public fn Shared<Samples, AudioMemory> output() { return copy this.rendering; }
 
     // Where this state is: what tells one context from another.
     public unsafe const fn UnsafeConstPtr<ContextState> where() { return addr(of: this); }
@@ -185,11 +236,13 @@ type resource ContextState {
 // A context's state drawn from `memory` (decision 36), each part only once the one before it fit: its slot table of
 // `nodeCapacity` rows, its command ring of `ringCapacity`, its backlog of `backlogCapacity`, the way back of
 // `nodeCapacity` (decision 9: a report for every row at once), its connections (`connectionCapacity`, and a list head
-// for each row), the audio side (`engineFrom`), then the block that holds them. A part with no room is
-// `OutOfMemory`, and every part taken before it goes back when this returns.
+// for each row), the audio side (`engineFrom`), the offline render's output of `channels` channels of `length` frames
+// (`samplesFrom`), then the block that holds them. A part with no room is `OutOfMemory`, and every part taken before
+// it goes back when this returns.
 fn Result<Shared<ContextState, AudioMemory>, AudioError> stateFrom(AudioMemory memory, isize nodeCapacity,
                                                                    isize ringCapacity, isize backlogCapacity,
-                                                                   isize connectionCapacity, float32 sampleRate) {
+                                                                   isize connectionCapacity, int32 channels, int64 length,
+                                                                   int64 framesPerUpdate, float32 sampleRate) {
     Result<SlotTable<AudioMemory>, CapacityError> table =
         SlotTable::<AudioMemory>.withCapacityAndAllocator(allocator: memory, capacity: nodeCapacity);
     SlotTable<AudioMemory> nodes = match (give table) {
@@ -221,16 +274,23 @@ fn Result<Shared<ContextState, AudioMemory>, AudioError> stateFrom(AudioMemory m
         case Err(error: e): { return Result::Err(error: AudioError::OutOfMemory); }
     };
     Result<Engine, AudioError> audio = engineFrom(memory: memory, nodeCapacity: nodeCapacity,
-                                                  connectionCapacity: connectionCapacity);
+                                                  connectionCapacity: connectionCapacity, channels: channels);
     // The engine is bound before the `try new`, never built in its argument list: a box with no room drops what it was
     // given from a local, and leaks a temporary built there (KAMA_GAPS.md KAUD-10).
     Engine engine = match (give audio) {
         case Ok(value: a): give a;
         case Err(error: e): { return Result::Err(error: e); }
     };
+    Result<Shared<Samples, AudioMemory>, AudioError> drawn = samplesFrom(memory: memory, channels: channels, frames: length,
+                                                                         sampleRate: sampleRate);
+    Shared<Samples, AudioMemory> output = match (give drawn) {
+        case Ok(value: o): give o;
+        case Err(error: e): { return Result::Err(error: e); }
+    };
     Optional<Shared<ContextState, AudioMemory>> state =
         try new(allocator: memory) ContextState.make(nodes: give nodes, commands: give commands, waiting: give waiting,
                                                      events: give events, links: give links, engine: give engine,
+                                                     output: give output, framesPerUpdate: framesPerUpdate,
                                                      sampleRate: sampleRate);
     return match (give state) {
         case Some(value: s): Result::Ok(value: give s);

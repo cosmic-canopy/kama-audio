@@ -15,13 +15,13 @@
 //   Audio's `InvalidAccessError`.
 
 import { audio::graph::ContextState, audio::graph::ContextKey, audio::graph::Command, audio::graph::NodeKind,
-         audio::graph::stateFrom, AudioMemory, std::memory::Shared };
+         audio::graph::stateFrom, AudioMemory, RenderRequest, std::memory::Shared };
 
 export { BaseAudioContext, OfflineAudioContext, OfflineAudioContextOptions, AudioError };
 
 // Why a context or a node was not made.
 type enum AudioError implements Error {
-    NotSupported, OutOfMemory, TooManyNodes, TooManyCommands, TooManyConnections, InvalidAccess;
+    NotSupported, OutOfMemory, TooManyNodes, TooManyCommands, TooManyConnections, InvalidAccess, InvalidState, IndexSize;
 
     public const fn string message() {
         return match (this) {
@@ -31,6 +31,8 @@ type enum AudioError implements Error {
             case TooManyCommands: "the context's backlog is full: every command it declared is waiting for the next flush";
             case TooManyConnections: "every connection the context declared is held; a freed node's connections come back once the way back is read";
             case InvalidAccess: "the node belongs to another context: nodes connect only within their own, as in Web Audio";
+            case InvalidState: "the render has started already: an offline context renders once, as in Web Audio";
+            case IndexSize: "an index is outside what the buffer holds: a channel it does not have, or a frame below 0";
         };
     }
 }
@@ -52,6 +54,7 @@ type value OfflineAudioContextOptions {
     public isize ringCapacity = 1024;        // the commands that can cross to the audio side at once (decision 7)
     public isize backlogCapacity = 4096;     // the commands that can wait for a flush (decisions 8 and 33)
     public isize connectionCapacity = 4096;  // the connections between its nodes at once, four for each node row (decision 6)
+    public int64 framesPerUpdate = 8192;     // the frames an update renders at least, in whole quanta (decision 37)
     public AudioMemory memory = AudioMemory.global();
 
     public ctor make(int64 length, float32 sampleRate) {
@@ -95,13 +98,15 @@ type resource OfflineAudioContext implements BaseAudioContext {
     public ctor Result<OfflineAudioContext, AudioError> make(OfflineAudioContextOptions options) {
         if (options.numberOfChannels < 1 || options.numberOfChannels > MOST_CHANNELS || options.length < 1
             || options.sampleRate < LOWEST_RATE || options.sampleRate > HIGHEST_RATE || options.nodeCapacity < 1
-            || options.ringCapacity < 1 || options.backlogCapacity < 1 || options.connectionCapacity < 1) {
+            || options.ringCapacity < 1 || options.backlogCapacity < 1 || options.connectionCapacity < 1
+            || options.framesPerUpdate < 1) {
             return Result::Err(error: AudioError::NotSupported);
         }
         Result<Shared<ContextState, AudioMemory>, AudioError> state =
             stateFrom(memory: options.memory, nodeCapacity: options.nodeCapacity, ringCapacity: options.ringCapacity,
                       backlogCapacity: options.backlogCapacity, connectionCapacity: options.connectionCapacity,
-                      sampleRate: options.sampleRate);
+                      channels: options.numberOfChannels, length: options.length,
+                      framesPerUpdate: options.framesPerUpdate, sampleRate: options.sampleRate);
         return match (give state) {
             case Ok(value: s): Result::Ok(value: OfflineAudioContext.adopt(state: give s, channels: options.numberOfChannels,
                                                                             frames: options.length));
@@ -115,6 +120,18 @@ type resource OfflineAudioContext implements BaseAudioContext {
     public const fn int64 length() { return this.frames; }
 
     public const fn int32 numberOfChannels() { return this.channels; }
+
+    // Starts the render (Web Audio's `startRendering()`, decision 37): it renders nothing now, and answers the request
+    // the program polls. `InvalidState` when the render has started already.
+    public fn Result<RenderRequest, AudioError> startRendering() {
+        if (!this.state.startRendering()) { return Result::Err(error: AudioError::InvalidState); }
+        return Result::Ok(value: RenderRequest.of(state: copy this.state));
+    }
+
+    // The program's call once a frame (decisions 10 and 37): the calls made since the last one flushed to the audio side,
+    // then, once the render has started, at least `options.framesPerUpdate` frames rendered in whole quanta, or the rest,
+    // then the way back read.
+    public fn void update() { this.state.update(); }
 
     public fn Shared<ContextState, AudioMemory> stateFor(ContextKey key) { return copy this.state; }
 

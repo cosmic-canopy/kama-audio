@@ -1,0 +1,29 @@
+// audio::RenderRequest and audio::RenderStatus, an offline render as a request the program polls (decision 37), as
+// `@kama/gpu`'s requests are.
+//
+// - **`OfflineAudioContext.startRendering()` answers one,** and the context's `update()` advances the render, once a
+//   frame, by its declared frames per update.
+// - **`poll()` answers where the render is:** `Pending` with the frames rendered so far, or `Ready` with the
+//   `AudioBuffer`, again at every poll after.
+
+import { audio::graph::ContextState, AudioBuffer, AudioMemory, std::memory::Shared };
+
+export { RenderRequest, RenderStatus };
+
+// Where an offline render is.
+type enum RenderStatus {
+    Pending(int64 framesRendered),
+    Ready(AudioBuffer buffer);
+}
+
+type resource RenderRequest {
+    Shared<ContextState, AudioMemory> state;
+
+    // A request on the render `state` holds. Its type is in `audio::graph`, so only the package makes one.
+    public ctor of(Shared<ContextState, AudioMemory> state) { this.state = give state; }
+
+    public fn RenderStatus poll() {
+        if (this.state.renderDone()) { return RenderStatus::Ready(buffer: AudioBuffer.of(samples: this.state.output())); }
+        return RenderStatus::Pending(framesRendered: this.state.framesRendered());
+    }
+}

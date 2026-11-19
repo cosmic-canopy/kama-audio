@@ -1,0 +1,384 @@
+// render: an offline render, a request the program polls, advanced by `update()` (AUD-29, AUD-5 and AUD-9;
+// AGENTS.audio.md decision 37, with decisions 6, 9, 10 and 32).
+// - `startRendering()` answers a request and renders nothing; a second start is `InvalidState`, Web Audio's
+//   InvalidStateError.
+// - Each `update()` flushes, renders whole quanta until it has rendered the declared frames per update or the end, and
+//   reads the way back. The last quantum stops at the context's length.
+// - `poll()` answers `Pending` with the frames rendered so far, then `Ready` with the `AudioBuffer`, again at every poll.
+// - The buffer holds the context's channels and length at its sample rate. With nothing connected to a destination yet,
+//   every sample is silence, written by the render: the tests' allocator poisons every block it hands out.
+// - `copyFromChannel` is Web Audio's: as many frames as fit from `bufferOffset`, the rest of the destination untouched;
+//   a channel the buffer does not have, or an offset below 0, is `IndexSize`.
+// - The buffer is a counted resource that outlives its context; its blocks go back at its last drop.
+
+import { Tally, named, letGo, countedIn, rowsHeldIn, audioHeldIn, audio::OfflineAudioContext,
+         audio::OfflineAudioContextOptions, audio::AudioError, audio::AudioBuffer, audio::RenderRequest,
+         audio::RenderStatus, audio::GainNode, audio::AudioMemory };
+
+export { renderTests };
+
+// ---- helpers ----------------------------------------------------------------------------------------------------------
+
+// The frames rendered so far, -1 when the render is ready.
+fn int64 pendingAt(ref RenderRequest r) {
+    RenderStatus s = r.poll();
+    return match (give s) {
+        case Pending(framesRendered: n): n;
+        case Ready(buffer: b): -1;
+    };
+}
+
+// "" when the request is pending at `want` frames, or what it answered instead.
+fn string expectPending(ref RenderRequest r, int64 want, const ref string moment) {
+    int64 at = pendingAt(r: r);
+    if (at == -1) { return "${moment}: the render was ready where ${want} frames were due"; }
+    return at == want ? "" : "${moment}: the render was pending at ${at} frames where ${want} were due";
+}
+
+// The buffer a ready request answers, or `None` while it is pending.
+fn Optional<AudioBuffer> readyBuffer(ref RenderRequest r) {
+    RenderStatus s = r.poll();
+    return match (give s) {
+        case Pending(framesRendered: n): Optional::None;
+        case Ready(buffer: b): Optional::Some(value: give b);
+    };
+}
+
+// "" when every frame of every channel of `b` is 0, read through copyFromChannel in slices of 256.
+unsafe fn string allSilent(ref AudioBuffer b) {
+    int32 channels = b.numberOfChannels();
+    int64 frames = b.length();
+    int32 ch = 0;
+    while (ch < channels) {
+        int64 at = 0;
+        while (at < frames) {
+            InlineArray<float32>#(256) sink = [7.0; (256)];
+            bool copied = false;
+            borrow sink.viewMut() as v {
+                Result<Unit, AudioError> r = b.copyFromChannel(destination: v, channelNumber: ch, bufferOffset: at);
+                copied = match (r) { case Ok(value: u): true; case Err(error: e): false; };
+            }
+            if (!copied) { return "channel ${ch} refused a copy from frame ${at}"; }
+            int64 n = frames - at < 256 ? frames - at : 256;
+            isize i = 0;
+            while (cast<int64>(i) < n) {
+                float32 x = sink[i];
+                if (x != 0) {
+                    int64 frame = at + cast<int64>(i);
+                    return "channel ${ch} held ${x} at frame ${frame} where silence was due";
+                }
+                i = i + 1;
+            }
+            at = at + 256;
+        }
+        ch = ch + 1;
+    }
+    return "";
+}
+
+// The options of a render: `channels` channels of `length` frames at 48 kHz, `framesPerUpdate` an update, from `memory`.
+fn OfflineAudioContextOptions renderOptions(AudioMemory memory, int32 channels, int64 length, int64 framesPerUpdate) {
+    OfflineAudioContextOptions o = OfflineAudioContextOptions.make(length: length, sampleRate: 48000);
+    o.numberOfChannels = channels;
+    o.framesPerUpdate = framesPerUpdate;
+    o.memory = memory;
+    o.nodeCapacity = 4;
+    o.ringCapacity = 16;
+    o.backlogCapacity = 16;
+    o.connectionCapacity = 4;
+    return o;
+}
+
+fnptr string RenderCase(ref OfflineAudioContext context);
+
+// Runs `body` on a fresh context of `channels` channels and `length` frames, rendering `framesPerUpdate` an update,
+// drawn from the tests' poisoning allocator.
+unsafe fn void withRender(ref Tally t, const ref string name, int32 channels, int64 length, int64 framesPerUpdate,
+                          RenderCase body) {
+    InlineArray<int64>#(4) cells = [0; (4)];
+    cells[3] = -1;
+    UnsafePtr<int64> c = addr(of: cells[0]);
+    string why = "";
+    {
+        Result<OfflineAudioContext, AudioError> made =
+            OfflineAudioContext.make(options: renderOptions(memory: countedIn(cells: c), channels: channels, length: length,
+                                                            framesPerUpdate: framesPerUpdate));
+        match (give made) {
+            case Ok(value: c0): {
+                OfflineAudioContext context = give c0;
+                why = body(context: context);
+            }
+            case Err(error: e): {
+                string m = named(e: e);
+                why = "the context was not made: ${m}";
+            }
+        };
+    }
+    int64 blocks = cells[0];
+    if (why.isEmpty() && blocks != 0) { why = "${blocks} blocks were still out after the case"; }
+    t.verdict(name: name, why: why);
+}
+
+// ---- the cases --------------------------------------------------------------------------------------------------------
+
+// The options declare 8,192 frames an update by default, 64 quanta.
+fn string defaults() {
+    OfflineAudioContextOptions o = OfflineAudioContextOptions.make(length: 128, sampleRate: 48000);
+    int64 frames = o.framesPerUpdate;
+    return frames == 8192 ? "" : "the default was ${frames} frames an update";
+}
+
+// A start renders nothing: the request is pending at 0 until an update.
+fn string startRendersNothing(ref OfflineAudioContext context) {
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) {
+        case Ok(value: q): give q;
+        case Err(error: e): { string n = named(e: e); return "the start answered ${n}"; }
+    };
+    string why = expectPending(r: r, want: 0, moment: "after the start");
+    if (!why.isEmpty()) { return why; }
+    return expectPending(r: r, want: 0, moment: "polled again");
+}
+
+// Updates before the start render nothing; after it, each update renders whole quanta until it has rendered the declared
+// frames, and the last stops at the length: 1,000 frames at 256 an update are 256, 512, 768, then all 1,000.
+fn string updatesAdvance(ref OfflineAudioContext context) {
+    context.update();
+    context.update();
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) {
+        case Ok(value: q): give q;
+        case Err(error: e): { string n = named(e: e); return "the start answered ${n}"; }
+    };
+    string why = expectPending(r: r, want: 0, moment: "after updates before the start");
+    if (!why.isEmpty()) { return why; }
+    context.update();
+    why = expectPending(r: r, want: 256, moment: "after the first update");
+    if (!why.isEmpty()) { return why; }
+    context.update();
+    why = expectPending(r: r, want: 512, moment: "after the second");
+    if (!why.isEmpty()) { return why; }
+    context.update();
+    why = expectPending(r: r, want: 768, moment: "after the third");
+    if (!why.isEmpty()) { return why; }
+    context.update();
+    Optional<AudioBuffer> got = readyBuffer(r: r);
+    return match (give got) {
+        case Some(value: b): {
+            int64 frames = b.length();
+            return frames == 1000 ? "" : "the buffer held ${frames} frames where 1,000 were due";
+        }
+        case None: {
+            int64 at = pendingAt(r: r);
+            return "after the fourth update the render was pending at ${at} frames";
+        }
+    };
+}
+
+// An update that is not a whole number of quanta renders whole quanta past it: 200 frames an update are two quanta.
+fn string wholeQuanta(ref OfflineAudioContext context) {
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) {
+        case Ok(value: q): give q;
+        case Err(error: e): { string n = named(e: e); return "the start answered ${n}"; }
+    };
+    context.update();
+    string why = expectPending(r: r, want: 256, moment: "after one update of 200 frames");
+    if (!why.isEmpty()) { return why; }
+    context.update();
+    return expectPending(r: r, want: 512, moment: "after two");
+}
+
+// The ready buffer holds the context's channels, length and sample rate, every sample silence, and answers again at the
+// next poll; an update after the end renders nothing.
+unsafe fn string readyBufferSilent(ref OfflineAudioContext context) {
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) {
+        case Ok(value: q): give q;
+        case Err(error: e): { string n = named(e: e); return "the start answered ${n}"; }
+    };
+    context.update();
+    Optional<AudioBuffer> got = readyBuffer(r: r);
+    AudioBuffer b = match (give got) { case Some(value: x): give x; case None: { return "one update of the whole length left it pending"; } };
+    int32 channels = b.numberOfChannels();
+    int64 frames = b.length();
+    float32 rate = b.sampleRate();
+    float64 seconds = b.duration();
+    if (channels != 2 || frames != 300 || rate != 48000) {
+        return "the buffer was ${channels} channels of ${frames} frames at ${rate} Hz where 2 of 300 at 48,000 were due";
+    }
+    if (seconds != 0.00625) { return "its duration was ${seconds} s where 0.00625 was due"; }
+    string why = allSilent(b: b);
+    if (!why.isEmpty()) { return why; }
+    context.update();
+    Optional<AudioBuffer> again = readyBuffer(r: r);
+    return match (give again) {
+        case Some(value: b2): allSilent(b: b2);
+        case None: "a poll after ready answered pending";
+    };
+}
+
+// A second start is InvalidState, and the first request still renders.
+fn string startTwice(ref OfflineAudioContext context) {
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) {
+        case Ok(value: q): give q;
+        case Err(error: e): { string n = named(e: e); return "the first start answered ${n}"; }
+    };
+    Result<RenderRequest, AudioError> again = context.startRendering();
+    string why = match (give again) {
+        case Ok(value: q): "a second start was taken";
+        case Err(error: e): {
+            string n = named(e: e);
+            return n == "InvalidState" ? "" : "a second start answered ${n} where InvalidState was due";
+        }
+    };
+    if (!why.isEmpty()) { return why; }
+    context.update();
+    return expectPending(r: r, want: 128, moment: "the first request, after an update");
+}
+
+// An update flushes, renders and reads the way back: a make before the start is applied in the render, and a drop
+// during it is freed and its row back after the next update.
+fn string updateDrives(ref OfflineAudioContext context) {
+    Result<GainNode, AudioError> rg = GainNode.make(context: context);
+    GainNode g = match (give rg) { case Ok(value: x): give x; case Err(error: e): { return "the node was refused"; } };
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) {
+        case Ok(value: q): give q;
+        case Err(error: e): { string n = named(e: e); return "the start answered ${n}"; }
+    };
+    context.update();
+    isize held = audioHeldIn(context: context);
+    if (held != 1) { return "after an update the audio side held ${held} nodes where the made one was due"; }
+    letGo(node: give g);
+    context.update();
+    held = audioHeldIn(context: context);
+    if (held != 0) { return "after the drop's update the audio side held ${held} nodes"; }
+    isize rows = rowsHeldIn(context: context);
+    return rows == 0 ? "" : "after the drop's update ${rows} rows were held, so the way back was not read";
+}
+
+// copyFromChannel copies as many frames as fit from the offset and leaves the rest of the destination untouched; an
+// offset at or past the end copies nothing; a channel the buffer does not have, or an offset below 0, is IndexSize.
+unsafe fn string copyRules(ref OfflineAudioContext context) {
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) {
+        case Ok(value: q): give q;
+        case Err(error: e): { string n = named(e: e); return "the start answered ${n}"; }
+    };
+    context.update();
+    Optional<AudioBuffer> got = readyBuffer(r: r);
+    AudioBuffer b = match (give got) { case Some(value: x): give x; case None: { return "the render was not ready"; } };
+    InlineArray<float32>#(8) sink = [7.0; (8)];
+    string why = "";
+    borrow sink.viewMut() as v {
+        Result<Unit, AudioError> tail = b.copyFromChannel(destination: v, channelNumber: 1, bufferOffset: 297);
+        why = match (tail) { case Ok(value: u): ""; case Err(error: e): "a copy of the last 3 frames was refused"; };
+    }
+    if (!why.isEmpty()) { return why; }
+    isize i = 0;
+    while (i < 8) {
+        float32 x = sink[i];
+        float32 want = i < 3 ? 0 : 7;
+        if (x != want) { return "after a copy of the last 3 frames, slot ${i} held ${x} where ${want} was due"; }
+        i = i + 1;
+    }
+    InlineArray<float32>#(4) past = [7.0; (4)];
+    borrow past.viewMut() as v {
+        Result<Unit, AudioError> none = b.copyFromChannel(destination: v, channelNumber: 0, bufferOffset: 300);
+        why = match (none) { case Ok(value: u): ""; case Err(error: e): "a copy from the end was refused"; };
+    }
+    if (!why.isEmpty()) { return why; }
+    float32 untouched = past[0];
+    if (untouched != 7) { return "a copy from the end wrote ${untouched}"; }
+    InlineArray<float32>#(4) bad = [7.0; (4)];
+    string got2 = "";
+    string got3 = "";
+    string got4 = "";
+    borrow bad.viewMut() as v {
+        Result<Unit, AudioError> c2 = b.copyFromChannel(destination: v, channelNumber: 2, bufferOffset: 0);
+        got2 = match (c2) { case Ok(value: u): "taken"; case Err(error: e): named(e: e); };
+        Result<Unit, AudioError> cm = b.copyFromChannel(destination: v, channelNumber: -1, bufferOffset: 0);
+        got3 = match (cm) { case Ok(value: u): "taken"; case Err(error: e): named(e: e); };
+        Result<Unit, AudioError> co = b.copyFromChannel(destination: v, channelNumber: 0, bufferOffset: -1);
+        got4 = match (co) { case Ok(value: u): "taken"; case Err(error: e): named(e: e); };
+    }
+    if (got2 != "IndexSize") { return "a copy from channel 2 of 2 answered ${got2}"; }
+    if (got3 != "IndexSize") { return "a copy from channel -1 answered ${got3}"; }
+    if (got4 != "IndexSize") { return "a copy from frame -1 answered ${got4}"; }
+    float32 kept = bad[0];
+    return kept == 7 ? "" : "a refused copy wrote ${kept}";
+}
+
+// The buffer outlives its context and its request: after both are dropped, its two blocks, its samples and the box
+// that counts it, are all that is still out, it reads as before, and they go back at its last drop.
+unsafe fn void outlives(ref Tally t) {
+    InlineArray<int64>#(4) cells = [0; (4)];
+    cells[3] = -1;
+    UnsafePtr<int64> c = addr(of: cells[0]);
+    Optional<AudioBuffer> kept = Optional::None;
+    string why = "";
+    {
+        Result<OfflineAudioContext, AudioError> made =
+            OfflineAudioContext.make(options: renderOptions(memory: countedIn(cells: c), channels: 2, length: 300,
+                                                            framesPerUpdate: 300));
+        match (give made) {
+            case Ok(value: context): {
+                Result<RenderRequest, AudioError> started = context.startRendering();
+                match (give started) {
+                    case Ok(value: r): {
+                        context.update();
+                        kept = readyBuffer(r: r);
+                    }
+                    case Err(error: e): { why = "the start was refused"; }
+                };
+            }
+            case Err(error: e): { why = "the context was not made"; }
+        };
+    }
+    match (give kept) {
+        case Some(value: buffer): {
+            string read = readsAlone(b: give buffer, c: c);
+            if (why.isEmpty()) { why = copy read; }
+        }
+        case None: { if (why.isEmpty()) { why = "the render was not ready"; } }
+    };
+    int64 left = cells[0];
+    if (why.isEmpty() && left != 0) { why = "${left} blocks were still out after the buffer's last drop"; }
+    t.verdict(name: "render: the buffer outlives its context and request, and its blocks go back at its last drop", why: why);
+}
+
+// The end of a buffer: it is moved in, and dropped when this returns.
+fn void letGoOf(AudioBuffer buffer) { }
+
+// "" when, with its context and request dropped, `b`'s two blocks are all that is out of the tests' allocator, a copy
+// keeps them out after `b` is dropped, and the copy reads silence.
+unsafe fn string readsAlone(AudioBuffer b, UnsafePtr<int64> c) {
+    int64 alone = c[0];
+    AudioBuffer other = copy b;
+    letGoOf(buffer: give b);
+    int64 still = c[0];
+    if (alone != 2) { return "with the context and request dropped, ${alone} blocks were out where the buffer's 2 were due"; }
+    if (still != 2) { return "a copy's drop gave back the buffer's blocks"; }
+    return allSilent(b: other);
+}
+
+unsafe fn void renderTests(ref Tally t) {
+    t.verdict(name: "render: the options declare 8,192 frames an update by default", why: defaults());
+    withRender(t: t, name: "render: a start renders nothing, and the request is pending at 0", channels: 1, length: 1000,
+               framesPerUpdate: 256, body: startRendersNothing);
+    withRender(t: t, name: "render: each update renders whole quanta up to its declared frames, and the last stops at the length",
+               channels: 1, length: 1000, framesPerUpdate: 256, body: updatesAdvance);
+    withRender(t: t, name: "render: an update of frames that are not a whole number of quanta renders whole quanta past them",
+               channels: 1, length: 1000, framesPerUpdate: 200, body: wholeQuanta);
+    withRender(t: t, name: "render: the ready buffer holds the context's channels, length and rate, every sample silence",
+               channels: 2, length: 300, framesPerUpdate: 300, body: readyBufferSilent);
+    withRender(t: t, name: "render: a second start is InvalidState, and the first request still renders", channels: 1,
+               length: 1000, framesPerUpdate: 128, body: startTwice);
+    withRender(t: t, name: "render: an update flushes, renders and reads the way back", channels: 1, length: 4096,
+               framesPerUpdate: 128, body: updateDrives);
+    withRender(t: t, name: "render: copyFromChannel copies what fits from its offset, and refuses a channel or offset out of range",
+               channels: 2, length: 300, framesPerUpdate: 300, body: copyRules);
+    outlives(t: t);
+}

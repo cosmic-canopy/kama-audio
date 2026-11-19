@@ -32,7 +32,11 @@
 import { audio::AudioMemory, audio::AudioError, audio::rt::Ring, audio::rt::SlotArray, audio::rt::CapacityError,
          audio::rt::slotOf, audio::store::Slots, Command, NodeKind, Connections, NO_CONNECTION };
 
-export { Engine, Event, EngineNode, Mark, engineFrom };
+export { Engine, Event, EngineNode, Mark, engineFrom, QUANTUM };
+
+// The frames of one render quantum: Web Audio's 128, until the engine's declared block (decision 15, AUD-9) makes it the
+// program's setting.
+comptime int64 QUANTUM = 128;
 
 // What the audio side reports on the way back (decision 9). Each kind arrives with what sends it: a sound's end with
 // the first source, an error and a block handed back with theirs.
@@ -58,9 +62,10 @@ type value Mark {
 }
 
 // The audio side drawn from `memory`, each part only once the one before it fit: its array of `nodeCapacity` nodes,
-// its connections (`connectionCapacity`, and a list head for each node), then the walk's marks, one a node.
-// `OutOfMemory` when a part has no room, and every part taken before it goes back.
-fn Result<Engine, AudioError> engineFrom(AudioMemory memory, isize nodeCapacity, isize connectionCapacity) {
+// its connections (`connectionCapacity`, and a list head for each node), the walk's marks, one a node, then its block,
+// a quantum for each of `channels` channels. `OutOfMemory` when a part has no room, and every part taken before it
+// goes back.
+fn Result<Engine, AudioError> engineFrom(AudioMemory memory, isize nodeCapacity, isize connectionCapacity, int32 channels) {
     Result<SlotArray<EngineNode, AudioMemory>, CapacityError> array =
         SlotArray::<EngineNode, AudioMemory>.withCapacityAndAllocator(allocator: memory, capacity: nodeCapacity);
     SlotArray<EngineNode, AudioMemory> nodes = match (give array) {
@@ -78,26 +83,39 @@ fn Result<Engine, AudioError> engineFrom(AudioMemory memory, isize nodeCapacity,
         case Ok(value: m): give m;
         case Err(error: e): { return Result::Err(error: AudioError::OutOfMemory); }
     };
-    return Result::Ok(value: Engine.make(nodes: give nodes, edges: give edges, marks: give marks));
+    Result<Slots<float32, AudioMemory>, CapacityError> blockTaken =
+        Slots::<float32, AudioMemory>.take(allocator: memory, capacity: cast<isize>(channels) * cast<isize>(QUANTUM));
+    Slots<float32, AudioMemory> block = match (give blockTaken) {
+        case Ok(value: b): give b;
+        case Err(error: e): { return Result::Err(error: AudioError::OutOfMemory); }
+    };
+    return Result::Ok(value: Engine.make(nodes: give nodes, edges: give edges, marks: give marks, block: give block,
+                                         channels: channels));
 }
 
 type resource Engine {
     SlotArray<EngineNode, AudioMemory> nodes;
     Connections edges;
     Slots<Mark, AudioMemory> marks;
+    Slots<float32, AudioMemory> block;   // the quantum rendered: each channel's QUANTUM frames after the one before it
+    int32 channelCount = 1;
     int64 refusedCount = 0;
     bool released = false;   // a release applied this quantum, so the walk is due
 
-    public ctor make(SlotArray<EngineNode, AudioMemory> nodes, Connections edges, Slots<Mark, AudioMemory> marks) {
+    public ctor make(SlotArray<EngineNode, AudioMemory> nodes, Connections edges, Slots<Mark, AudioMemory> marks,
+                     Slots<float32, AudioMemory> block, int32 channels) {
         this.nodes = give nodes;
         this.edges = give edges;
         this.marks = give marks;
+        this.block = give block;
+        this.channelCount = channels;
         this.refusedCount = 0;
         this.released = false;
     }
 
     // One render quantum: every command published before it applied in order; then, if one was a release, the walk;
-    // then the reports they made published on the way back with one store. Answers how many commands it applied.
+    // then the reports they made published on the way back with one store; then the quantum's samples into the block.
+    // Nothing is connected to a destination yet, so they are silence. Answers how many commands it applied.
     @noheap public fn isize renderQuantum(ref Ring<Command, AudioMemory> commands, ref Ring<Event, AudioMemory> events) {
         isize applied = 0;
         bool more = true;
@@ -116,8 +134,17 @@ type resource Engine {
             this.released = false;
         }
         events.publish();
+        int64 samples = this.block.count();
+        int64 i = 0;
+        while (i < samples) {
+            this.block[i] = 0;
+            i = i + 1;
+        }
         return applied;
     }
+
+    // The sample the last quantum rendered for `channel` at `frame`, of QUANTUM.
+    public const fn float32 blockAt(int32 channel, int64 frame) { return this.block[cast<int64>(channel) * QUANTUM + frame]; }
 
     @noheap fn void apply(Command command) {
         match (command) {

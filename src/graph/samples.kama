@@ -1,0 +1,59 @@
+// audio::graph::Samples, the samples an `AudioBuffer` holds (decisions 4 and 6): channel-planar float32, each channel's
+// frames after the one before it, drawn once from the program's memory and never grown. An `AudioBuffer` is a counted
+// handle on one, so the samples live until its last copy is dropped.
+
+import { audio::AudioMemory, audio::AudioError, audio::rt::CapacityError, audio::store::Slots, std::memory::Shared };
+
+export { Samples, samplesFrom };
+
+type resource Samples {
+    Slots<float32, AudioMemory> data;
+    int32 channelCount = 0;
+    int64 frameCount = 0;
+    float32 rate = 0;
+
+    public ctor make(Slots<float32, AudioMemory> data, int32 channels, int64 frames, float32 sampleRate) {
+        this.data = give data;
+        this.channelCount = channels;
+        this.frameCount = frames;
+        this.rate = sampleRate;
+    }
+
+    public const fn int32 channels() { return this.channelCount; }
+
+    public const fn int64 frames() { return this.frameCount; }
+
+    public const fn float32 sampleRate() { return this.rate; }
+
+    // The sample of `channel` at `frame`. The caller keeps both in range.
+    public const fn float32 at(int32 channel, int64 frame) { return this.data[cast<int64>(channel) * this.frameCount + frame]; }
+
+    // Writes the sample of `channel` at `frame`. The caller keeps both in range.
+    public fn void write(int32 channel, int64 frame, float32 value) {
+        this.data[cast<int64>(channel) * this.frameCount + frame] = value;
+    }
+}
+
+// `channels` channels of `frames` frames at `sampleRate`, drawn from `memory`: the samples, then the block that counts
+// them. `OutOfMemory` when either has no room, or when the samples' count is past what an isize holds, never a count
+// that overflowed; the samples go back if the block has no room.
+fn Result<Shared<Samples, AudioMemory>, AudioError> samplesFrom(AudioMemory memory, int32 channels, int64 frames,
+                                                                float32 sampleRate) {
+    if (frames > 9223372036854775807 / cast<int64>(channels)) { return Result::Err(error: AudioError::OutOfMemory); }
+    Optional<isize> count = try cast<isize>(cast<int64>(channels) * frames);
+    isize total = match (count) {
+        case Some(value: n): n;
+        case None: { return Result::Err(error: AudioError::OutOfMemory); }
+    };
+    Result<Slots<float32, AudioMemory>, CapacityError> taken = Slots::<float32, AudioMemory>.take(allocator: memory, capacity: total);
+    Slots<float32, AudioMemory> data = match (give taken) {
+        case Ok(value: d): give d;
+        case Err(error: e): { return Result::Err(error: AudioError::OutOfMemory); }
+    };
+    Optional<Shared<Samples, AudioMemory>> made =
+        try new(allocator: memory) Samples.make(data: give data, channels: channels, frames: frames, sampleRate: sampleRate);
+    return match (give made) {
+        case Some(value: s): Result::Ok(value: give s);
+        case None: Result::Err(error: AudioError::OutOfMemory);
+    };
+}

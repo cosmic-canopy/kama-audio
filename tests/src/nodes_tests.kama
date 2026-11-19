@@ -12,7 +12,7 @@ import { Tally, heapAllocations, heapBytesOut, audio::AudioMemory, audio::Offlin
          audio::GainNode, audio::rt::slotOf, audio::rt::generationOf, std::collections::Arena,
          std::collections::DynamicArray };
 
-export { nodesTests, rowsHeldIn, releaseDueIn, named, letGo };
+export { nodesTests, rowsHeldIn, releaseDueIn, named, letGo, countedIn };
 
 // The package's seam into a context (`friend` grants in `src/context.kama`): its rows held, and its next release due.
 fn isize rowsHeldIn(ref OfflineAudioContext context) { return context.rowsHeld(); }
@@ -21,14 +21,28 @@ fn Optional<int64> releaseDueIn(ref OfflineAudioContext context) { return contex
 
 // ---- the tests' own allocator: four counters behind the user pointer ------------------------------------------------
 // 0: blocks out now, 1: bytes out now, 2: allocations made, 3: the budget in bytes, or -1 for none.
+// Every block it hands out is poisoned, each byte 0xFF (a float32 of them is NaN), so a part that reads what it never
+// wrote reads poison, not a fresh page's zeros.
 
 unsafe fn Optional<UnsafePtr> countedAllocate(UnsafePtr user, usize bytes, usize align) {
     UnsafePtr<int64> c = cast<UnsafePtr<int64>>(user);
     if (c[3] >= 0 && c[1] + cast<int64>(bytes) > c[3]) { return Optional::None; }
-    c[0] = c[0] + 1;
-    c[1] = c[1] + cast<int64>(bytes);
-    c[2] = c[2] + 1;
-    return GlobalAllocator.make().allocate(bytes: bytes, align: align);
+    Optional<UnsafePtr> got = GlobalAllocator.make().allocate(bytes: bytes, align: align);
+    match (got) {
+        case Some(value: p): {
+            UnsafePtr<uint8> b = cast<UnsafePtr<uint8>>(p);
+            usize i = 0;
+            while (i < bytes) {
+                b[cast<isize>(i)] = 255;
+                i = i + 1;
+            }
+            c[0] = c[0] + 1;
+            c[1] = c[1] + cast<int64>(bytes);
+            c[2] = c[2] + 1;
+        }
+        case None: { }
+    };
+    return got;
 }
 
 // The package never resizes a block, so the tests' allocator has no room for one.
@@ -68,6 +82,8 @@ fn string named(AudioError e) {
         case TooManyCommands: "TooManyCommands";
         case TooManyConnections: "TooManyConnections";
         case InvalidAccess: "InvalidAccess";
+        case InvalidState: "InvalidState";
+        case IndexSize: "IndexSize";
     };
 }
 
@@ -180,9 +196,9 @@ fn string properties() {
     };
 }
 
-// A context takes its eleven parts from the program's memory, one allocation each: its slot table, its command ring,
-// its backlog, its way back, its connections (two), the audio side's array, the audio side's connections (two), the
-// lifetime walk's marks, and its state. Making nodes takes none. Its state outlives the context's handle
+// A context takes its fourteen parts from the program's memory, one allocation each: its slot table, its command ring,
+// its backlog, its way back, its connections (two), the audio side's array, its connections (two), the lifetime walk's
+// marks and its block, the output buffer's samples and the box that counts it, and its state. Making nodes takes none. Its state outlives the context's handle
 // while a node holds it, and everything goes back at the last drop.
 unsafe fn string lastHold() {
     InlineArray<int64>#(4) cells = [0; (4)];
@@ -194,26 +210,26 @@ unsafe fn string lastHold() {
         match (give made) {
             case Ok(value: context): {
                 int64 made2 = c[2];
-                if (made2 != 11) { return "the context took ${made2} allocations where its 11 parts were due"; }
+                if (made2 != 14) { return "the context took ${made2} allocations where its 14 parts were due"; }
                 Result<GainNode, AudioError> g = GainNode.make(context: context);
                 match (give g) {
                     case Ok(value: node): { kept = Optional::Some(value: give node); }
                     case Err(error: e): { string m = named(e: e); return "the node was refused: ${m}"; }
                 };
                 int64 after = c[2];
-                if (after != 11) { return "making a node allocated: ${after} allocations where the context's 11 were due"; }
+                if (after != 14) { return "making a node allocated: ${after} allocations where the context's 14 were due"; }
             }
             case Err(error: e): { string m = named(e: e); return "the context was refused: ${m}"; }
         };
     }
     int64 held = c[0];
-    if (held != 11) { return "the context's handle left ${held} of 11 blocks out where the node still held its state"; }
+    if (held != 14) { return "the context's handle left ${held} of 14 blocks out where the node still held its state"; }
     match (give kept) {
         case Some(value: node): {
             GainNode other = copy node;
             letGo(node: give other);
             int64 still = c[0];
-            if (still != 11) { return "a copy's drop gave back blocks while the node still held its state"; }
+            if (still != 14) { return "a copy's drop gave back blocks while the node still held its state"; }
             letGo(node: give node);
         }
         case None: { return "the node was lost"; }
@@ -254,8 +270,8 @@ unsafe fn string globalHeap() {
     int64 drew = heapAllocations() - before;
     int64 asked = c[2];
     if (!made) { return "the context or its node was refused"; }
-    if (asked != 11 || drew != asked) {
-        return "the global heap gave ${drew} blocks where the program's own allocator, which draws from it, asked for ${asked} of the 11 due";
+    if (asked != 14 || drew != asked) {
+        return "the global heap gave ${drew} blocks where the program's own allocator, which draws from it, asked for ${asked} of the 14 due";
     }
 
     AudioMemory heap = AudioMemory.global();
@@ -303,7 +319,8 @@ unsafe fn string answers(OfflineAudioContextOptions o, UnsafePtr<int64> c, const
 }
 
 // Web Audio's ranges: 1 to 32 channels, a length of at least one frame, a sample rate from 3,000 to 768,000 Hz; and
-// at least one node, one command in the ring, one in the backlog and one connection. Each refusal is NotSupported and allocates nothing;
+// at least one node, one command in the ring, one in the backlog, one connection and one frame an update. An output no
+// isize can hold is OutOfMemory. Each refusal is NotSupported and allocates nothing;
 // each bound itself is made.
 unsafe fn string ranges() {
     InlineArray<int64>#(4) cells = [0; (4)];
@@ -365,16 +382,29 @@ unsafe fn string ranges() {
     why = answers(o: o, c: c, want: "NotSupported", what: "no connections");
     if (!why.isEmpty()) { return why; }
     o.connectionCapacity = 1;
-    return answers(o: o, c: c, want: "", what: "one connection");
+    why = answers(o: o, c: c, want: "", what: "one connection");
+    if (!why.isEmpty()) { return why; }
+    o = optionsIn(memory: m, nodes: 4);
+    o.framesPerUpdate = 0;
+    why = answers(o: o, c: c, want: "NotSupported", what: "no frames an update");
+    if (!why.isEmpty()) { return why; }
+    o.framesPerUpdate = 1;
+    why = answers(o: o, c: c, want: "", what: "one frame an update");
+    if (!why.isEmpty()) { return why; }
+    // An output no isize can hold, 32 channels of 2^62 frames, has no room: never a size that overflowed.
+    o = optionsIn(memory: m, nodes: 4);
+    o.numberOfChannels = 32;
+    o.length = 4611686018427387904;
+    return answers(o: o, c: c, want: "OutOfMemory", what: "an output of 32 channels of 2^62 frames");
 }
 
 // Memory with no room for the context is OutOfMemory at every budget short of it, and leaves nothing out: not the
-// parts that fit before the one that did not. Each of the eleven parts in turn is the one refused, the state last, and
-// the context is made once all eleven fit.
+// parts that fit before the one that did not. Each of the fourteen parts in turn is the one refused, the state last, and
+// the context is made once all fourteen fit.
 unsafe fn string noRoom() {
     InlineArray<int64>#(4) cells = [0; (4)];
     UnsafePtr<int64> c = addr(of: cells[0]);
-    InlineArray<bool>#(11) refusedAfter = [false; (11)];   // [n]: a refusal seen with n parts taken before it
+    InlineArray<bool>#(14) refusedAfter = [false; (14)];   // [n]: a refusal seen with n parts taken before it
     int64 budget = 0;
     while (budget <= 8192) {
         cells[0] = 0;
@@ -390,8 +420,8 @@ unsafe fn string noRoom() {
                     string n = named(e: e);
                     if (n != "OutOfMemory") { return "a budget of ${budget} bytes answered ${n} where OutOfMemory was due"; }
                     int64 taken = c[2];
-                    if (taken < 0 || taken > 10) {
-                        return "a budget of ${budget} bytes was refused after ${taken} allocations, where at most 10 parts come before the state";
+                    if (taken < 0 || taken > 13) {
+                        return "a budget of ${budget} bytes was refused after ${taken} allocations, where at most 13 parts come before the state";
                     }
                     refusedAfter[cast<isize>(taken)] = true;
                 }
@@ -401,7 +431,7 @@ unsafe fn string noRoom() {
         if (blocks != 0) { return "a budget of ${budget} bytes left ${blocks} blocks out"; }
         if (made) {
             isize k = 0;
-            while (k < 11) {
+            while (k < 14) {
                 if (!refusedAfter[k]) { return "no budget was refused with ${k} of the context's parts taken, so that refusal was never seen"; }
                 k = k + 1;
             }

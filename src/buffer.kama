@@ -1,0 +1,56 @@
+// audio::AudioBuffer, Web Audio's `AudioBuffer` (decision 3): samples in channels of a length at a sample rate.
+//
+// - **A counted resource** (decision 4), `Copyable` with a bare hand-off that moves: `copy b` shares the samples, and
+//   they go back to the memory they were drawn from at the last drop. It outlives the context that made it, as Web
+//   Audio's does.
+// - **So far an offline render makes one,** its output, drawn at the context's make (decision 37). A buffer the program
+//   makes to be played, and how its samples count against decision 6's sample memory, come with the source that plays
+//   it.
+// - **`copyFromChannel(destination:, channelNumber:, bufferOffset:)` is Web Audio's:** it copies as many frames as fit
+//   from `bufferOffset` into `destination`, and leaves the rest of `destination` untouched. A channel the buffer does
+//   not have is `IndexSize`, Web Audio's `IndexSizeError`, and so is an offset below 0, which Web Audio's unsigned
+//   argument cannot be; an offset at or past the end copies nothing. kama has no default arguments, so the offset is
+//   always named.
+
+import { audio::graph::Samples, AudioError, AudioMemory, std::memory::Shared, std::collections::View };
+
+export { AudioBuffer };
+
+type resource AudioBuffer implements Copyable<This>(bare: give) {
+    Shared<Samples, AudioMemory> samples;
+
+    // A buffer over `samples`. Its type is in `audio::graph`, so only the package makes one.
+    public ctor of(Shared<Samples, AudioMemory> samples) { this.samples = give samples; }
+
+    public ctor copy(ref AudioBuffer source) { this.samples = copy source.samples; }
+
+    // The sample rate, in Hz.
+    public const fn float32 sampleRate() { return this.samples.sampleRate(); }
+
+    // The frames each channel holds.
+    public const fn int64 length() { return this.samples.frames(); }
+
+    // The length in seconds.
+    public const fn float64 duration() {
+        return cast<float64>(this.samples.frames()) / cast<float64>(this.samples.sampleRate());
+    }
+
+    public const fn int32 numberOfChannels() { return this.samples.channels(); }
+
+    // Copies channel `channelNumber`'s frames from `bufferOffset` into `destination`, as many as fit.
+    public unsafe fn Result<Unit, AudioError> copyFromChannel(View<float32> destination, int32 channelNumber,
+                                                               int64 bufferOffset) {
+        if (channelNumber < 0 || channelNumber >= this.samples.channels() || bufferOffset < 0) {
+            return Result::Err(error: AudioError::IndexSize);
+        }
+        int64 count = this.samples.frames() - bufferOffset;
+        int64 room = cast<int64>(destination.length());
+        if (count > room) { count = room; }
+        int64 i = 0;
+        while (i < count) {
+            destination[cast<isize>(i)] = this.samples.at(channel: channelNumber, frame: bufferOffset + i);
+            i = i + 1;
+        }
+        return Result::Ok(value: Unit::Unit);
+    }
+}

@@ -278,6 +278,51 @@ fn string strangersRefused(ref SlotArray<int64, GlobalAllocator> a) {
     return expectAt(a: a, id: idAt(slot: 0, generation: 1), want: 10, what: "slot 0, after the strangers' calls");
 }
 
+// A set replaces the value at the generation it was put at, and only there: another generation, an empty slot or a
+// stranger is refused, and changes nothing.
+fn string setReplaces(ref SlotArray<int64, GlobalAllocator> a) {
+    if (!a.put(id: idAt(slot: 0, generation: 1), value: 10)) { return "the put was refused"; }
+    if (!a.set(id: idAt(slot: 0, generation: 1), value: 11)) { return "a set at the put's generation was refused"; }
+    string why = expectAt(a: a, id: idAt(slot: 0, generation: 1), want: 11, what: "the slot set");
+    if (!why.isEmpty()) { return why; }
+    isize n = a.length();
+    if (n != 1) { return "a set left it holding ${n}"; }
+    if (a.set(id: idAt(slot: 0, generation: 2), value: 12)) { return "a set at another generation was taken"; }
+    if (a.set(id: idAt(slot: 1, generation: 1), value: 13)) { return "a set into an empty slot was taken"; }
+    if (a.set(id: idAt(slot: 2, generation: 1), value: 14)) { return "a set just past the array was taken"; }
+    if (a.set(id: idAt(slot: 0, generation: 0), value: 15)) { return "a set at generation 0 was taken"; }
+    if (a.set(id: -1, value: 16)) { return "a set at the id -1 was taken"; }
+    why = expectAt(a: a, id: idAt(slot: 0, generation: 1), want: 11, what: "the slot after refused sets");
+    if (!why.isEmpty()) { return why; }
+    why = expectNothingAt(a: a, id: idAt(slot: 1, generation: 1), what: "the empty slot after a refused set");
+    if (!why.isEmpty()) { return why; }
+    isize after = a.length();
+    return after == 1 ? "" : "the refused sets left it holding ${after}";
+}
+
+// Each slot answers the id it holds a value at, or 0 when it holds none; a slot past the array, or below 0, answers 0.
+fn string idAtNames(ref SlotArray<int64, GlobalAllocator> a) {
+    int64 slot = 0;
+    while (slot < 3) {
+        int64 fresh = a.idAt(slot: slot);
+        if (fresh != 0) { return "a fresh array's slot ${slot} named ${fresh}"; }
+        slot = slot + 1;
+    }
+    int64 id = idAt(slot: 1, generation: 5);
+    if (!a.put(id: id, value: 50)) { return "the put was refused"; }
+    int64 named = a.idAt(slot: 1);
+    if (named != id) { return "slot 1 named ${named} where the id put there was ${id}"; }
+    int64 other = a.idAt(slot: 0);
+    if (other != 0) { return "an empty slot named ${other} beside a held one"; }
+    int64 past = a.idAt(slot: 3);
+    if (past != 0) { return "the slot just past the array named ${past}"; }
+    int64 below = a.idAt(slot: -1);
+    if (below != 0) { return "slot -1 named ${below}"; }
+    if (!a.remove(id: id)) { return "the removal was refused"; }
+    int64 gone = a.idAt(slot: 1);
+    return gone == 0 ? "" : "a removed slot named ${gone}";
+}
+
 unsafe fn void slotArrayTests(ref Tally t) {
     withArray(t: t, name: "slot array: a fresh array is empty, at its declared capacity", capacity: 4, body: freshIsEmpty);
     badCapacity(t: t);
@@ -296,4 +341,7 @@ unsafe fn void slotArrayTests(ref Tally t) {
     withArray(t: t, name: "slot array: a removed slot takes a put again at the next generation", capacity: 1, body: reuse);
     withArray(t: t, name: "slot array: an id past the array, of generation 0, or -1 is refused by every call", capacity: 2,
               body: strangersRefused);
+    withArray(t: t, name: "slot array: a set replaces the value at the generation it was put at, and only there", capacity: 2,
+              body: setReplaces);
+    withArray(t: t, name: "slot array: each slot names the id it holds a value at, or 0", capacity: 3, body: idAtNames);
 }

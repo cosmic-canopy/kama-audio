@@ -407,8 +407,9 @@ type value SlotCell<T: value> {
 //   the program's side, as the ring's is. Nothing is allocated per value, so the audio thread never allocates
 //   (decision 5).
 // - **A value is put at the slot an id names, at the id's generation,** and only into an empty slot.
-// - **A read or a removal names the generation the value was put at.** An id of any other generation is refused, so a
-//   command that names a node the audio side no longer holds never reaches the node now in its slot (decision 34).
+// - **A read, a set or a removal names the generation the value was put at.** An id of any other generation is
+//   refused, so a command that names a node the audio side no longer holds never reaches the node now in its slot
+//   (decision 34). `idAt(slot:)` answers the id a slot holds, so a walk over the slots visits every value.
 // - **An id that names no slot of the array, or generation 0, is refused** with `false` or `None`, never a trap: no
 //   live id has generation 0, which marks an empty slot.
 type resource SlotArray<T: value, A: Allocator = GlobalAllocator> {
@@ -480,6 +481,24 @@ type resource SlotArray<T: value, A: Allocator = GlobalAllocator> {
         this.cells[slot].generation = 0;
         this.held = this.held - 1;
         return true;
+    }
+
+    // Replaces the value `id` names with `value`, at the same generation. False when the slot holds no value at the
+    // id's generation, and then nothing changes.
+    public fn bool set(int64 id, T value) {
+        int64 slot = this.cellOf(id: id);
+        if (slot == NONE) { return false; }
+        this.cells[slot].value = value;
+        return true;
+    }
+
+    // The id of the value `slot` holds: the slot and the generation the value was put at. 0 when the slot holds none,
+    // or is not a slot of the array. A walk over every slot visits every value this way.
+    public const fn int64 idAt(int64 slot) {
+        if (slot < 0 || slot >= this.cells.count()) { return 0; }
+        int64 generation = this.cells[slot].generation;
+        if (generation == 0) { return 0; }
+        return idOf(slot: slot, generation: generation);
     }
 
     // How many slots hold a value.

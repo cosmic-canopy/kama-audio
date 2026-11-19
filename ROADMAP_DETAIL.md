@@ -57,6 +57,8 @@ round a loop near its end, not exact to the sample. Web Audio's `AudioBufferSour
   - the slots' (AUD-2): what keeps a node's count, what a drop does when the backlog is full, the generation's
     width, and the table's storage: decided, 34 and 35;
   - how an offline render runs without promises or a thread of its own: decided, 37;
+  - where a node's output samples live while a quantum renders: decided, 38;
+  - which source makes the render's first samples: decided, 39;
   - how an `AudioBuffer`'s samples count against decision 6's sample memory, when a buffer is made to be played;
   - whether cosmic-forge's page is isolated, which decides the route it tests first;
   - the loop seam's test: its fixture, and how a seam is compared.

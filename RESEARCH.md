@@ -1356,3 +1356,68 @@ captions of voice chat as ways to comply. This is a reading of the text, not leg
   or an encoder;
 - a source the program feeds with samples, from a voice model, the OS's synthesis or a decoded remote voice;
 - on the web, the engine's output as a `MediaStreamTrack`, for the browser's recognizer and for WebRTC.
+
+## 11. The render, measured (AUD-29)
+
+Gathered on 2026-11-19 on the Mac for the render's questions (AGENTS.audio.md decisions 38 and 39), on kyoten's pin
+0.9.978, release builds, natively and on wasm under node, the load average about 4 (kama's own session shares the
+machine).
+
+### 11.1 Where the engines keep a node's samples, from their sources
+
+Read by a research agent from each engine's source at its head on 2026-11-19 (Chromium 753a4957, Gecko ec287ddb,
+WebKit a46cac82, web-audio-api-rs e64160d3):
+- **Chromium and WebKit keep a block per node.** Each `AudioNodeOutput` owns an `AudioBus` of its channel count, and
+  each `AudioNodeInput` a summing bus. A channel-count change reallocates both **on the audio thread**, under the graph's
+  try-lock (`AudioNodeOutput::UpdateInternalBus`). WebKit annotates each such site and forbids allocation on the audio
+  thread only in debug builds. A node renders straight into its consumer's bus when it has one consumer of its channels
+  (in-place). Silence is a flag per channel: one write of zeros, then nothing, and a sum skips a silent input. About
+  1 KiB × nodes × channels. The order is a recursive pull from the destination, with "automatic pull" nodes run after.
+- **Gecko allocates a block on the graph thread when a node writes,** and a silent output is a null chunk of no bytes.
+  A pass-through or a gain shares its input's buffer (`mVolume` carries the gain), and a DelayNode's lasting share makes
+  the node before it allocate every block. **Its order is Pearce's variant of Tarjan's components**, found on the graph
+  thread when the graph changes; a component with no DelayNode is muted (`IN_MUTED_CYCLE`).
+- **web-audio-api-rs keeps a pool of `Rc<[f32; 128]>` channels,** 64 made on the control thread, and **allocates on the
+  render thread when the pool is empty**. Silence is one shared zero buffer. A node's output is added into each
+  consumer's input after it runs, the first shared rather than copied. Its order is a depth-first sort of every node,
+  found again when an edge is added; a cycle's nodes are left out.
+- **So none of them keeps the audio thread from allocating** for a node's samples, as decision 5 asks.
+
+### 11.2 Two layouts, timed (`.scratch/aud29-blocks/`)
+
+*Measured.* The graph is S sources (a saw each), each through its own gain, into one bus gain, into the destination, in
+C channels, 128 frames a quantum. Every layout makes the same samples. The time is per quantum:
+- **A, a block per node:** every node writes its own C × 128 samples, and the bus sums its inputs' blocks;
+- **A2, A with a silent flag per node,** as Chromium's per channel: a silent node writes nothing, and a sum skips it;
+- **B, a pool with pushed sums:** a node takes blocks from a fixed free list and adds its output into its consumer's
+  sum at once, the first handed over whole; its blocks go back as soon as they are read, and silence holds none.
+
+| S, C, silent | A natively | A2 natively | B natively | A on wasm | A2 on wasm | B on wasm | A's bytes | B's blocks used |
+|---|---|---|---|---|---|---|---|---|
+| 64, 2, none | 24.8 µs | 23.8 µs | 26.8 µs | 115 µs | 175 µs | 107 µs | 130 KiB | 3 |
+| 256, 2, none | 92.5 µs | 92.5 µs | 105.6 µs | 165 µs | 152 µs | 176 µs | 514 KiB | 3 |
+| 511, 2, none | 187.6 µs | 189.3 µs | 211.7 µs | 295 µs | 298 µs | 377 µs | 1 MiB | 3 |
+| 511, 2, half | 183.9 µs | 93.3 µs | 105.3 µs | 297 µs | 148 µs | 187 µs | 1 MiB | 3 |
+| 511, 2, all | 186.9 µs | 1.0 µs | 0.3 µs | 298 µs | 2.3 µs | 1.3 µs | 1 MiB | 0 |
+| 511, 6, none | 614 µs | 606 µs | 630 µs | 877 µs | 894 µs | 1,177 µs | 3 MiB | 7 |
+
+- **The arithmetic is the cost, not the layout:** a megabyte of blocks sits in the M4's L2, and with everything sounding
+  a block per node is 10 to 28% faster than the pool, whose take, give-back and push cost more than the cache saves.
+- **Silence is what tells them apart,** and a silent flag gives a block per node the pool's advantage: with half the
+  sources silent, A2 takes 93 µs and B 105.
+- **The pool holds 32 times less:** 3 blocks for 511 stereo sources, where a block per node holds a megabyte.
+- The first wasm row is noisy (A2 slower than A with nothing silent); the rest agree with the native rows.
+
+### 11.3 The order's search, timed (`.scratch/aud29-order/`)
+
+*Measured* through the real engine and its public API: an offline context of N gains and E connections renders one
+quantum an update, and an update whose flush carries one new connection runs the search, where one with nothing to
+apply does not. The difference of their means:
+
+| N, E | DAG natively | random natively | DAG on wasm | random on wasm |
+|---|---|---|---|---|
+| 1,024, 4,096 | 27 µs | 39 µs | 40 µs | 50 µs |
+| 4,096, 16,384 | 172 µs | 203 µs | 199 µs | 244 µs |
+
+Before `Slots`' indexer skipped its division for an index in range, the first row took 43 µs and 56 µs natively, and
+without the division at all 28 µs and 25 µs: the division was over half of the search.

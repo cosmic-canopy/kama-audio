@@ -25,8 +25,8 @@ It is the audio half of kyoten's rule that each engine module is built on a gene
 
 **Seeded on 2026-11-13 with `kama seed` on kama 0.9.938+g94365be5 (kyoten's pin). The design pass is done
 (2026-11-15): areas 1 to 5 are decided (§ Decided, 1 to 30), and so are the first slice's module cut (31) and its
-command protocol's timing (32 and 33), its slots (34 and 35), the program's memory (36) and the offline render
-(37),** on the evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This repository's documents, each to one purpose:
+command protocol's timing (32 and 33), its slots (34 and 35), the program's memory (36), the offline render (37),
+where a node's samples live (38) and the first source (39),** on the evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This repository's documents, each to one purpose:
 - [FEATURES.md](FEATURES.md) is every feature the library will have, with its rungs, status, example, test and budget
   (decision 27);
 - [ROADMAP.md](ROADMAP.md) is the order, by example (decision 28), and [ROADMAP_DETAIL.md](ROADMAP_DETAIL.md) its
@@ -330,7 +330,8 @@ command protocol's timing (32 and 33), its slots (34 and 35), the program's memo
     primitive, its ids 32 + 32 bits (34), and a dropped node's release sent after the backlog (35);
   - on 2026-11-18, the program's memory as callbacks, `AudioMemory` (36), and kyoten's pin at 0.9.978 on both
     machines, for `try new` into a `Shared` (KR-399 to KR-402);
-  - on 2026-11-19, the offline render as a request the program polls, advanced by `update()` (37).
+  - on 2026-11-19, the offline render as a request the program polls, advanced by `update()` (37), a node's output
+    samples in a block of its own drawn at the make (38), and `ConstantSourceNode` as the first source (39).
 - **Found on the way: KAUD-7, KAUD-8, KAUD-9 and KAUD-10.**
   - std's collections trap when their allocator has no room (KAUD-7, kama's KR-403, briefed). So every declared
     capacity takes its storage as the ring's does, through `Slots`, since 2026-11-18 in the internal module
@@ -345,9 +346,9 @@ command protocol's timing (32 and 33), its slots (34 and 35), the program's memo
   - std's `FixedArray` traps when its allocator has no room, as KAUD-7's collections do, so the slot array takes its
     storage through `Slots` too.
 - **Next:**
-  - **the render's next slices** (decision 37): the render running the order, each node's output summed into the
-    inputs it feeds and the destination's into the output, which needs the owner's answer on where a node's output
-    samples live (decisions 5 and 6); then a source, so a render is not silence, and the first golden. **The first node that renders different samples into different channels
+  - **the render's next slices** (decisions 37 to 39): the render running the order over a block per node (38), each
+    node summing its inputs, the destination's sum copied into the output; then `ConstantSourceNode` (39), so a render
+    is not silence; then the buffer player and the first golden. **The first node that renders different samples into different channels
     brings the case that catches `blockAt` reading channel 0,** the one mutation of the render's first slice no case
     can see yet, **and the first timed call brings the case that catches `frameAt` taking a negative time,** equivalent
     for suspend; **The `AudioBuffer`'s sample memory is the owner's question,** asked when a
@@ -1370,6 +1371,35 @@ Those questions stay in kyoten's `audio.md`.
       - It gives FEATURES.md's "an open length rendered in chunks" its mechanism.
     - **What it pulls forward:** `update()` (AUD-5) becomes the offline render's driver as well as the way back's reader,
       and the flush and the read become public through it.
+38. **Decided on 2026-11-19: a node's output samples live in a block of its own, drawn at the make** (AUD-29, the render;
+    decisions 5, 6 and 19). Each quantum every node writes its samples and the nodes after it read them; a node carries
+    1 to 32 channels, and its count changes as it plays (a stereo buffer makes everything after it stereo). Every engine
+    surveyed allocates on the audio thread for this (RESEARCH.md § 11.1), so none could be copied. Offered a block per
+    node, with a silent flag, or a shared pool with pushed sums, both timed (§ 11.2), the owner took the recommendation.
+    - **Each node's slot has an output block, drawn with the context at the make** (decision 6): a quantum for each of
+      a declared most channels per node, a context option. Its default is 2, or the context's channels when it has more.
+      So the render's sample memory is the slots times that many quanta: 1 MiB at 1,024 rows in stereo.
+    - **It never runs out while rendering.** A node whose channels would pass the declared most is down-mixed to it by Web
+      Audio's speaker rules, and counted, so a program that carries more channels declares more.
+    - **A silent flag per block,** as Chromium's per channel: a silent node writes nothing, and a sum skips it, so silence
+      costs about what a pool's costs.
+    - **Why:**
+      - With everything sounding, a block per node was 10 to 28% faster than the pool, the arithmetic being the cost and a
+        megabyte of blocks sitting in L2; with the flag, it matched the pool with half the sources silent (93 µs and
+        105 µs a quantum at 511 stereo sources natively, 148 and 187 on wasm).
+      - It cannot run out at a graph's shape, where a pool would need a reported silence at its limit, and a program
+        sizes it from what it declares, not from what it measured.
+      - Each node owning its output is what declared render workers need (decision 19): a pool's shared sums would make
+        workers contend.
+      - The pool's one gain was memory, 32 times less (3 blocks for 511 stereo sources).
+39. **Decided on 2026-11-19: the render's first source is Web Audio's `ConstantSourceNode`** (AUD-29, the render). Until
+    a source exists, every render is silence. Offered `ConstantSourceNode` first or `AudioBufferSourceNode` directly, the
+    owner took the recommendation.
+    - **`ConstantSourceNode` makes the render's first samples:** a constant, set at its make (its `offset` option; the
+      `AudioParam` comes with parameters), started and stopped on exact frames with `start(when:)` and `stop(when:)`, its
+      end reported on the way back, and a released one kept while it plays.
+    - **Why:** the buffer player needs every one of those pieces, and this one needs no answer on how a buffer's samples
+      count against the sample memory. It pulls the constant source forward from the synth example to the loop.
 
 ## Where the truth is
 

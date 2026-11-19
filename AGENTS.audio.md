@@ -127,10 +127,11 @@ where a node's samples live (38) and the first source (39),** on the evidence in
       `OfflineAudioContext`;
     - the engine's order, Web Audio's ordered node list, with every cycle muted, a sixteenth part;
     - the store's indexer skipping its division for an index in range, measured;
-    - 10 `destination` cases (`tests/src/destination_tests.kama`) and 3 `nodes` cases sharpened to sixteen parts, each
-      seen red against a stub first.
+    - 11 `destination` cases (`tests/src/destination_tests.kama`) and 3 `nodes` cases sharpened to sixteen parts, each
+      seen red against a stub first, or, for the cycles reached through their feeder, against the mutation it was
+      written for.
 
-  132 cases, green on every leg: native debug and release, wasm debug and release.
+  133 cases, green on every leg: native debug and release, wasm debug and release.
 - **Settled while building the table, reported to the owner to object to** (each within decisions 34 and 35):
   - the name `SlotTable`, and its calls: `take()`, `countUp(id:)`, `countDown(id:)`, `nextRelease()`, `free(id:)`,
     `countOf(id:)`, `length()`, `capacity()`, `retired()`;
@@ -281,6 +282,12 @@ where a node's samples live (38) and the first source (39),** on the evidence in
   - **two more seams, thirteen in all:** `audiotests::orderAtIn` and `mutedIn`. `audioHeldIn` counts the program's
     nodes the audio side holds, the destination not among them.
 - **Proved by mutation:**
+  - the destination and the render's order (`.scratch/aud29/mutate_order.py`, through the whole gate): **72 of 77
+    caught,** 3 by a hang, none refused by kama, the other 5 equivalent. The first pass caught 71 of 78. One miss showed
+    every cycle reached from its own lowest slot, now written as cycles reached through their feeder; one was a
+    redundant clearing, now gone. The equivalents: a node made muted (the search writes it first), the search every
+    quantum or left due (cost only), a muted node never unmuted (until `disconnect()`), and the 2^32-row guard (held
+    by review).
   - the ring and the backlog (`.scratch/aud29/mutate_ring.py`, through the whole gate): 38 of 39 mutations of
     `src/rt/ring.kama` are caught, none by a hang.
     - **The miss is the publish made relaxed,** a weak-memory race: caught in one run, missed in the next. So the

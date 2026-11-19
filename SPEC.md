@@ -641,8 +641,8 @@ Audio's `AudioDestinationNode`, its `destination` attribute, and its rendering a
   and 244 µs on wasm. Half of the first measurement was the store's division on every access, which an index in range
   now skips (§ The modules, `audio::store`). An incremental order, which leaves the order as it is for a connection
   that already runs with it, can replace the search later with no change to the API.
-- **Tested** (`tests/src/destination_tests.kama`, the `destination` cases, 10 of them, each seen red against a stub
-  first):
+- **Tested** (`tests/src/destination_tests.kama`, the `destination` cases, 11 of them, each seen red against a stub
+  first, or, for the cycles the search reaches through their feeder, against the mutation it was written for):
   - its channel count, and the most it can be set to, is the context's, at 1, 6 and 32 channels;
   - a gain connects to it and it to a gain, sent as connections to and from the slot past the table's rows, the same
     connection sent once;
@@ -656,6 +656,7 @@ Audio's `AudioDestinationNode`, its `destination` attribute, and its rendering a
     the destination, a node feeding two of them, and a node that reaches nothing, in the order too;
   - a node connected to itself, a cycle of two and a cycle of three are muted and left out, and a node feeding a
     cycle and one a cycle feeds are not;
+  - cycles the search reaches through the node that feeds them, not from their own lowest slot, are muted too;
   - the destination in a cycle is muted like any node;
   - a make, a connect and a free each re-order the graph, and a slot taken again holds a node that is not muted.
 
@@ -795,3 +796,26 @@ no step up, each turns a quantum's boundary case red.
   or below is always at or before the current time, which suspend refuses as `InvalidState` either way. The first
   guard is `frameAt`'s answer for the timed calls to come, and the first of them, a source's `start(when:)` with a
   negative time, Web Audio's `RangeError`, brings the case that catches it.
+
+### The destination and the render's order
+
+Each of 78 mutations of the destination held from the make, the order's search and when it runs, the seams' reads
+(`src/graph/engine.kama`), the destination's slot and id, the parts kept by slot and `connectFrom`
+(`src/graph/graph.kama`), the destination's handle (`src/destination.kama`) and the store's fast path
+(`src/store/slots.kama`) runs through the whole gate (`.scratch/aud29/mutate_order.py`), and each file is restored byte
+for byte after each. **The first pass caught 71 of 78, 3 by a hang, and kama refused none.** Of its 7 misses:
+- **one showed a case too loose,** now written: every cycle was reached from its own lowest slot, so a search that
+  numbered every slot it reached after the first the same still closed each cycle whole. A cycle of two and one of
+  three reached through the node that feeds them catch it, and the rerun catches both mutations of the count;
+- **one was redundant code, now gone:** clearing each slot's `open` before a search, since every search closes every
+  slot it opens;
+- **five are equivalent:**
+  - a node made muted, since the search, due in the quantum of every make, writes every held node's muting before
+    anything reads it;
+  - the search run in every quantum, or left due, which orders nothing differently and only costs more;
+  - a muted node never unmuted: a cycle breaks only when its nodes are freed, until `disconnect()` comes, and its case
+    comes with it;
+  - `nodeCapacity` of 2^32 or more taken: no allocator a test can hand has room for 2^32 rows, and both ways answer
+    `OutOfMemory`, so the guard is held by review.
+
+**72 of 77 caught, 3 by a hang; the other 5 equivalent.**

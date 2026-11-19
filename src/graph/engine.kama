@@ -276,7 +276,6 @@ type resource Engine {
         int64 slot = 0;
         while (slot < slots) {
             this.marks[slot].visited = -1;
-            this.marks[slot].open = false;
             this.marks[slot].loops = false;
             slot = slot + 1;
         }

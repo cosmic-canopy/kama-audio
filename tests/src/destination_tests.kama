@@ -346,6 +346,56 @@ fn string cyclesMuted(ref OfflineAudioContext context) {
     return orderHolds(context: context, want: 3);
 }
 
+// Cycles the search reaches through the node that feeds them, not from their own lowest slot, are muted too: a gain at
+// slot 0 feeds a cycle of two (slots 1 and 2) and a cycle of three (slots 3, 4 and 5), and the cycle of two feeds the
+// destination. Only the feeder and the destination sound.
+fn string deepCyclesMuted(ref OfflineAudioContext context) {
+    AudioDestinationNode d = context.destination();
+    Result<GainNode, AudioError> r0 = GainNode.make(context: context);
+    GainNode f = match (give r0) { case Ok(value: g): give g; case Err(error: e): { return "the feeder was refused"; } };
+    Result<GainNode, AudioError> r1 = GainNode.make(context: context);
+    GainNode a = match (give r1) { case Ok(value: g): give g; case Err(error: e): { return "gain 1 was refused"; } };
+    Result<GainNode, AudioError> r2 = GainNode.make(context: context);
+    GainNode b = match (give r2) { case Ok(value: g): give g; case Err(error: e): { return "gain 2 was refused"; } };
+    Result<GainNode, AudioError> r3 = GainNode.make(context: context);
+    GainNode c = match (give r3) { case Ok(value: g): give g; case Err(error: e): { return "gain 3 was refused"; } };
+    Result<GainNode, AudioError> r4 = GainNode.make(context: context);
+    GainNode e4 = match (give r4) { case Ok(value: g): give g; case Err(error: e): { return "gain 4 was refused"; } };
+    Result<GainNode, AudioError> r5 = GainNode.make(context: context);
+    GainNode e5 = match (give r5) { case Ok(value: g): give g; case Err(error: e): { return "gain 5 was refused"; } };
+    string why = lands(context: context, sent: 6);
+    if (!why.isEmpty()) { return "the makes: ${why}"; }
+    why = taken(r: f.connect(destination: a), what: "0 to 1");
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: a.connect(destination: b), what: "1 to 2");
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: b.connect(destination: a), what: "2 to 1");
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: f.connect(destination: c), what: "0 to 3");
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: c.connect(destination: e4), what: "3 to 4");
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: e4.connect(destination: e5), what: "4 to 5");
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: e5.connect(destination: c), what: "5 to 3");
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: b.connect(destination: d), what: "2 to the destination");
+    if (!why.isEmpty()) { return why; }
+    why = lands(context: context, sent: 8);
+    if (!why.isEmpty()) { return why; }
+    int64 n = 1;
+    while (n <= 5) {
+        why = mutedOut(context: context, node: gainAt(n: n), what: "gain ${n}, in a cycle the feeder reaches");
+        if (!why.isEmpty()) { return why; }
+        n = n + 1;
+    }
+    why = sounds(context: context, node: gainAt(n: 0), what: "the feeder");
+    if (!why.isEmpty()) { return why; }
+    why = sounds(context: context, node: destinationOf(nodes: 8), what: "the destination");
+    if (!why.isEmpty()) { return why; }
+    return orderHolds(context: context, want: 2);
+}
+
 // The destination in a cycle is muted like any node: a gain feeding it and fed by it.
 fn string destinationInCycle(ref OfflineAudioContext context) {
     AudioDestinationNode d = context.destination();
@@ -431,6 +481,8 @@ fn void destinationTests(ref Tally t) {
               nodes: 8, backlog: 32, connections: 8, body: feedsFirst);
     withLinks(t: t, name: "destination: a cycle with no delay is muted and left out of the order, and what it feeds is not",
               nodes: 12, backlog: 32, connections: 16, body: cyclesMuted);
+    withLinks(t: t, name: "destination: cycles the search reaches through their feeder are muted too", nodes: 8,
+              backlog: 32, connections: 16, body: deepCyclesMuted);
     withLinks(t: t, name: "destination: the destination in a cycle is muted like any node", nodes: 4, backlog: 16,
               connections: 4, body: destinationInCycle);
     withLinks(t: t, name: "destination: a make, a connect and a free each re-order the graph", nodes: 2, backlog: 16,

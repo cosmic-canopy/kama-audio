@@ -433,8 +433,12 @@ where a node's samples live (38) and the first source (39),** on the evidence in
     more channels; a parameter's events with `AudioParam`;
   - then the context's options and memory (AUD-4) and `update()` (AUD-5).
 - **Read first:** § Decided (4, 6, 9 and 32 to 39 above all), SPEC.md § Contexts and nodes, § The commands, § The
-  audio side and the way back, § Connections and § The offline render, ROADMAP_DETAIL.md § AUD-29, and the probes it starts from (`aud-probe-cmd` for the
-  commands and the way back, `aud-probe-routes` for slots and a block split at a frame).
+  audio side and the way back, § Connections, § The offline render, § The destination and the render's order and § The
+  render and the first source, ROADMAP_DETAIL.md § AUD-29, RESEARCH.md § 11 (the engines' render memory and the
+  layouts timed), and the probes it starts from (`aud-probe-cmd` for the commands and the way back, `aud-probe-routes`
+  for slots and a block split at a frame, `aud29-order` and `aud29-blocks` for the render's costs). For `AudioParam`,
+  Web Audio's automation algorithm (its § AudioParam, the timeline's events and how each computes its value) is the
+  text to read before the questions are asked.
 - **Each slice checks the owner's games for code it can take** (2026-11-18, after the owner asked why audio came so
   fast in them). `../friendly-fire-department/audio/` and `../the-mallow-man/audio/` each answer one game: a fixed set
   of commands, a ring that drops when full, and the web leg rendered on the page's thread. But parts of them fit rungs

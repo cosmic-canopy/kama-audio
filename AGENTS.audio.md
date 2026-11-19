@@ -121,7 +121,16 @@ command protocol's timing (32 and 33), its slots (34 and 35), the program's memo
       The first build reported pending where a suspend's frame was reached on an update's last quantum: the render now
       checks after each quantum.
 
-  122 cases, green on every leg: native debug and release, wasm debug and release.
+  - on 2026-11-19, **the destination and the render's order** (decisions 3, 4, 6 and 37; SPEC.md § The destination and
+    the render's order):
+    - `audio::AudioDestinationNode` (`src/destination.kama`) and `destination()` on `BaseAudioContext` and
+      `OfflineAudioContext`;
+    - the engine's order, Web Audio's ordered node list, with every cycle muted, a sixteenth part;
+    - the store's indexer skipping its division for an index in range, measured;
+    - 10 `destination` cases (`tests/src/destination_tests.kama`) and 3 `nodes` cases sharpened to sixteen parts, each
+      seen red against a stub first.
+
+  132 cases, green on every leg: native debug and release, wasm debug and release.
 - **Settled while building the table, reported to the owner to object to** (each within decisions 34 and 35):
   - the name `SlotTable`, and its calls: `take()`, `countUp(id:)`, `countDown(id:)`, `nextRelease()`, `free(id:)`,
     `countOf(id:)`, `length()`, `capacity()`, `retired()`;
@@ -253,6 +262,24 @@ command protocol's timing (32 and 33), its slots (34 and 35), the program's memo
     suspended flush and read the way back but render nothing;
   - **`currentTime()` is on `OfflineAudioContext`,** the frames rendered over the rate; `BaseAudioContext` gains it with
     the real-time context.
+- **Settled while building the destination and the order, reported to the owner to object to** (each within decisions
+  3, 4, 6 and 37, on Web Audio's text):
+  - **the destination takes no row in the program side's table,** where the session's plan had said one more row:
+    a program never makes or releases it, so a counted row would hold nothing a program does. Its handle holds the
+    context's state, the audio side holds it from the make at the slot past the table's rows, and `nodeCapacity` stays
+    the nodes a program makes. A `nodeCapacity` of 2^32 or more leaves its slot no id, and is `OutOfMemory`;
+  - **`destination()` is a member of `BaseAudioContext`,** as Web Audio's `destination` attribute is, and the node
+    answers `channelCount()` and `maxChannelCount()`, both the context's channels; it has an output, as Web Audio's
+    does, so it connects onward;
+  - **the order holds every node, reaching the destination or not** (Web Audio §1.5), and a node in a cycle, the
+    destination too, is muted and left out;
+  - **the order is one Tarjan search over the whole graph, run in a quantum that changed it,** as Gecko's is: 27 to
+    39 µs natively and 40 to 50 µs on wasm at 1,024 nodes and 4,096 connections, 1 to 2% of a quantum; 172 to 244 µs
+    at 4,096 nodes. An incremental order can replace it with no change to the API;
+  - **`Slots`' indexer skips its division for an index in range,** which was over half of the search; a ring's counter
+    past the end still takes it, and every element is the same;
+  - **two more seams, thirteen in all:** `audiotests::orderAtIn` and `mutedIn`. `audioHeldIn` counts the program's
+    nodes the audio side holds, the destination not among them.
 - **Proved by mutation:**
   - the ring and the backlog (`.scratch/aud29/mutate_ring.py`, through the whole gate): 38 of 39 mutations of
     `src/rt/ring.kama` are caught, none by a hang.
@@ -318,8 +345,9 @@ command protocol's timing (32 and 33), its slots (34 and 35), the program's memo
   - std's `FixedArray` traps when its allocator has no room, as KAUD-7's collections do, so the slot array takes its
     storage through `Slots` too.
 - **Next:**
-  - **the render's next slices** (decision 37): the `AudioDestinationNode`, which the render sums into the output, with Web Audio's muting of a cycle that has no delay; then a source, so a render
-    is not silence, and the first golden. **The first node that renders different samples into different channels
+  - **the render's next slices** (decision 37): the render running the order, each node's output summed into the
+    inputs it feeds and the destination's into the output, which needs the owner's answer on where a node's output
+    samples live (decisions 5 and 6); then a source, so a render is not silence, and the first golden. **The first node that renders different samples into different channels
     brings the case that catches `blockAt` reading channel 0,** the one mutation of the render's first slice no case
     can see yet, **and the first timed call brings the case that catches `frameAt` taking a negative time,** equivalent
     for suspend; **The `AudioBuffer`'s sample memory is the owner's question,** asked when a

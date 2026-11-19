@@ -39,8 +39,12 @@ type resource Slots<T: value, A: Allocator> {
         };
     }
 
-    // The element a monotonic counter `at` names: the counter masked at the array.
-    @noheap public unsafe ref T operator[](int64 at) { return this.data[cast<isize>(at % this.cap)]; }
+    // The element a monotonic counter `at` names: the counter masked at the array. An index already in the array, as
+    // every part kept by slot uses, skips the division, which was over half of the render order's search (measured,
+    // `.scratch/aud29-order/`); the element is the same either way.
+    @noheap public unsafe ref T operator[](int64 at) {
+        return this.data[cast<isize>(at >= 0 && at < this.cap ? at : at % this.cap)];
+    }
 
     public const fn int64 count() { return this.cap; }
 

@@ -1,0 +1,44 @@
+// audio::AudioDestinationNode, Web Audio's `AudioDestinationNode` (decision 3): the context's own node, whose input is
+// what the context renders.
+//
+// - **Every context has one, made with it,** and a program reaches it as Web Audio's `destination` attribute:
+//   `context.destination()`. A program never makes one and never releases one, so it takes no row in the program
+//   side's table (decision 34). The audio side holds it from the make, at the slot past the table's rows, and, never
+//   released, it can always sound (decision 4).
+// - **A handle holds the context's state,** as a node's does: `copy` shares it, and the state lives while any handle,
+//   the context's or a node's, holds it. Dropping every handle to the destination releases nothing.
+// - **One input and one output,** Web Audio's `numberOfInputs` and `numberOfOutputs`: a node connects to it, and it
+//   connects onward, with `AudioNode`'s refusals. Its output is its input's sum.
+// - **Its channel count is the context's `numberOfChannels`,** mode `explicit` and interpretation `speakers`, which an
+//   offline context's destination cannot change. `channelCount()` and `maxChannelCount()` answer it; the mode and the
+//   interpretation come with the channel rules, and a setter with the real-time context's destination.
+
+import { audio::graph::ContextState, audio::graph::NodeLink, audio::graph::ContextKey, AudioNode, AudioError, AudioMemory,
+         std::memory::Shared };
+
+export { AudioDestinationNode };
+
+type resource AudioDestinationNode implements AudioNode, Copyable<This>(bare: give) {
+    Shared<ContextState, AudioMemory> state;
+
+    // The destination of the context whose state is `state`. Its type is in `audio::graph`, so only the package makes
+    // one.
+    public ctor of(Shared<ContextState, AudioMemory> state) { this.state = give state; }
+
+    public ctor copy(ref AudioDestinationNode source) { this.state = copy source.state; }
+
+    // Web Audio's `channelCount`: the context's channels.
+    public const fn int32 channelCount() { return this.state.channels(); }
+
+    // Web Audio's `maxChannelCount`: the most `channelCount` can be, for an offline context its own.
+    public const fn int32 maxChannelCount() { return this.state.channels(); }
+
+    // Connects the destination's output to `destination`'s input (`AudioNode`'s contract).
+    public fn Result<Unit, AudioError> connect(AudioNode destination) {
+        return this.state.connectFrom(from: this.state.destination(), destination: destination);
+    }
+
+    public unsafe const fn NodeLink linkFor(ContextKey key) {
+        return NodeLink.make(state: this.state.where(), id: this.state.destination());
+    }
+}

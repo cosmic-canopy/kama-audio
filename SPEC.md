@@ -24,11 +24,11 @@ Decision 31 sets the first cut:
 
 | Module | What it holds |
 |---|---|
-| `audio` | the lower tier, Web Audio's graph under Web Audio's names: `AudioMemory`, `BaseAudioContext`, `OfflineAudioContext`, `OfflineAudioContextOptions`, `AudioError`, `AudioNode`, `GainNode`, `AudioBuffer`, `RenderRequest`, `RenderStatus` |
+| `audio` | the lower tier, Web Audio's graph under Web Audio's names: `AudioMemory`, `BaseAudioContext`, `OfflineAudioContext`, `OfflineAudioContextOptions`, `AudioError`, `AudioNode`, `AudioDestinationNode`, `GainNode`, `AudioBuffer`, `RenderRequest`, `RenderStatus` |
 | `audio::sound` | the upper tier: sounds, voices, buses, snapshots and emitters. Not made yet |
 | `audio::rt` | the real-time primitives that the engine and a program's own DSP share: `Ring`, `Backlog`, `SlotTable`, `SlotArray`, `CapacityError`, `slotOf`, `generationOf` |
-| `audio::store` | **internal**: `Slots`, the storage under every declared capacity, taken once from the allocator a part is handed and never grown. std's collections cannot serve, since each traps when its allocator has no room (KAMA_GAPS.md KAUD-7) |
-| `audio::graph` | **internal**: what a context and its nodes share, `ContextState`, `NodeHold`, `NodeLink`, the commands (`Command` and `NodeKind`), `Connections` and `Samples`; and the audio side, `Engine`, `EngineNode`, the lifetime walk's `Mark` and the way back's `Event`. The package's own modules import it, and no program can |
+| `audio::store` | **internal**: `Slots`, the storage under every declared capacity, taken once from the allocator a part is handed and never grown. std's collections cannot serve, since each traps when its allocator has no room (KAMA_GAPS.md KAUD-7). Its indexer masks a ring's counter at the array, and an index already in the array, as every part kept by slot uses, skips the division |
+| `audio::graph` | **internal**: what a context and its nodes share, `ContextState`, `NodeHold`, `NodeLink`, the commands (`Command` and `NodeKind`), `Connections` and `Samples`; and the audio side, `Engine`, `EngineNode`, the marks of the lifetime walk and the order's search (`Mark`) and the way back's `Event`. The package's own modules import it, and no program can |
 
 ## The command protocol's two halves
 
@@ -252,6 +252,7 @@ last of them is dropped, the context's own handle included.
 it: a derived type may add no public member, and each context adds its own. A node is made from any context through
 it. Its members:
 - `sampleRate()`, in Hz;
+- `destination()`, Web Audio's `destination` (§ The destination and the render's order);
 - `stateFor(key:)`, the state a node holds. Its key's type is in `audio::graph`, which no program can import, so only
   the package can call it.
 
@@ -262,7 +263,8 @@ it. Its members:
   - `numberOfChannels`, 1 by default;
   - `length`, in sample frames;
   - `sampleRate`, in Hz;
-  - `nodeCapacity`, the nodes it can hold at once, 1,024 by default: the rows of its slot table (decisions 6, 34);
+  - `nodeCapacity`, the nodes a program can hold at once, 1,024 by default: the rows of its slot table (decisions 6,
+    34). The destination is the context's own, besides;
   - `ringCapacity`, the commands that can cross to the audio side at once, 1,024 by default: its command ring
     (decision 7);
   - `backlogCapacity`, the commands that can wait for a flush, 4,096 by default: its backlog (decisions 8, 33);
@@ -271,11 +273,12 @@ it. Its members:
   - `framesPerUpdate`, the frames an `update()` renders at least, in whole quanta, 8,192 by default (decision 37);
   - `suspendCapacity`, the suspends its render can have scheduled at once, 64 by default (decisions 6 and 37);
   - `memory`, `AudioMemory.global()` by default.
-- **What a make takes:** fifteen parts, drawn from `options.memory` once each and in this order: the slot table, the
+- **What a make takes:** sixteen parts, drawn from `options.memory` once each and in this order: the slot table, the
   command ring, the backlog, the way back, the program side's connections (the connections and a list head for each
-  node row, two allocations), the audio side (its array of nodes, its connections, two allocations, the lifetime
-  walk's marks, and its block, a quantum for each channel), the render's output (its samples and the box that counts
-  them), its suspends, then the state. The way back, the array, the list heads and the marks each have `nodeCapacity` places. The
+  slot, two allocations), the audio side (its array of nodes, its connections, two allocations, the marks of the
+  lifetime walk and the order's search, the render's order, and its block, a quantum for each channel), the render's
+  output (its samples and the box that counts them), its suspends, then the state. The way back has `nodeCapacity`
+  places; the array, the list heads, the marks and the order have one more, the destination's slot. The
   state is one `Shared`, made by `try new(allocator:)`, that holds the rest. All go back with the last hold, but the
   output's, which an `AudioBuffer` may still hold.
 - **What a make answers instead** (`audio::AudioError`), with nothing left allocated:
@@ -284,11 +287,12 @@ it. Its members:
     below one is the same, and so is a `framesPerUpdate` or a `suspendCapacity` below one;
   - `OutOfMemory` when the memory has no room for a part. Every part taken before it goes back. A capacity whose
     bytes no `usize` can hold, and an output whose samples no `isize` can count, are `OutOfMemory` too, before the
-    allocator is asked: never a size that overflowed.
-- **What it answers:** `sampleRate()`, `length()` and `numberOfChannels()`, as it was made.
+    allocator is asked: never a size that overflowed. So is a `nodeCapacity` of 2^32 or more, which would leave the
+    destination's slot no id.
+- **What it answers:** `sampleRate()`, `length()` and `numberOfChannels()`, as it was made, and `destination()`.
 - **Its render:** `startRendering()`, `update()`, `suspend(suspendTime:)`, `resume()` and `currentTime()` (§ The offline
   render).
-- **The test seam:** eleven `friend` grants to the tests program:
+- **The test seam:** thirteen `friend` grants to the tests program:
   - `audiotests::rowsHeldIn` reads its rows held;
   - `audiotests::releaseDueIn` takes its next release due straight from the table;
   - `audiotests::flushIn` flushes it;
@@ -299,7 +303,9 @@ it. Its members:
   - `audiotests::forgeIn` adds a command no call would send, a make or a release of any id, to its backlog, and
     `audiotests::forgeConnectIn` a connection between any ids;
   - `audiotests::markIn` writes a value into its render's output at a channel and frame in range, where silence could
-    not show a render's overrun or a read of the wrong channel or frame.
+    not show a render's overrun or a read of the wrong channel or frame;
+  - `audiotests::orderAtIn` reads the node at a position in its render's order, and `audiotests::mutedIn` whether a
+    node is muted.
 
 ### `audio::GainNode`
 
@@ -575,7 +581,7 @@ deleted once nothing references it and then disconnects its outputs).
   - each channel adds a quantum to the engine's block and its length to the output: two channels of 1,000 frames take
     4,512 bytes more than one.
 
-  The `nodes` cases cover the fifteen parts, a `framesPerUpdate` or `suspendCapacity` below one, and an output of 32
+  The `nodes` cases cover the fifteen parts (sixteen since the render's order), a `framesPerUpdate` or `suspendCapacity` below one, and an output of 32
   channels of 2^62 frames, `OutOfMemory`. A `command-ring` case covers a capacity whose bytes no `usize` can hold.
 - **Suspending, tested** (`tests/src/suspend_tests.kama`, the `suspend` cases, 12 of them, each seen red against a
   stub first, or, for the two at each quantum's first frame after its start, against the rule they were written for):
@@ -593,6 +599,67 @@ deleted once nothing references it and then disconnects its outputs).
   - a resume before the start is `InvalidState`, and one while running changes nothing;
   - with every declared suspend held, one more is `TooManySuspends`, and a reached one frees its place;
   - the current time is the frames rendered over the rate.
+
+## The destination and the render's order
+
+**Every context has a destination, and its render runs its nodes in Web Audio's order** (decisions 3, 4, 6 and 37; Web
+Audio's `AudioDestinationNode`, its `destination` attribute, and its rendering algorithm's ordered node list).
+
+### `audio::AudioDestinationNode`
+
+- **The context's own node, made with it.** A program reaches it as Web Audio's `destination` attribute,
+  `context.destination()` (`BaseAudioContext`'s member), and never makes or releases one. So it takes no row in the
+  program side's table: `nodeCapacity` counts the nodes a program makes. The audio side holds it from the make, at the
+  slot past the table's rows (its id that slot at generation 1), and no command makes it.
+- **A handle holds the context's state,** as a node's does, `Copyable` with a bare hand-off that moves. Dropping every
+  handle releases nothing, so the destination is never freed, and it can always sound (§ The lifetime rule): a
+  released node it feeds is kept, and a released node feeding it is freed, since a node's outputs keep nothing alive.
+- **One input and one output,** Web Audio's: a node connects to it, and it connects onward, through `AudioNode`'s
+  `connect(destination:)` with its refusals. Its output is its input's sum (with the render's samples, to come).
+- **Its channels are the context's:** `channelCount()` and `maxChannelCount()` both answer `numberOfChannels`, Web
+  Audio's for an offline context, whose mode is `explicit` and interpretation `speakers` and cannot change. The mode,
+  the interpretation and a setter come with the channel rules and the real-time context.
+
+### The render's order
+
+- **Every node the audio side holds, each after every node that feeds it,** whether or not it reaches the destination:
+  Web Audio's processing happens "regardless of whether these outputs ultimately reach an AudioContext's
+  AudioDestinationNode" (§1.5).
+- **A node in a cycle is muted and left out of the order,** as Web Audio's rendering algorithm mutes a cycle with no
+  `DelayNode`, and no `DelayNode` exists yet: a node connected to itself, and every node of a cycle of any length, the
+  destination included. A node feeding a cycle, and one a cycle feeds, are not.
+- **One search finds both,** Tarjan's strongly connected components along the outputs, as Gecko's graph orders its
+  tracks (Pearce's variant). A component closes only after every component it feeds, so the order is the closing order
+  reversed, and a component of more than one node, or a node connected to itself, is a cycle. Its stacks are in the
+  marks' storage, one a slot, so it neither recurses nor allocates; the order is a declared part, one a slot.
+- **It runs in a quantum that changed the graph,** after its commands and the lifetime walk: a make, a connection, or a
+  node freed. A quantum that changes nothing does not search.
+- **What it costs** (`.scratch/aud29-order/`, the real engine through the public API: an update with one new
+  connection less an update with none, release builds, 2026-11-19, load average about 4): at 1,024 nodes and 4,096
+  connections, 27 µs natively on the M4 for a DAG and 39 µs for a random graph, and 40 µs and 50 µs on wasm under node,
+  1 to 2% of a 128-frame quantum at 48 kHz; at 4,096 nodes and 16,384 connections, 172 µs and 203 µs natively, 199 µs
+  and 244 µs on wasm. Half of the first measurement was the store's division on every access, which an index in range
+  now skips (§ The modules, `audio::store`). An incremental order, which leaves the order as it is for a connection
+  that already runs with it, can replace the search later with no change to the API.
+- **Tested** (`tests/src/destination_tests.kama`, the `destination` cases, 10 of them, each seen red against a stub
+  first):
+  - its channel count, and the most it can be set to, is the context's, at 1, 6 and 32 channels;
+  - a gain connects to it and it to a gain, sent as connections to and from the slot past the table's rows, the same
+    connection sent once;
+  - another context's node, or its destination, is refused as `InvalidAccess` both ways, and nothing is sent;
+  - it takes no row: a context of one node row makes one gain, refuses a second as `TooManyNodes`, and the
+    connections to and from the destination land on the audio side, which refuses none;
+  - nothing releases it: with every handle dropped no row is held and no release is due or sent, and the audio side
+    keeps it in the order;
+  - it can sound: a released gain it feeds is kept, and one feeding it is freed;
+  - the order puts every node after the nodes that feed it: a chain fed from the highest slot to the lowest and into
+    the destination, a node feeding two of them, and a node that reaches nothing, in the order too;
+  - a node connected to itself, a cycle of two and a cycle of three are muted and left out, and a node feeding a
+    cycle and one a cycle feeds are not;
+  - the destination in a cycle is muted like any node;
+  - a make, a connect and a free each re-order the graph, and a slot taken again holds a node that is not muted.
+
+  The `nodes` cases cover the sixteenth part.
 
 ## Proved by mutation
 

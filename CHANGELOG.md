@@ -5,6 +5,15 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `audio::AudioDestinationNode`, Web Audio's, and `destination()` on `BaseAudioContext` and `OfflineAudioContext`: the
+  context's own node, made with it, whose channel count is the context's (`channelCount()`, `maxChannelCount()`). A
+  node connects to it and it connects onward; nothing releases it, and it takes no node row, so `nodeCapacity` counts
+  the nodes a program makes (2026-11-19).
+- The render's order, Web Audio's ordered node list: every node after every node that feeds it, found by one search
+  (Tarjan's components) in a quantum that changed the graph. A node in a cycle is muted and left out, as Web Audio
+  mutes a cycle with no `DelayNode`. A context draws sixteen parts at a make, and a `nodeCapacity` of 2^32 or more is
+  `OutOfMemory` (2026-11-19).
+- Faster: a part's index already in range skips the store's division, over half of the order's search (2026-11-19).
 - An offline render suspends at a frame and resumes (decision 37): `OfflineAudioContext.suspend(suspendTime:)`, Web
   Audio's, its four refusals `AudioError::InvalidState` and every declared suspend held the new `TooManySuspends`
   against `OfflineAudioContextOptions.suspendCapacity` (64 by default); `resume()`; `currentTime()`; and

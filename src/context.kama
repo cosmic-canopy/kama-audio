@@ -15,7 +15,7 @@
 //   Audio's `InvalidAccessError`.
 
 import { audio::graph::ContextState, audio::graph::ContextKey, audio::graph::Command, audio::graph::NodeKind,
-         audio::graph::stateFrom, AudioMemory, RenderRequest, std::memory::Shared };
+         audio::graph::stateFrom, AudioMemory, RenderRequest, AudioDestinationNode, std::memory::Shared };
 
 export { BaseAudioContext, OfflineAudioContext, OfflineAudioContextOptions, AudioError };
 
@@ -43,6 +43,9 @@ type contract BaseAudioContext for resource {
     // The sample rate, in Hz, at which the context renders.
     const fn float32 sampleRate();
 
+    // Web Audio's `destination`: the context's own node, whose input the context renders.
+    fn AudioDestinationNode destination();
+
     // The state a node made from this context holds. Only the package can build a key.
     fn Shared<ContextState, AudioMemory> stateFor(ContextKey key);
 }
@@ -52,7 +55,7 @@ type value OfflineAudioContextOptions {
     public int32 numberOfChannels = 1;
     public int64 length = 1;                 // in sample frames
     public float32 sampleRate = 44100;       // in Hz
-    public isize nodeCapacity = 1024;        // the nodes it can hold at once: the slot table's rows (decision 34)
+    public isize nodeCapacity = 1024;        // the nodes a program can hold at once: the slot table's rows (decision 34); the destination is the context's own
     public isize ringCapacity = 1024;        // the commands that can cross to the audio side at once (decision 7)
     public isize backlogCapacity = 4096;     // the commands that can wait for a flush (decisions 8 and 33)
     public isize connectionCapacity = 4096;  // the connections between its nodes at once, four for each node row (decision 6)
@@ -78,7 +81,8 @@ type resource OfflineAudioContext implements BaseAudioContext {
     int64 frames = 1;
 
     // The package's one test seam into a context: the tests program reads its rows and its due releases, flushes it,
-    // reads its ring as the audio side would, renders a quantum on its audio side and reads the way back.
+    // reads its ring as the audio side would, renders a quantum on its audio side, reads the way back, and reads the
+    // render's order.
     friend audiotests::rowsHeldIn[rowsHeld];
     friend audiotests::releaseDueIn[releaseDue];
     friend audiotests::flushIn[flush];
@@ -90,6 +94,8 @@ type resource OfflineAudioContext implements BaseAudioContext {
     friend audiotests::forgeIn[forge];
     friend audiotests::forgeConnectIn[forgeConnect];
     friend audiotests::markIn[mark];
+    friend audiotests::orderAtIn[orderAt];
+    friend audiotests::mutedIn[muted];
 
     private ctor adopt(Shared<ContextState, AudioMemory> state, int32 channels, int64 frames) {
         this.state = give state;
@@ -155,6 +161,9 @@ type resource OfflineAudioContext implements BaseAudioContext {
     // Web Audio's `currentTime`: the frames rendered so far over the sample rate, in seconds.
     public const fn float64 currentTime() { return this.state.currentTime(); }
 
+    // Web Audio's `destination`: the node whose input the context renders, made with the context.
+    public fn AudioDestinationNode destination() { return AudioDestinationNode.of(state: copy this.state); }
+
     public fn Shared<ContextState, AudioMemory> stateFor(ContextKey key) { return copy this.state; }
 
     private const fn isize rowsHeld() { return this.state.rowsHeld(); }
@@ -194,6 +203,12 @@ type resource OfflineAudioContext implements BaseAudioContext {
     private fn bool mark(int32 channel, int64 frame, float32 value) {
         return this.state.mark(channel: channel, frame: frame, value: value);
     }
+
+    // The node at `position` in the render's order, or `None` past its end.
+    private const fn Optional<int64> orderAt(int64 position) { return this.state.orderAt(position: position); }
+
+    // Whether `node` is muted, in a cycle.
+    private const fn bool muted(int64 node) { return this.state.muted(id: node); }
 
     // A connection no call would send, added to the backlog: from `from`'s output to `to`'s input, any ids at all.
     private fn bool forgeConnect(int64 from, int64 to) { return this.state.send(command: Command::Connect(from: from, to: to)); }

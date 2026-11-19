@@ -15,7 +15,7 @@ import { Tally, named, letGo, idAt, quantumIn, pollIn, refusedIn, forgeIn, quant
          refusedSoFar, flushSends, expectSent, expectNothingSent, audio::OfflineAudioContext,
          audio::OfflineAudioContextOptions, audio::AudioError, audio::GainNode };
 
-export { connectTests, forgeConnectIn };
+export { connectTests, forgeConnectIn, LinksCase, withLinks, taken, refusedAs, lands };
 
 // The package's seam: a connection no call would send, added to the backlog.
 fn bool forgeConnectIn(ref OfflineAudioContext context, int64 from, int64 to) {

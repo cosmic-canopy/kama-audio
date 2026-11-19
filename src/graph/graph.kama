@@ -4,7 +4,8 @@
 // - **`ContextState`** is what a context's handles share: the program side's slot table, whose rows count the nodes
 //   (decision 34), the backlog every call's command waits in and the ring a flush moves it into (decisions 7, 8 and
 //   33), the way back the audio side reports on (decision 9), the audio side itself, and the context's fixed
-//   properties. `stateFrom` draws its parts from the program's memory (decision 36), the state itself one block made
+//   properties, its destination among them: the context's own node, at the slot past the table's rows, which takes no
+//   row since a program never makes or releases it. `stateFrom` draws its parts from the program's memory (decision 36), the state itself one block made
 //   by `try new`, all freed with the last hold, the context's or a node's. Its `poll()` reads the way back and gives
 //   each freed node's row back to the table.
 // - **`NodeHold`** is a node's hold on its context's state and on its row: a copy counts the row up, a drop counts it
@@ -23,10 +24,13 @@ export { ContextState, NodeHold, ContextKey, NodeLink, Command, NodeKind, stateF
 
 // The kind of node a `Made` command makes.
 type enum NodeKind {
-    Gain;
+    Gain, Destination;
 
-    public const fn string name() { return match (this) { case Gain: "gain"; }; }
+    public const fn string name() { return match (this) { case Gain: "gain"; case Destination: "destination"; }; }
 }
+
+// An id's generation 1 (decision 34): the high 32 bits of an id, over its slot's low 32.
+comptime int64 FIRST_GENERATION_ID = 4294967296;
 
 // A call's command (decision 7): flat bytes, so it crosses a ring or a transferred buffer as it is, and typed, so the
 // audio side applies each kind by name. A node is named by its row's id, its slot and generation (decision 34).
@@ -71,6 +75,7 @@ type resource ContextState {
     Shared<Samples, AudioMemory> rendering;   // an offline render's output, its length the context's
     Slots<int64, AudioMemory> suspends;       // the frames a render will stop at, ascending, in [0, suspendCount)
     float32 rate = 0;
+    int64 destinationId = 0;                  // the context's own node, at the slot past the table's rows
     int64 perUpdate = 1;                      // the frames an update renders at least, in whole quanta (decision 37)
     int64 renderedSoFar = 0;
     int64 suspendCount = 0;
@@ -80,7 +85,7 @@ type resource ContextState {
     public ctor make(SlotTable<AudioMemory> nodes, Ring<Command, AudioMemory> commands,
                      Backlog<Command, AudioMemory> waiting, Ring<Event, AudioMemory> events, Connections links,
                      Engine engine, Shared<Samples, AudioMemory> output, Slots<int64, AudioMemory> suspends,
-                     int64 framesPerUpdate, float32 sampleRate) {
+                     int64 destination, int64 framesPerUpdate, float32 sampleRate) {
         this.nodes = give nodes;
         this.commands = give commands;
         this.waiting = give waiting;
@@ -89,6 +94,7 @@ type resource ContextState {
         this.engine = give engine;
         this.rendering = give output;
         this.suspends = give suspends;
+        this.destinationId = destination;
         this.perUpdate = framesPerUpdate;
         this.renderedSoFar = 0;
         this.suspendCount = 0;
@@ -206,15 +212,32 @@ type resource ContextState {
     // Where this state is: what tells one context from another.
     public unsafe const fn UnsafeConstPtr<ContextState> where() { return addr(of: this); }
 
-    // Whether the connection from `from` to `to` is held on the program side: made, and not yet gone with a node the
-    // way back reported freed.
-    public const fn bool connected(int64 from, int64 to) { return this.links.has(from: from, to: to); }
+    // Connects the output of the node `from` names to `destination`'s input (`AudioNode.connect`): recorded on the
+    // program side and its command sent. A connection already held is taken and sends nothing. `InvalidAccess` for a
+    // node of another context, `TooManyCommands` with the backlog full, then `TooManyConnections` with every declared
+    // one held, and a refusal changes nothing.
+    public unsafe fn Result<Unit, AudioError> connectFrom(int64 from, AudioNode destination) {
+        ContextKey key = ContextKey.mint();
+        NodeLink to = destination.linkFor(key: key);
+        if (to.state != this.where()) { return Result::Err(error: AudioError::InvalidAccess); }
+        if (this.links.has(from: from, to: to.id)) { return Result::Ok(value: Unit::Unit); }
+        if (!this.canSend()) { return Result::Err(error: AudioError::TooManyCommands); }
+        if (this.links.length() >= this.links.capacity()) { return Result::Err(error: AudioError::TooManyConnections); }
+        bool linked = this.links.add(from: from, to: to.id);
+        bool sent = this.send(command: Command::Connect(from: from, to: to.id));
+        return Result::Ok(value: Unit::Unit);
+    }
 
-    // Whether a declared connection is free.
-    public const fn bool canConnect() { return this.links.length() < this.links.capacity(); }
+    // The context's own node, the destination: its id, at the slot past the table's rows, and its channels, the
+    // context's.
+    public const fn int64 destination() { return this.destinationId; }
 
-    // Records the connection from `from` to `to` on the program side. False when every declared one is held.
-    public fn bool link(int64 from, int64 to) { return this.links.add(from: from, to: to); }
+    public const fn int32 channels() { return this.rendering.channels(); }
+
+    // The node at `position` in the render's order, or `None` past its end; and whether the node `id` names is muted.
+    public const fn Optional<int64> orderAt(int64 position) { return this.engine.orderAt(position: position); }
+
+    public const fn bool muted(int64 id) { return this.engine.isMuted(id: id); }
 
     public const fn float32 sampleRate() { return this.rate; }
 
@@ -307,14 +330,17 @@ type resource ContextState {
 // A context's state drawn from `memory` (decision 36), each part only once the one before it fit: its slot table of
 // `nodeCapacity` rows, its command ring of `ringCapacity`, its backlog of `backlogCapacity`, the way back of
 // `nodeCapacity` (decision 9: a report for every row at once), its connections (`connectionCapacity`, and a list head
-// for each row), the audio side (`engineFrom`), the offline render's output of `channels` channels of `length` frames
-// (`samplesFrom`), its `suspendCapacity` suspends, then the block that holds them. A part with no room is `OutOfMemory`, and every part taken before
-// it goes back when this returns.
+// for each row and the destination), the audio side (`engineFrom`), the offline render's output of `channels` channels
+// of `length` frames (`samplesFrom`), its `suspendCapacity` suspends, then the block that holds them. A part with no
+// room is `OutOfMemory`, and every part taken before it goes back when this returns.
 fn Result<Shared<ContextState, AudioMemory>, AudioError> stateFrom(AudioMemory memory, isize nodeCapacity,
                                                                    isize ringCapacity, isize backlogCapacity,
                                                                    isize connectionCapacity, int32 channels, int64 length,
                                                                    int64 framesPerUpdate, isize suspendCapacity,
                                                                    float32 sampleRate) {
+    // The destination takes the slot past the table's rows, which must fit an id's 32 bits: 2^32 rows or more leave it
+    // none, and are refused before the allocator is asked, so the slots below cannot overflow either.
+    if (cast<int64>(nodeCapacity) >= FIRST_GENERATION_ID) { return Result::Err(error: AudioError::OutOfMemory); }
     Result<SlotTable<AudioMemory>, CapacityError> table =
         SlotTable::<AudioMemory>.withCapacityAndAllocator(allocator: memory, capacity: nodeCapacity);
     SlotTable<AudioMemory> nodes = match (give table) {
@@ -339,14 +365,18 @@ fn Result<Shared<ContextState, AudioMemory>, AudioError> stateFrom(AudioMemory m
         case Ok(value: r): give r;
         case Err(error: e): { return Result::Err(error: AudioError::OutOfMemory); }
     };
+    // The destination is the context's own node, at the slot past the table's rows: a program never makes it, and
+    // nothing releases it, so it takes no row. Every part kept by slot has a slot for it.
+    isize slots = nodeCapacity + 1;
+    int64 destination = FIRST_GENERATION_ID + cast<int64>(nodeCapacity);
     Result<Connections, CapacityError> made =
-        Connections.withCapacity(memory: memory, nodes: nodeCapacity, connections: connectionCapacity);
+        Connections.withCapacity(memory: memory, nodes: slots, connections: connectionCapacity);
     Connections links = match (give made) {
         case Ok(value: l): give l;
         case Err(error: e): { return Result::Err(error: AudioError::OutOfMemory); }
     };
-    Result<Engine, AudioError> audio = engineFrom(memory: memory, nodeCapacity: nodeCapacity,
-                                                  connectionCapacity: connectionCapacity, channels: channels);
+    Result<Engine, AudioError> audio = engineFrom(memory: memory, slots: slots, connectionCapacity: connectionCapacity,
+                                                  channels: channels, destination: destination);
     // The engine is bound before the `try new`, never built in its argument list: a box with no room drops what it was
     // given from a local, and leaks a temporary built there (KAMA_GAPS.md KAUD-10).
     Engine engine = match (give audio) {
@@ -368,7 +398,8 @@ fn Result<Shared<ContextState, AudioMemory>, AudioError> stateFrom(AudioMemory m
         try new(allocator: memory) ContextState.make(nodes: give nodes, commands: give commands, waiting: give waiting,
                                                      events: give events, links: give links, engine: give engine,
                                                      output: give output, suspends: give suspends,
-                                                     framesPerUpdate: framesPerUpdate, sampleRate: sampleRate);
+                                                     destination: destination, framesPerUpdate: framesPerUpdate,
+                                                     sampleRate: sampleRate);
     return match (give state) {
         case Some(value: s): Result::Ok(value: give s);
         case None: Result::Err(error: AudioError::OutOfMemory);
@@ -388,6 +419,7 @@ type value NodeLink {
 
 type value ContextKey {
     friend NodeHold[mint];
+    friend ContextState[mint];
 
     ctor mint() { }
 }
@@ -428,21 +460,9 @@ type resource NodeHold implements Copyable<This>(bare: give) {
     // The node's context and id, as `AudioNode.linkFor` answers them.
     public unsafe const fn NodeLink link() { return NodeLink.make(state: this.state.where(), id: this.row); }
 
-    // Connects this node's output to `destination`'s input (`AudioNode.connect`): recorded on the program side and its
-    // command sent. A connection already held is taken and sends nothing. `InvalidAccess` for a node of another
-    // context, `TooManyCommands` with the backlog full, then `TooManyConnections` with every declared one held, and a
-    // refusal changes nothing.
+    // Connects this node's output to `destination`'s input (`AudioNode.connect`, `ContextState.connectFrom`).
     public unsafe fn Result<Unit, AudioError> connect(AudioNode destination) {
-        ContextKey key = ContextKey.mint();
-        NodeLink to = destination.linkFor(key: key);
-        UnsafeConstPtr<ContextState> mine = this.state.where();
-        if (to.state != mine) { return Result::Err(error: AudioError::InvalidAccess); }
-        if (this.state.connected(from: this.row, to: to.id)) { return Result::Ok(value: Unit::Unit); }
-        if (!this.state.canSend()) { return Result::Err(error: AudioError::TooManyCommands); }
-        if (!this.state.canConnect()) { return Result::Err(error: AudioError::TooManyConnections); }
-        bool linked = this.state.link(from: this.row, to: to.id);
-        bool sent = this.state.send(command: Command::Connect(from: this.row, to: to.id));
-        return Result::Ok(value: Unit::Unit);
+        return this.state.connectFrom(from: this.row, destination: destination);
     }
 
     ~NodeHold() { bool counted = this.state.countDown(id: this.row); }

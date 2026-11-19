@@ -24,6 +24,7 @@ Decision 31 sets the first cut:
 | `audio` | the lower tier, Web Audio's graph under Web Audio's names: `AudioMemory`, `BaseAudioContext`, `OfflineAudioContext`, `OfflineAudioContextOptions`, `AudioError`, `GainNode` |
 | `audio::sound` | the upper tier: sounds, voices, buses, snapshots and emitters. Not made yet |
 | `audio::rt` | the real-time primitives that the engine and a program's own DSP share: `Ring`, `Backlog`, `SlotTable`, `SlotArray`, `CapacityError`, `slotOf`, `generationOf` |
+| `audio::store` | **internal**: `Slots`, the storage under every declared capacity, taken once from the allocator a part is handed and never grown. std's collections cannot serve, since each traps when its allocator has no room (KAMA_GAPS.md KAUD-7) |
 | `audio::graph` | **internal**: what a context and its nodes share, `ContextState`, `NodeHold` and the commands, `Command` and `NodeKind`; and the audio side, `Engine`, `EngineNode` and the way back's `Event`. The package's own modules import it, and no program can |
 
 ## The command protocol's two halves

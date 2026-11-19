@@ -183,7 +183,8 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
     machines, for `try new` into a `Shared` (KR-399 to KR-402).
 - **Found on the way: KAUD-7, KAUD-8, KAUD-9 and KAUD-10.**
   - std's collections trap when their allocator has no room (KAUD-7, kama's KR-403, briefed). So every declared
-    capacity takes its storage as the ring's does, through the private `Slots` in `src/rt/ring.kama`.
+    capacity takes its storage as the ring's does, through `Slots`, since 2026-11-18 in the internal module
+    `audio::store` (`src/store/slots.kama`), so `audio::graph`'s parts take theirs the same way.
   - `try new(allocator:)` into a `Shared` trapped when the object fit and its control block did not (KAUD-8). Fixed in
     0.9.973 and retired.
   - A generic function's instance cannot be bound to an `fnptr` (KAUD-9), so the package cannot write the callbacks

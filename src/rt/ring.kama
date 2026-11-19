@@ -31,7 +31,7 @@
 //
 // An element is a `value`: flat bytes, with no destructor, so the audio side never drops what it pops.
 
-import { std::concurrent::Atomic, std::concurrent::MemoryOrder };
+import { audio::store::Slots, std::concurrent::Atomic, std::concurrent::MemoryOrder };
 
 export { Ring, Backlog, SlotTable, SlotArray, CapacityError, slotOf, generationOf };
 
@@ -44,44 +44,6 @@ type enum CapacityError implements Error {
             case BadCapacity: "a declared capacity must be at least one, and a slot table's at most 2^32";
             case OutOfMemory: "the allocator had no room for the declared capacity";
         };
-    }
-}
-
-// Storage for a declared number of elements, taken once from an allocator and given back to it at the drop. The ring,
-// the backlog, the slot table and the slot array hold one each. It is not exported. std's collections cannot serve
-// here, since each traps when its allocator has no room (KAMA_GAPS.md KAUD-7).
-type resource Slots<T: value, A: Allocator> {
-    UnsafePtr<T> data = null;
-    int64 cap = 0;
-    A alloc;
-
-    private unsafe ctor adopt(UnsafePtr<T> data, int64 capacity, A allocator) {
-        this.data = data;
-        this.cap = capacity;
-        this.alloc = allocator;
-    }
-
-    public unsafe ctor Result<Slots<T, A>, CapacityError> take(A allocator, isize capacity) {
-        if (capacity < 1) { return Result::Err(error: CapacityError::BadCapacity); }
-        usize bytes = cast<usize>(capacity) * sizeof(T);
-        Optional<UnsafePtr> got = allocator.allocate(bytes: bytes, align: alignof(T));
-        return match (got) {
-            case Some(value: p): Result::Ok(value: Slots::<T, A>.adopt(data: cast<UnsafePtr<T>>(p), capacity: cast<int64>(capacity),
-                                                                allocator: allocator));
-            case None: Result::Err(error: CapacityError::OutOfMemory);
-        };
-    }
-
-    // The element a monotonic counter `at` names: the counter masked at the array.
-    @noheap public unsafe ref T operator[](int64 at) { return this.data[cast<isize>(at % this.cap)]; }
-
-    public const fn int64 count() { return this.cap; }
-
-    unsafe ~Slots() {
-        if (this.data != null) {
-            this.alloc.deallocate(pointer: cast<UnsafePtr>(this.data), bytes: cast<usize>(this.cap) * sizeof(T),
-                                  align: alignof(T));
-        }
     }
 }
 

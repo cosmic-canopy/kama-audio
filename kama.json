@@ -15,6 +15,7 @@
   "modules": {
     ".": { "visibility": "public" },
     "rt": { "visibility": "public" },
-    "graph": { "visibility": "internal" }
+    "graph": { "visibility": "internal" },
+    "store": { "visibility": "internal" }
   }
 }

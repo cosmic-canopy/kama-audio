@@ -15,7 +15,13 @@ import { Tally, named, letGo, countedIn, rowsHeldIn, audioHeldIn, audio::Offline
          audio::OfflineAudioContextOptions, audio::AudioError, audio::AudioBuffer, audio::RenderRequest,
          audio::RenderStatus, audio::GainNode, audio::AudioMemory };
 
-export { renderTests };
+export { renderTests, markIn };
+
+// The package's seam: a mark in the render's output, `value` at `channel` and `frame`, where silence could not show a
+// render's overrun or a read of the wrong channel or frame.
+fn bool markIn(ref OfflineAudioContext context, int32 channel, int64 frame, float32 value) {
+    return context.mark(channel: channel, frame: frame, value: value);
+}
 
 // ---- helpers ----------------------------------------------------------------------------------------------------------
 
@@ -268,6 +274,15 @@ unsafe fn string copyRules(ref OfflineAudioContext context) {
         case Err(error: e): { string n = named(e: e); return "the start answered ${n}"; }
     };
     context.update();
+    // Channel 1's last three frames, and channel 0's, are marked apart, so a copy from the wrong channel or frame shows.
+    if (!markIn(context: context, channel: 1, frame: 297, value: 0.25) || !markIn(context: context, channel: 1, frame: 298, value: 0.5)
+        || !markIn(context: context, channel: 1, frame: 299, value: 0.75) || !markIn(context: context, channel: 0, frame: 297, value: -1)
+        || !markIn(context: context, channel: 0, frame: 298, value: -1) || !markIn(context: context, channel: 0, frame: 299, value: -1)) {
+        return "a mark in range was refused";
+    }
+    if (markIn(context: context, channel: 2, frame: 0, value: 1) || markIn(context: context, channel: 0, frame: 300, value: 1)) {
+        return "a mark out of range was taken";
+    }
     Optional<AudioBuffer> got = readyBuffer(r: r);
     AudioBuffer b = match (give got) { case Some(value: x): give x; case None: { return "the render was not ready"; } };
     InlineArray<float32>#(8) sink = [7.0; (8)];
@@ -277,13 +292,23 @@ unsafe fn string copyRules(ref OfflineAudioContext context) {
         why = match (tail) { case Ok(value: u): ""; case Err(error: e): "a copy of the last 3 frames was refused"; };
     }
     if (!why.isEmpty()) { return why; }
+    InlineArray<float32>#(8) want1 = [0.25, 0.5, 0.75, 7, 7, 7, 7, 7];
     isize i = 0;
     while (i < 8) {
         float32 x = sink[i];
-        float32 want = i < 3 ? 0 : 7;
-        if (x != want) { return "after a copy of the last 3 frames, slot ${i} held ${x} where ${want} was due"; }
+        float32 want = want1[i];
+        if (x != want) { return "after a copy of channel 1's last 3 frames, slot ${i} held ${x} where ${want} was due"; }
         i = i + 1;
     }
+    InlineArray<float32>#(3) zero = [7.0; (3)];
+    borrow zero.viewMut() as v {
+        Result<Unit, AudioError> left = b.copyFromChannel(destination: v, channelNumber: 0, bufferOffset: 297);
+        why = match (left) { case Ok(value: u): ""; case Err(error: e): "a copy of channel 0's last 3 frames was refused"; };
+    }
+    if (!why.isEmpty()) { return why; }
+    float32 z0 = zero[0];
+    float32 z2 = zero[2];
+    if (z0 != -1 || z2 != -1) { return "channel 0's last frames read ${z0} and ${z2} where its marks, -1, were due"; }
     InlineArray<float32>#(4) past = [7.0; (4)];
     borrow past.viewMut() as v {
         Result<Unit, AudioError> none = b.copyFromChannel(destination: v, channelNumber: 0, bufferOffset: 300);
@@ -349,6 +374,89 @@ unsafe fn void outlives(ref Tally t) {
     t.verdict(name: "render: the buffer outlives its context and request, and its blocks go back at its last drop", why: why);
 }
 
+// The last quantum stops at the length: it writes nothing past it, so a mark at frame 0 of each channel, made once the
+// first quantum has rendered it, is still there when the render is ready. Channel 0's overrun would land on channel 1's
+// start, and the last channel's would wrap onto channel 0's.
+unsafe fn string lastQuantumStops(ref OfflineAudioContext context) {
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) {
+        case Ok(value: q): give q;
+        case Err(error: e): { string n = named(e: e); return "the start answered ${n}"; }
+    };
+    context.update();
+    if (!markIn(context: context, channel: 0, frame: 0, value: 0.5) || !markIn(context: context, channel: 1, frame: 0, value: 0.25)) {
+        return "a mark in range was refused";
+    }
+    context.update();
+    context.update();
+    context.update();
+    Optional<AudioBuffer> got = readyBuffer(r: r);
+    AudioBuffer b = match (give got) { case Some(value: x): give x; case None: { return "four updates of 256 frames left 1,000 pending"; } };
+    InlineArray<float32>#(1) first = [7.0; (1)];
+    float32 c0 = 7;
+    float32 c1 = 7;
+    borrow first.viewMut() as v {
+        Result<Unit, AudioError> a = b.copyFromChannel(destination: v, channelNumber: 0, bufferOffset: 0);
+        c0 = first[0];
+        Result<Unit, AudioError> d = b.copyFromChannel(destination: v, channelNumber: 1, bufferOffset: 0);
+        c1 = first[0];
+    }
+    if (c0 != 0.5) { return "channel 0's frame 0 read ${c0} where its mark, 0.5, was due: the last quantum ran past the end"; }
+    if (c1 != 0.25) { return "channel 1's frame 0 read ${c1} where its mark, 0.25, was due: the last quantum ran past the end"; }
+    return "";
+}
+
+// A render with less than a quantum left is still pending: 300 frames at 128 an update are pending at 256, then ready,
+// the last 44 frames rendered.
+unsafe fn string lessThanAQuantumLeft(ref OfflineAudioContext context) {
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) {
+        case Ok(value: q): give q;
+        case Err(error: e): { string n = named(e: e); return "the start answered ${n}"; }
+    };
+    context.update();
+    context.update();
+    string why = expectPending(r: r, want: 256, moment: "with 44 frames left");
+    if (!why.isEmpty()) { return why; }
+    context.update();
+    Optional<AudioBuffer> got = readyBuffer(r: r);
+    return match (give got) {
+        case Some(value: b): allSilent(b: b);
+        case None: "the third update left it pending";
+    };
+}
+
+// The bytes a context takes for its render: each channel adds a quantum to the engine's block and its length to the
+// output, 4 bytes a sample, so two channels of 1,000 frames take 128 × 4 + 1,000 × 4 = 4,512 bytes more than one. Both
+// contexts are held while their bytes out are read.
+unsafe fn void bytesPerChannel(ref Tally t) {
+    InlineArray<int64>#(4) one = [0; (4)];
+    InlineArray<int64>#(4) two = [0; (4)];
+    one[3] = -1;
+    two[3] = -1;
+    UnsafePtr<int64> c1 = addr(of: one[0]);
+    UnsafePtr<int64> c2 = addr(of: two[0]);
+    string why = "";
+    {
+        Result<OfflineAudioContext, AudioError> m1 =
+            OfflineAudioContext.make(options: renderOptions(memory: countedIn(cells: c1), channels: 1, length: 1000,
+                                                            framesPerUpdate: 256));
+        Result<OfflineAudioContext, AudioError> m2 =
+            OfflineAudioContext.make(options: renderOptions(memory: countedIn(cells: c2), channels: 2, length: 1000,
+                                                            framesPerUpdate: 256));
+        bool made1 = match (m1) { case Ok(value: x): true; case Err(error: e): false; };
+        bool made2 = match (m2) { case Ok(value: x): true; case Err(error: e): false; };
+        if (!made1 || !made2) { why = "a context was not made"; }
+        int64 bytes1 = one[1];
+        int64 bytes2 = two[1];
+        int64 more = bytes2 - bytes1;
+        if (why.isEmpty() && more != 4512) {
+            why = "two channels took ${more} bytes more than one where 4,512 were due, a quantum of block and 1,000 frames of output";
+        }
+    }
+    t.verdict(name: "render: each channel adds a quantum to the engine's block and its length to the output", why: why);
+}
+
 // The end of a buffer: it is moved in, and dropped when this returns.
 fn void letGoOf(AudioBuffer buffer) { }
 
@@ -381,4 +489,9 @@ unsafe fn void renderTests(ref Tally t) {
     withRender(t: t, name: "render: copyFromChannel copies what fits from its offset, and refuses a channel or offset out of range",
                channels: 2, length: 300, framesPerUpdate: 300, body: copyRules);
     outlives(t: t);
+    withRender(t: t, name: "render: the last quantum stops at the length, writing nothing past it", channels: 2, length: 1000,
+               framesPerUpdate: 256, body: lastQuantumStops);
+    withRender(t: t, name: "render: with less than a quantum left the render is still pending", channels: 1, length: 300,
+               framesPerUpdate: 128, body: lessThanAQuantumLeft);
+    bytesPerChannel(t: t);
 }

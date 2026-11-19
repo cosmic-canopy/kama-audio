@@ -13,8 +13,9 @@ front of it. So is the slot table that a command names a node by (AUD-2), and th
 A node's make, its connections and its release travel as commands: the backlog, then a flush into the ring. The audio
 side applies them: an engine stepped a quantum at a time keeps each node at its id's slot in an array of its own, with
 the connections between them, keeps a released node while a node that can sound feeds it, and frees it once nothing
-does, reporting it on the way back, whose read gives the row back to the table. Each is tested natively and on wasm
-under node, in debug and release. The engine renders no samples yet, so nothing makes a sound. Not published.
+does, reporting it on the way back, whose read gives the row back to the table. An offline context renders its length
+as a request the program polls, advanced by `update()`, into an `AudioBuffer`. Each is tested natively and on wasm
+under node, in debug and release. No node renders samples yet, so a render is silence. Not published.
 
 ## The modules
 
@@ -22,11 +23,11 @@ Decision 31 sets the first cut:
 
 | Module | What it holds |
 |---|---|
-| `audio` | the lower tier, Web Audio's graph under Web Audio's names: `AudioMemory`, `BaseAudioContext`, `OfflineAudioContext`, `OfflineAudioContextOptions`, `AudioError`, `AudioNode`, `GainNode` |
+| `audio` | the lower tier, Web Audio's graph under Web Audio's names: `AudioMemory`, `BaseAudioContext`, `OfflineAudioContext`, `OfflineAudioContextOptions`, `AudioError`, `AudioNode`, `GainNode`, `AudioBuffer`, `RenderRequest`, `RenderStatus` |
 | `audio::sound` | the upper tier: sounds, voices, buses, snapshots and emitters. Not made yet |
 | `audio::rt` | the real-time primitives that the engine and a program's own DSP share: `Ring`, `Backlog`, `SlotTable`, `SlotArray`, `CapacityError`, `slotOf`, `generationOf` |
 | `audio::store` | **internal**: `Slots`, the storage under every declared capacity, taken once from the allocator a part is handed and never grown. std's collections cannot serve, since each traps when its allocator has no room (KAMA_GAPS.md KAUD-7) |
-| `audio::graph` | **internal**: what a context and its nodes share, `ContextState`, `NodeHold`, `NodeLink`, the commands (`Command` and `NodeKind`) and `Connections`; and the audio side, `Engine`, `EngineNode`, the lifetime walk's `Mark` and the way back's `Event`. The package's own modules import it, and no program can |
+| `audio::graph` | **internal**: what a context and its nodes share, `ContextState`, `NodeHold`, `NodeLink`, the commands (`Command` and `NodeKind`), `Connections` and `Samples`; and the audio side, `Engine`, `EngineNode`, the lifetime walk's `Mark` and the way back's `Event`. The package's own modules import it, and no program can |
 
 ## The command protocol's two halves
 
@@ -266,20 +267,25 @@ it. Its members:
   - `backlogCapacity`, the commands that can wait for a flush, 4,096 by default: its backlog (decisions 8, 33);
   - `connectionCapacity`, the connections between its nodes at once, 4,096 by default, four for each node row
     (decision 6);
+  - `framesPerUpdate`, the frames an `update()` renders at least, in whole quanta, 8,192 by default (decision 37);
   - `memory`, `AudioMemory.global()` by default.
-- **What a make takes:** eleven parts, drawn from `options.memory` once each and in this order: the slot table, the
+- **What a make takes:** fourteen parts, drawn from `options.memory` once each and in this order: the slot table, the
   command ring, the backlog, the way back, the program side's connections (the connections and a list head for each
-  node row, two allocations), then the audio side (its array of nodes, its connections, two allocations, and the
-  lifetime walk's marks), then the state. The way back, the array, the list heads and the marks each have
-  `nodeCapacity` places. The state is one `Shared`, made by `try new(allocator:)`, that holds the rest. All go back
-  with the last hold.
+  node row, two allocations), the audio side (its array of nodes, its connections, two allocations, the lifetime
+  walk's marks, and its block, a quantum for each channel), the render's output (its samples and the box that counts
+  them), then the state. The way back, the array, the list heads and the marks each have `nodeCapacity` places. The
+  state is one `Shared`, made by `try new(allocator:)`, that holds the rest. All go back with the last hold, but the
+  output's, which an `AudioBuffer` may still hold.
 - **What a make answers instead** (`audio::AudioError`), with nothing left allocated:
   - `NotSupported` for an option outside Web Audio's ranges, as Web Audio's `NotSupportedError`: 1 to 32 channels, a
     length of at least one frame, a sample rate from 3,000 to 768,000 Hz. A node, ring, backlog or connection capacity
-    below one is the same;
-  - `OutOfMemory` when the memory has no room for a part. Every part taken before it goes back.
+    below one is the same, and so is a `framesPerUpdate` below one;
+  - `OutOfMemory` when the memory has no room for a part. Every part taken before it goes back. A capacity whose
+    bytes no `usize` can hold, and an output whose samples no `isize` can count, are `OutOfMemory` too, before the
+    allocator is asked: never a size that overflowed.
 - **What it answers:** `sampleRate()`, `length()` and `numberOfChannels()`, as it was made.
-- **The test seam:** ten `friend` grants to the tests program:
+- **Its render:** `startRendering()` and `update()` (§ The offline render).
+- **The test seam:** eleven `friend` grants to the tests program:
   - `audiotests::rowsHeldIn` reads its rows held;
   - `audiotests::releaseDueIn` takes its next release due straight from the table;
   - `audiotests::flushIn` flushes it;
@@ -288,7 +294,9 @@ it. Its members:
   - `audiotests::pollIn` reads its way back;
   - `audiotests::audioHeldIn` reads the nodes its audio side holds, and `audiotests::refusedIn` the commands it refused;
   - `audiotests::forgeIn` adds a command no call would send, a make or a release of any id, to its backlog, and
-    `audiotests::forgeConnectIn` a connection between any ids.
+    `audiotests::forgeConnectIn` a connection between any ids;
+  - `audiotests::markIn` writes a value into its render's output at a channel and frame in range, where silence could
+    not show a render's overrun or a read of the wrong channel or frame.
 
 ### `audio::GainNode`
 
@@ -489,6 +497,67 @@ deleted once nothing references it and then disconnects its outputs).
   The `nodes` cases cover the context's eleven parts, each in turn refused with what came before it given back, and a
   connection capacity's range.
 
+## The offline render
+
+**An offline render is a request the program polls, advanced by `update()`** (decision 37, with decisions 6, 9, 10 and
+32), as `@kama/gpu`'s requests are polled: kama has no promises, and the package starts no thread.
+- **`OfflineAudioContext.startRendering()`** starts the render and renders nothing. It answers
+  `Result<RenderRequest, AudioError>`; a second start is `InvalidState`, Web Audio's `InvalidStateError`.
+- **`OfflineAudioContext.update()`,** the program's call once a frame:
+  - flushes the calls made since the last one (decision 33);
+  - once the render has started, renders whole quanta on the calling thread, each applying the commands that landed
+    (decision 32) and copied into the output, until this update has rendered at least `framesPerUpdate` frames or the
+    end. The last quantum stops at the length. Before the start it renders nothing, and the flushed commands wait in
+    the ring for the render's first quantum;
+  - reads the way back (decision 9).
+- **`RenderRequest.poll()`** answers `RenderStatus`: `Pending(framesRendered)`, or `Ready(buffer)` with the
+  `AudioBuffer`, again at every poll after.
+- **What the render makes:** each quantum is rendered into the engine's block, a quantum for each channel, then copied
+  into the output. No node renders samples yet, so it is silence, written: the tests' allocator poisons every block
+  it hands out. A quantum is Web Audio's 128 frames until the engine's declared block (decision 15, AUD-9).
+- **Suspending at a frame** (Web Audio's `suspend()` and `resume()`) comes in a step of its own.
+
+### `audio::AudioBuffer`
+
+**Web Audio's `AudioBuffer`:** samples in channels of a length at a sample rate.
+- **A counted resource** (decision 4), `Copyable` with a bare hand-off that moves. `copy b` shares its samples,
+  channel-planar `float32` drawn from the program's memory, and they go back at its last drop. It outlives the context
+  that made it.
+- **So far a render makes one,** its output. A buffer the program makes to be played, and how its samples count
+  against decision 6's sample memory, come with the source that plays it.
+- **What it answers:** `sampleRate()`, in Hz; `length()`, the frames each channel holds; `duration()`, in seconds, a
+  `float64`; and `numberOfChannels()`.
+- **`copyFromChannel(destination:, channelNumber:, bufferOffset:)`** is Web Audio's: it copies as many frames as fit
+  from `bufferOffset` into `destination`, a `View<float32>`, and leaves the rest of it untouched. An offset at or past
+  the end copies nothing. A channel the buffer does not have is `IndexSize`, Web Audio's `IndexSizeError`, and so is an
+  offset below 0, which Web Audio's unsigned argument cannot be. kama has no default arguments, so the offset is always
+  named.
+- **Tested** (`tests/src/render_tests.kama`, the `render` cases, 12 of them, each seen red against a stub first but the
+  start's, which the mutations prove, or, for the last three, against the mutations they were written for):
+  - the options declare 8,192 frames an update by default;
+  - a start renders nothing, and the request is pending at 0;
+  - updates before the start render nothing; after it, each update renders whole quanta up to its declared frames, and
+    the last stops at the length: 1,000 frames at 256 an update are pending at 256, 512 and 768, then ready;
+  - 200 frames an update render two quanta;
+  - the ready buffer holds the context's channels, length and rate, its duration their quotient, and every sample of
+    every channel is silence; it answers again at the next poll, and an update after the end renders nothing;
+  - a second start is `InvalidState`, and the first request still renders;
+  - an update flushes, renders and reads the way back: a make before the start is applied, and a drop is freed and its
+    row back after the next update;
+  - `copyFromChannel` copies what fits from its offset, leaves the rest untouched, copies nothing from the end, and
+    refuses channel 2 of 2, channel −1 and frame −1 as `IndexSize`, writing nothing. Each channel's last frames are
+    marked apart first, so a copy from the wrong channel or frame shows;
+  - the buffer outlives its context and request: its two blocks are all that is still out, a copy keeps them out after
+    the original's drop and reads as before, and they go back at its last drop;
+  - the last quantum stops at the length: a mark at each channel's frame 0, where channel 0's overrun and the last
+    channel's wrapped overrun would land, is still there when the render is ready;
+  - with less than a quantum left the render is still pending: 300 frames at 128 an update are pending at 256;
+  - each channel adds a quantum to the engine's block and its length to the output: two channels of 1,000 frames take
+    4,512 bytes more than one.
+
+  The `nodes` cases cover the fourteen parts, a `framesPerUpdate` below one, and an output of 32 channels of 2^62
+  frames, `OutOfMemory`. A `command-ring` case covers a capacity whose bytes no `usize` can hold.
+
 ## Proved by mutation
 
 ### The ring and the backlog
@@ -588,3 +657,25 @@ for byte after each. **78 turn a case red, 4 of them by a hang, and kama refuses
   - **the walk in every quantum, and its flag never cleared:** without a release no node stops being able to sound, and a
     connection only adds reach, so an extra walk frees nothing. The flag saves its cost, which the gate does not
     measure.
+
+### The offline render's first slice
+
+Each of 55 mutations of the option, the start and `update()` (`src/context.kama`), the render in `update()`, the
+output part and the marking seam (`src/graph/graph.kama`), the engine's block (`src/graph/engine.kama`), the samples
+(`src/graph/samples.kama`), the buffer (`src/buffer.kama`) and the request (`src/render.kama`) runs through the whole
+gate (`.scratch/aud29/mutate_render.py`), and each file is restored byte for byte after each. **54 turn a case red, 1 of
+them by a hang, and kama refuses none; the 55th waits for a node that renders.**
+- **The first pass caught 45 of 54.** Silence hid most of its misses: a render of zeros cannot show an overrun of zeros,
+  a channel read for another, or a copy from the wrong frame. Seven were caught once the cases were sharpened:
+  - **the last quantum written whole, past the length:** a mark at each channel's frame 0, where the overrun lands, now
+    shows it, through a seam that marks the output;
+  - **done a quantum early:** no case looked at a render with less than a quantum left;
+  - **the engine's block, and the output, sized for one channel:** each read of channel 1 wrapped onto channel 0. Two
+    contexts that differ only in their channels now differ in bytes by a quantum of block and a length of output;
+  - **`Samples.at` and `copyFromChannel` reading channel 0, and the copy from frame 0:** the copy case marks each
+    channel's last frames apart first.
+- **`renderDone` checking that the render had started** was equivalent, since frames are rendered only after a start and
+  a length is at least one. The check is gone.
+- **`blockAt` reading channel 0 for every channel** is not equivalent, and no case can see it yet: only the engine
+  writes its block, and it writes silence. The first node that renders different samples into different channels
+  brings the case that catches it.

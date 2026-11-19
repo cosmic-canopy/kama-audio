@@ -5,6 +5,19 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- An offline render is a request the program polls, advanced by `update()` (decision 37):
+  `OfflineAudioContext.startRendering()` answers an `audio::RenderRequest` and renders nothing; `update()` flushes,
+  renders whole quanta up to the new `OfflineAudioContextOptions.framesPerUpdate` (8,192 by default) and reads the way
+  back; `RenderRequest.poll()` answers `audio::RenderStatus`, `Pending(framesRendered)` or `Ready(buffer)`. A second
+  start is the new `AudioError::InvalidState` (2026-11-19).
+- `audio::AudioBuffer`, Web Audio's, a counted resource that outlives its context: `sampleRate()`, `length()`,
+  `duration()`, `numberOfChannels()` and `copyFromChannel(destination:, channelNumber:, bufferOffset:)`, a channel or
+  offset out of range being the new `AudioError::IndexSize`. So far a render makes one, silence until a node renders
+  (2026-11-19).
+- A context draws its render's output and the engine's block from the program's memory: fourteen allocations at a make
+  (2026-11-19).
+- Fixed: a declared capacity whose bytes overflow a `usize` was made over a wrapped size (a ring of 2^62 over 0 bytes);
+  it is `OutOfMemory` now, before the allocator is asked (2026-11-19).
 - `audio::AudioNode`, the contract every node implements, and `connect(destination:)`, Web Audio's
   `connect(destinationNode)` (decisions 3, 4, 6 and 8): a connection made twice is one, a node of another context is
   `AudioError::InvalidAccess`, a full backlog `TooManyCommands`, and every declared connection held the new

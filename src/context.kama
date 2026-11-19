@@ -86,6 +86,7 @@ type resource OfflineAudioContext implements BaseAudioContext {
     friend audiotests::refusedIn[refused];
     friend audiotests::forgeIn[forge];
     friend audiotests::forgeConnectIn[forgeConnect];
+    friend audiotests::markIn[mark];
 
     private ctor adopt(Shared<ContextState, AudioMemory> state, int32 channels, int64 frames) {
         this.state = give state;
@@ -166,6 +167,11 @@ type resource OfflineAudioContext implements BaseAudioContext {
     private fn bool forge(bool made, int64 node) {
         if (made) { return this.state.send(command: Command::Made(node: node, kind: NodeKind::Gain)); }
         return this.state.send(command: Command::Release(node: node));
+    }
+
+    // A mark in the render's output: `value` at `channel` and `frame`. False when either is out of range.
+    private fn bool mark(int32 channel, int64 frame, float32 value) {
+        return this.state.mark(channel: channel, frame: frame, value: value);
     }
 
     // A connection no call would send, added to the backlog: from `from`'s output to `to`'s input, any ids at all.

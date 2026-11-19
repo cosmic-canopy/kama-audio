@@ -96,7 +96,21 @@ command protocol's timing (32 and 33), its slots (34 and 35), the program's memo
     - 16 `connect` cases (`tests/src/connect_tests.kama`), 2 `slot array` cases and 4 `nodes` cases sharpened, each
       seen red against a stub first, or, for the last two connect cases, against the mutations they were written for.
 
-  97 cases, green on every leg: native debug and release, wasm debug and release.
+  - on 2026-11-19, **the offline render's first slice** (decision 37; AUD-29, AUD-5 and AUD-9; SPEC.md § The offline
+    render):
+    - `OfflineAudioContext.startRendering()`, answering an `audio::RenderRequest`, and `update()`, which flushes, renders
+      whole quanta up to the new `framesPerUpdate` and reads the way back; `RenderRequest.poll()`, answering
+      `audio::RenderStatus`;
+    - `audio::AudioBuffer`, a counted resource over `audio::graph::Samples`, with Web Audio's `copyFromChannel`;
+      `AudioError::InvalidState` and `IndexSize`; the engine's block, silence until a node renders into it; the output
+      a declared part, fourteen in all;
+    - `audio::store::Slots` refusing a capacity whose bytes overflow a `usize` as `OutOfMemory`: a ring of 2^62 had been
+      made over 0 bytes;
+    - 12 `render` cases (`tests/src/render_tests.kama`), 1 `command-ring` case and 4 `nodes` cases sharpened, each seen
+      red against a stub first but the start's, or, for the last three render cases, against the mutations they were
+      written for. The tests' allocator now poisons every block it hands out.
+
+  110 cases, green on every leg: native debug and release, wasm debug and release.
 - **Settled while building the table, reported to the owner to object to** (each within decisions 34 and 35):
   - the name `SlotTable`, and its calls: `take()`, `countUp(id:)`, `countDown(id:)`, `nextRelease()`, `free(id:)`,
     `countOf(id:)`, `length()`, `capacity()`, `retired()`;
@@ -191,6 +205,27 @@ command protocol's timing (32 and 33), its slots (34 and 35), the program's memo
   - **`Slots` moved to an internal module, `audio::store`,** a fourth module beside decision 31's three and `audio::graph`;
   - **`SlotArray` gains `set(id:, value:)` and `idAt(slot:)`;**
   - **one more seam, ten in all:** `audiotests::forgeConnectIn`.
+- **Settled while building the render's first slice, reported to the owner to object to** (each within decisions 3, 4,
+  6, 15 and 37):
+  - **`framesPerUpdate`, 8,192 frames by default** (64 quanta: a game at 60 frames a second renders about ten times
+    faster than real time), at least one or `NotSupported`. An update renders whole quanta until it has rendered at
+    least that many, so it can pass it by up to 127 frames;
+  - **`startRendering()` answers `Result<RenderRequest, AudioError>`,** a second start `AudioError::InvalidState`;
+  - **`RenderStatus` is `Pending(framesRendered)` or `Ready(buffer)`:** no `Failed` until something can fail mid-render,
+    and `Suspended` comes with `suspend()`;
+  - **`update()` before the start flushes and reads the way back, and renders nothing;** the flushed commands wait in the
+    ring for the render's first quantum;
+  - **`AudioBuffer` is a counted handle on internal `Samples`, channel-planar `float32`,** and outlives its context. Its
+    first calls are `sampleRate()`, `length()`, `duration()` (a `float64`, Web Audio's double), `numberOfChannels()`
+    and `copyFromChannel(destination:, channelNumber:, bufferOffset:)`, the offset always named; an offset below 0 is
+    `IndexSize`. `getChannelData` and `copyToChannel` come with the buffers a program makes, whose sample memory is the
+    owner's question then;
+  - **the output is the fourteenth part,** drawn at the make; an output past an `isize`, or a capacity whose bytes pass
+    a `usize`, is `OutOfMemory` before the allocator is asked;
+  - **a quantum is a constant 128 frames** until the engine's declared block (decision 15, AUD-9) makes it the program's
+    setting;
+  - **one more seam, eleven in all:** `audiotests::markIn`, which writes a value into the render's output, where silence
+    could not show an overrun or a read of the wrong channel.
 - **Proved by mutation:**
   - the ring and the backlog (`.scratch/aud29/mutate_ring.py`, through the whole gate): 38 of 39 mutations of
     `src/rt/ring.kama` are caught, none by a hang.
@@ -216,6 +251,12 @@ command protocol's timing (32 and 33), its slots (34 and 35), the program's memo
     a case too loose, now sharpened: the slot array's read past the array, which wraps onto slot 0, held nothing there;
     and no case had a command ring smaller than its rows, so the way back sized by the ring passed. The 52nd proves the
     no-room case, green against the stub.
+  - the offline render's first slice (`.scratch/aud29/mutate_render.py`, through the whole gate): **54 of 55 caught,** 1 by
+    a hang, none refused by kama. The first pass caught 45 of 54, silence hiding most misses; seven are caught by
+    sharpened cases (a mark where the last quantum's overrun lands, a render with less than a quantum left, the bytes
+    each channel adds, the copy case's channels marked apart), and `renderDone`'s check of the start was equivalent and
+    is gone. **The 55th, `blockAt` reading channel 0 for every channel, waits for a node that renders:** only the engine
+    writes its block, with silence.
   - connect and the lifetime rule (`.scratch/aud29/mutate_connect.py`, through the whole gate): **78 of 81 caught,** 4 by
     a hang, none refused by kama, and the other 3 equivalent. The first pass caught 66 of 82. Eleven misses showed a
     case too loose, now sharpened or written: no node had two outputs, no pool of more than one was filled, no freed
@@ -245,20 +286,19 @@ command protocol's timing (32 and 33), its slots (34 and 35), the program's memo
   - std's `FixedArray` traps when its allocator has no room, as KAUD-7's collections do, so the slot array takes its
     storage through `Slots` too.
 - **Next:**
-  - **the render itself:** an `OfflineAudioContext` rendering its declared length in the declared block (AUD-9), the
-    `AudioDestinationNode`, the output's samples as an `AudioBuffer`, and the first golden. It is the first public
-    caller of the flush, the quantum and the way back's read, and it mutes a cycle with no delay. **Its questions are
-    the owner's, asked when it comes up:** how Web Audio's `startRendering()`, a promise, maps to kama (a call that
-    renders and answers the buffer, or a render stepped a block at a time, which FEATURES.md's "an open length rendered
-    in chunks" wants); and how an `AudioBuffer`'s samples are counted against a declared capacity (decision 6's sample
-    memory);
+  - **the render's next slices** (decision 37): `suspend()` and `resume()` at a frame; the `AudioDestinationNode`, which
+    the render sums into the output, with Web Audio's muting of a cycle that has no delay; then a source, so a render
+    is not silence, and the first golden. **The first node that renders different samples into different channels
+    brings the case that catches `blockAt` reading channel 0,** the one mutation of the render's first slice no case
+    can see yet. **The `AudioBuffer`'s sample memory is the owner's question,** asked when a
+    buffer is made to be played: how its samples count against decision 6's sample memory;
   - **the rest of AUD-1's commands, each with its call:** `disconnect()` and its forms, each needing a name of its own
     since kama has no overloading; a source's start with its frame, which keeps a released source until it ends; a
     parameter's events with `AudioParam`. The late count is a timed call's rule (decision 32), so it lands with the
     first one, on the audio side's clock;
   - then the context's options and memory (AUD-4) and `update()` (AUD-5).
-- **Read first:** § Decided (4, 6, 9 and 32 to 36 above all), SPEC.md § Contexts and nodes, § The commands, § The
-  audio side and the way back and § Connections, ROADMAP_DETAIL.md § AUD-29, and the probes it starts from (`aud-probe-cmd` for the
+- **Read first:** § Decided (4, 6, 9 and 32 to 37 above all), SPEC.md § Contexts and nodes, § The commands, § The
+  audio side and the way back, § Connections and § The offline render, ROADMAP_DETAIL.md § AUD-29, and the probes it starts from (`aud-probe-cmd` for the
   commands and the way back, `aud-probe-routes` for slots and a block split at a frame).
 - **Each slice checks the owner's games for code it can take** (2026-11-18, after the owner asked why audio came so
   fast in them). `../friendly-fire-department/audio/` and `../the-mallow-man/audio/` each answer one game: a fixed set

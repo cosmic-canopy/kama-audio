@@ -123,8 +123,19 @@ type resource ContextState {
         isize freed = this.poll();
     }
 
-    // Whether the render has rendered every frame of its length.
-    public const fn bool renderDone() { return this.started && this.renderedSoFar >= this.rendering.frames(); }
+    // Whether the render has rendered every frame of its length. Frames are rendered only once it has started, and its
+    // length is at least one, so a render not started is never done.
+    public const fn bool renderDone() { return this.renderedSoFar >= this.rendering.frames(); }
+
+    // Writes `value` into the render's output at `channel` and `frame`: the tests' mark, which a render's overrun or a
+    // read of the wrong channel or frame would show where silence cannot. False when either is out of range.
+    public fn bool mark(int32 channel, int64 frame, float32 value) {
+        if (channel < 0 || channel >= this.rendering.channels() || frame < 0 || frame >= this.rendering.frames()) {
+            return false;
+        }
+        this.rendering.write(channel: channel, frame: frame, value: value);
+        return true;
+    }
 
     // The frames the render has rendered so far.
     public const fn int64 framesRendered() { return this.renderedSoFar; }

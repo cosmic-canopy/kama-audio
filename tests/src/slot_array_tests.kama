@@ -250,8 +250,10 @@ fn string reuse(ref SlotArray<int64, GlobalAllocator> a) {
     return n == 1 ? "" : "it holds ${n} after a put, a removal and a put";
 }
 
-// An id of a slot past the array, of generation 0, which no live id has, or -1 is refused by every call.
+// An id of a slot past the array, of generation 0, which no live id has, or -1 is refused by every call. Slot 0 holds a
+// value at generation 1 throughout, since the storage's index would wrap the slot just past the array onto it.
 fn string strangersRefused(ref SlotArray<int64, GlobalAllocator> a) {
+    if (!a.put(id: idAt(slot: 0, generation: 1), value: 10)) { return "the put into slot 0 was refused"; }
     int64 atBound = idAt(slot: 2, generation: 1);   // the first slot past an array of 2
     int64 past = idAt(slot: 7, generation: 1);
     int64 noGeneration = idAt(slot: 1, generation: 0);
@@ -261,7 +263,7 @@ fn string strangersRefused(ref SlotArray<int64, GlobalAllocator> a) {
     if (a.put(id: 0, value: 1)) { return "a put at the id 0 was taken"; }
     if (a.put(id: -1, value: 1)) { return "a put at the id -1 was taken"; }
     isize n = a.length();
-    if (n != 0) { return "the refused puts left it holding ${n}"; }
+    if (n != 1) { return "the refused puts left it holding ${n} where slot 0's value was all"; }
     string why = expectNothingAt(a: a, id: atBound, what: "the slot just past the array");
     if (!why.isEmpty()) { return why; }
     why = expectNothingAt(a: a, id: noGeneration, what: "generation 0");
@@ -273,7 +275,7 @@ fn string strangersRefused(ref SlotArray<int64, GlobalAllocator> a) {
     if (a.remove(id: atBound) || a.remove(id: past) || a.remove(id: noGeneration) || a.remove(id: 0) || a.remove(id: -1)) {
         return "a stranger's removal was taken";
     }
-    return "";
+    return expectAt(a: a, id: idAt(slot: 0, generation: 1), want: 10, what: "slot 0, after the strangers' calls");
 }
 
 unsafe fn void slotArrayTests(ref Tally t) {

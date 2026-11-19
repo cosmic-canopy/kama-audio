@@ -282,6 +282,57 @@ fn string strangersRefused(ref OfflineAudioContext context) {
     return refusedSoFar(context: context, want: 3);
 }
 
+// A refused release reports nothing, so it takes no room on the way back: with one row, a stale release and the node's
+// own release land in one quantum, and the own release's report still fits, so the row comes back.
+fn string refusedTakesNoRoom(ref OfflineAudioContext context) {
+    Optional<GainNode> a = gainIn(context: context);
+    if (!a.isSome()) { return "the node was refused"; }
+    string why = flushSends(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    why = quantumApplies(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    if (!forgeIn(context: context, made: false, node: idAt(slot: 0, generation: 2))) {
+        return "the backlog refused a forged command";
+    }
+    letGoOf(node: give a);
+    why = flushSends(context: context, want: 2);
+    if (!why.isEmpty()) { return why; }
+    why = quantumApplies(context: context, want: 2);
+    if (!why.isEmpty()) { return why; }
+    why = refusedSoFar(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    why = pollFrees(context: context, want: 1);
+    if (!why.isEmpty()) { return "the node's own report: ${why}"; }
+    return rowsHeld(context: context, want: 0);
+}
+
+// The way back holds a report for every row, whatever the command ring's size: with a ring of 1, four releases land in
+// four quanta, and all four reports wait, unread, until the program side reads them together.
+fn string wayBackOfEveryRow(ref OfflineAudioContext context) {
+    Optional<GainNode> a = gainIn(context: context);
+    Optional<GainNode> b = gainIn(context: context);
+    Optional<GainNode> c = gainIn(context: context);
+    Optional<GainNode> d = gainIn(context: context);
+    if (!a.isSome() || !b.isSome() || !c.isSome() || !d.isSome()) { return "a node was refused"; }
+    letGoOf(node: give a);
+    letGoOf(node: give b);
+    letGoOf(node: give c);
+    letGoOf(node: give d);
+    int32 quanta = 0;
+    while (quanta < 8) {
+        string why = flushSends(context: context, want: 1);
+        if (!why.isEmpty()) { return "flush ${quanta}: ${why}"; }
+        why = quantumApplies(context: context, want: 1);
+        if (!why.isEmpty()) { return "quantum ${quanta}: ${why}"; }
+        quanta = quanta + 1;
+    }
+    string why = audioHolds(context: context, want: 0);
+    if (!why.isEmpty()) { return why; }
+    why = pollFrees(context: context, want: 4);
+    if (!why.isEmpty()) { return why; }
+    return rowsHeld(context: context, want: 0);
+}
+
 fn void audioSideTests(ref Tally t) {
     withCommands(t: t, name: "audio side: a quantum applies what a flush published before it, each command once",
                  nodes: 4, ring: 2, backlog: 8, body: appliesPublished);
@@ -297,4 +348,8 @@ fn void audioSideTests(ref Tally t) {
                  nodes: 1, ring: 8, backlog: 8, body: slotReused);
     withCommands(t: t, name: "audio side: a command naming a node it does not hold, or making one into a held slot, is refused and counted",
                  nodes: 2, ring: 8, backlog: 8, body: strangersRefused);
+    withCommands(t: t, name: "audio side: a refused release reports nothing, so it takes no room on the way back", nodes: 1,
+                 ring: 8, backlog: 8, body: refusedTakesNoRoom);
+    withCommands(t: t, name: "audio side: the way back holds a report for every row, whatever the command ring's size",
+                 nodes: 4, ring: 1, backlog: 8, body: wayBackOfEveryRow);
 }

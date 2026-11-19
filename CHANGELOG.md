@@ -5,6 +5,19 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- The audio side applies a context's commands, and the way back returns a released node's row (AUD-1, AUD-2 and AUD-3,
+  decisions 4, 5, 9, 32, 34 and 35): a render quantum drains the command ring at its top and applies every command
+  published before it, in order; a released gain, having no input, is freed at once and reported on the way back, a
+  ring of the node capacity that always has room for a report; and the program side's read of it frees the row in the
+  table for reuse at the next generation. A command the audio side cannot apply (a make into a held slot, a release of a
+  node it does not hold at that generation) is refused and counted, never a trap. The renders' public callers come with
+  their rows (2026-11-18).
+- A context draws the way back and the audio side's array from the program's memory too: six allocations at a make,
+  every part taken before a refusal given back (2026-11-18).
+- `audio::rt::SlotArray<T, A>`, the audio side's array of slots: a value put at the slot an id names, at the id's
+  generation, only into an empty slot, and read or removed only at the generation it was put at; a declared capacity of
+  at most 2^32 slots, its storage from an injected allocator, and every id that names no value refused (decisions 4, 5
+  and 34) (2026-11-18).
 - A call's command reaches the audio side (AUD-1 over AUD-2's handle, decisions 7, 8, 33 and 35): `GainNode.make`
   adds its make to the context's backlog, and the context's flush moves the backlog into the command ring, then the
   due releases once the backlog has drained, all published with one store. A release is never refused and never

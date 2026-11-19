@@ -71,8 +71,20 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
     - `audio::rt::Ring.room()` and `audio::rt::Backlog.stageInto(ring:)`;
     - 8 `commands` cases (`tests/src/commands_tests.kama`), one each for the room and the move, and 4 `nodes` cases
       sharpened, each seen red against a stub first but the defaults'.
+  - on 2026-11-18, **the audio side and the way back's first report** (AUD-1, AUD-2 and AUD-3; decisions 4, 5, 9, 32,
+    34 and 35; SPEC.md § The slots and § The audio side and the way back):
+    - `audio::rt::SlotArray`, the audio side's half of the slots: a value put at the slot an id names, read and removed
+      only at the generation it was put at, beside `SlotTable` in `src/rt/ring.kama`, with its 12 `slot array` cases
+      (`tests/src/slot_array_tests.kama`);
+    - `audio::graph::Engine` (`src/graph/engine.kama`): a render quantum drains the command ring at its top, applies
+      every command in order, and publishes its reports on the way back with one store. A released gain, having no
+      input, is freed at once and reported as `Event::Freed`. A command it cannot apply is refused and counted;
+    - the way back, a `Ring<Event>` of the node capacity, and `ContextState.poll()`, which reads it and frees each
+      reported row in the table. A context now draws six parts;
+    - 9 `audio side` cases (`tests/src/audio_side_tests.kama`) and 3 `nodes` cases sharpened to six parts, each seen
+      red against a stub first, or, for the last two audio side cases, against the mutation each was written for.
 
-  58 cases, green on every leg: native debug and release, wasm debug and release.
+  79 cases, green on every leg: native debug and release, wasm debug and release.
 - **Settled while building the table, reported to the owner to object to** (each within decisions 34 and 35):
   - the name `SlotTable`, and its calls: `take()`, `countUp(id:)`, `countDown(id:)`, `nextRelease()`, `free(id:)`,
     `countOf(id:)`, `length()`, `capacity()`, `retired()`;
@@ -118,6 +130,25 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
     more and publish once;
   - **the flush is not public yet.** Its callers come with their rows, `update()` (AUD-5) and the offline render's start
     (AUD-9).
+- **Settled while building the audio side, reported to the owner to object to** (each within decisions 4, 5, 9, 31,
+  32 and 34):
+  - **the audio side's half of the slots is a public `audio::rt` primitive, `SlotArray<T, A>`,** the sibling of
+    `SlotTable`: decision 31 gives `audio::rt` the real-time primitives the engine and a program's own DSP share, and
+    the DAW and speech packages keep their own objects' audio-side state the same way. Its storage is the private
+    `Slots`, since std's `FixedArray` traps when its allocator has no room (KAUD-7). Its calls are `put(id:, value:)`,
+    `at(id:)`, `remove(id:)`, `length()` and `capacity()`; a value is put only into an empty slot, and generation 0
+    marks one;
+  - **the engine is `audio::graph::Engine`, internal,** in a file of its own. It owns only its array, and each quantum
+    is handed the command ring and the way back, so the same engine serves a real-time context's audio thread and an
+    offline render's. `EngineNode`, what it keeps of a node, holds the node's kind, which nothing reads until the
+    render does;
+  - **a command the audio side cannot apply is refused and counted,** not reported as an event: no call can send one,
+    so each is the package's bug. Decision 9's error event comes with the first error a program can cause;
+  - **the way back is a `Ring<Event>` of the node capacity,** so a report always has room (decision 9), and its one
+    kind so far is `Event::Freed(node)`. Each later kind arrives with what sends it;
+  - **the read of the way back is `ContextState.poll()`,** not yet public: `update()` (AUD-5) is its caller;
+  - **five more seams to the tests program,** nine in all: `audiotests::quantumIn`, `pollIn`, `audioHeldIn`,
+    `refusedIn` and `forgeIn`, the last adding a command no call would send, so a refusal can be tested.
 - **Proved by mutation:**
   - the ring and the backlog (`.scratch/aud29/mutate_ring.py`, through the whole gate): 38 of 39 mutations of
     `src/rt/ring.kama` are caught, none by a hang.
@@ -138,6 +169,11 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
     thread that is invisible, since a backlog left holding commands means the ring is full. It matters only when the
     audio side pops on another thread between the move and the releases, a race held by review, as the ring's release
     store is.
+  - the slot array, the engine and the way back (`.scratch/aud29/mutate_audio_side.py`, through the whole gate):
+    **52 of 52 caught,** none by a hang, and none refused by kama. The first pass caught 49 of 51, and each miss showed
+    a case too loose, now sharpened: the slot array's read past the array, which wraps onto slot 0, held nothing there;
+    and no case had a command ring smaller than its rows, so the way back sized by the ring passed. The 52nd proves the
+    no-room case, green against the stub.
 - **Decided on the way:**
   - on 2026-11-15, where a call scheduled ahead waits (32, in its node, as in Web Audio) and that a flush lands whole
     (33);
@@ -145,26 +181,33 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
     primitive, its ids 32 + 32 bits (34), and a dropped node's release sent after the backlog (35);
   - on 2026-11-18, the program's memory as callbacks, `AudioMemory` (36), and kyoten's pin at 0.9.978 on both
     machines, for `try new` into a `Shared` (KR-399 to KR-402).
-- **Found on the way: KAUD-7, KAUD-8 and KAUD-9.**
+- **Found on the way: KAUD-7, KAUD-8, KAUD-9 and KAUD-10.**
   - std's collections trap when their allocator has no room (KAUD-7, kama's KR-403, briefed). So every declared
     capacity takes its storage as the ring's does, through the private `Slots` in `src/rt/ring.kama`.
   - `try new(allocator:)` into a `Shared` trapped when the object fit and its control block did not (KAUD-8). Fixed in
     0.9.973 and retired.
   - A generic function's instance cannot be bound to an `fnptr` (KAUD-9), so the package cannot write the callbacks
     for any allocator, and a program with its own writes three free functions.
+  - `try new(allocator:)` whose box has no room leaks a temporary built in its argument list (KAUD-10), though KR-402
+    drops a local given to it. The nodes' no-room case caught the engine's array left out at a budget of 640 bytes,
+    so the engine is bound to a local before the state's `try new`.
+  - std's `FixedArray` traps when its allocator has no room, as KAUD-7's collections do, so the slot array takes its
+    storage through `Slots` too.
 - **Next:**
-  - **the audio side.** An engine stepped a quantum at a time drains the ring at the top of each quantum and keeps the
-    audio side's own table of node slots, its generations checked. It applies `Made` and `Release` under Web Audio's
-    lifetime rule, so a gain with no input is freed at once. Its "slot freed" report needs the way back (AUD-3), whose
-    reader is `free(id:)`'s caller;
-  - **the rest of AUD-1's commands, each with its call:** `connect()` (the `AudioNode` contract), a source's start with
-    its frame, and a parameter's events with `AudioParam`. The late count is a timed call's rule (decision 32), so it
-    lands with the first one, on the audio side's clock;
-  - then the context's options and memory (AUD-4), an `OfflineAudioContext` rendering in the declared block (AUD-9),
-    and the first golden.
-- **Read first:** § Decided (4, 6, 9 and 32 to 36 above all), SPEC.md § Contexts and nodes and § The commands, ROADMAP_DETAIL.md
-  § AUD-29, and the probes it starts from (`aud-probe-cmd` for the commands and the way back, `aud-probe-routes` for
-  slots and a block split at a frame).
+  - **the rest of AUD-1's commands, each with its call:**
+    - `connect()` (the `AudioNode` contract). It makes Web Audio's lifetime rule real on the audio side: a released node
+      with a live input is kept until the input goes;
+    - a source's start with its frame, which keeps a released source until it ends;
+    - a parameter's events with `AudioParam`.
+
+    The late count is a timed call's rule (decision 32), so it lands with the first one, on the audio side's clock;
+  - **the render itself:** an `OfflineAudioContext` rendering its declared length in the declared block (AUD-9), the
+    destination node, the samples, and the first golden. It is the first public caller of the flush, the quantum and
+    the way back's read;
+  - then the context's options and memory (AUD-4) and `update()` (AUD-5).
+- **Read first:** § Decided (4, 6, 9 and 32 to 36 above all), SPEC.md § Contexts and nodes, § The commands and § The
+  audio side and the way back, ROADMAP_DETAIL.md § AUD-29, and the probes it starts from (`aud-probe-cmd` for the
+  commands and the way back, `aud-probe-routes` for slots and a block split at a frame).
 - **Each slice checks the owner's games for code it can take** (2026-11-18, after the owner asked why audio came so
   fast in them). `../friendly-fire-department/audio/` and `../the-mallow-man/audio/` each answer one game: a fixed set
   of commands, a ring that drops when full, and the web leg rendered on the page's thread. But parts of them fit rungs

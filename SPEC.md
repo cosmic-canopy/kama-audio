@@ -10,9 +10,10 @@ tested.
 protocol's two halves are built (AUD-1): the ring it runs on, which publishes a batch with one store, and the backlog in
 front of it. So is the slot table that a command names a node by (AUD-2), and the first node over it: an
 `OfflineAudioContext` made from the program's memory, handed over as callbacks, and a `GainNode` counted in its table.
-A node's make and its release travel as commands: the backlog, then a flush into the ring. The audio side applies them:
-an engine stepped a quantum at a time keeps each node at its id's slot in an array of its own, frees a released gain at
-once, and reports it on the way back, whose read gives the row back to the table. Each is tested natively and on wasm
+A node's make, its connections and its release travel as commands: the backlog, then a flush into the ring. The audio
+side applies them: an engine stepped a quantum at a time keeps each node at its id's slot in an array of its own, with
+the connections between them, keeps a released node while a node that can sound feeds it, and frees it once nothing
+does, reporting it on the way back, whose read gives the row back to the table. Each is tested natively and on wasm
 under node, in debug and release. The engine renders no samples yet, so nothing makes a sound. Not published.
 
 ## The modules
@@ -21,11 +22,11 @@ Decision 31 sets the first cut:
 
 | Module | What it holds |
 |---|---|
-| `audio` | the lower tier, Web Audio's graph under Web Audio's names: `AudioMemory`, `BaseAudioContext`, `OfflineAudioContext`, `OfflineAudioContextOptions`, `AudioError`, `GainNode` |
+| `audio` | the lower tier, Web Audio's graph under Web Audio's names: `AudioMemory`, `BaseAudioContext`, `OfflineAudioContext`, `OfflineAudioContextOptions`, `AudioError`, `AudioNode`, `GainNode` |
 | `audio::sound` | the upper tier: sounds, voices, buses, snapshots and emitters. Not made yet |
 | `audio::rt` | the real-time primitives that the engine and a program's own DSP share: `Ring`, `Backlog`, `SlotTable`, `SlotArray`, `CapacityError`, `slotOf`, `generationOf` |
 | `audio::store` | **internal**: `Slots`, the storage under every declared capacity, taken once from the allocator a part is handed and never grown. std's collections cannot serve, since each traps when its allocator has no room (KAMA_GAPS.md KAUD-7) |
-| `audio::graph` | **internal**: what a context and its nodes share, `ContextState`, `NodeHold` and the commands, `Command` and `NodeKind`; and the audio side, `Engine`, `EngineNode` and the way back's `Event`. The package's own modules import it, and no program can |
+| `audio::graph` | **internal**: what a context and its nodes share, `ContextState`, `NodeHold`, `NodeLink`, the commands (`Command` and `NodeKind`) and `Connections`; and the audio side, `Engine`, `EngineNode`, the lifetime walk's `Mark` and the way back's `Event`. The package's own modules import it, and no program can |
 
 ## The command protocol's two halves
 
@@ -184,12 +185,16 @@ way.
 - **`put(id:, value:)`** puts `value` at the id's slot, at the id's generation, only into an empty slot. It answers
   `false`, changing nothing, when the slot holds a value at any generation.
 - **`at(id:)`** answers the value when the slot holds one at the id's generation, and otherwise `None`.
+- **`set(id:, value:)`** replaces the value when the slot holds one at the id's generation, and otherwise answers
+  `false`, changing nothing.
 - **`remove(id:)`** empties the slot when it holds a value at the id's generation, and otherwise answers `false`.
+- **`idAt(slot:)`** answers the id of the value a slot holds, its slot and the generation the value was put at, or 0
+  for an empty slot or one that is not the array's. A walk over the slots visits every value this way.
 - **So a command naming a node the audio side no longer holds never reaches the node now in its slot.** An id of any
   other generation is refused, as is a slot past the array, generation 0 (which marks an empty slot, and no live id
   has) and −1. Every refusal is an answer, never a trap.
 - **What it answers:** `length()`, the slots holding a value, and `capacity()`, the slots it was made with.
-- **Tested** (`tests/src/slot_array_tests.kama`, the `slot array` cases, 12 of them, each seen red against a stub first
+- **Tested** (`tests/src/slot_array_tests.kama`, the `slot array` cases, 14 of them, each seen red against a stub first
   but the no-room case, which the mutations prove):
   - a fresh array is empty at its declared capacity;
   - both refusals, and more slots than 32 bits can name refused as `BadCapacity` before the allocator is asked;
@@ -201,7 +206,11 @@ way.
     holds nothing, refuses a second removal, and takes a put again at the next generation, which the earlier
     generation's id cannot reach;
   - an id past the array, of generation 0, or −1 is refused by every call, with slot 0 held, since the storage's index
-    would wrap the slot just past the array onto it.
+    would wrap the slot just past the array onto it;
+  - a set replaces the value at the generation it was put at, and only there: another generation, an empty slot and a
+    stranger are refused, changing nothing;
+  - each slot names the id it holds a value at, or 0, and a slot past the array or below 0 names 0, with slot 0 held,
+    onto which the storage's index would wrap slots 3 and −3 of an array of 3.
 
 ## The program's memory
 
@@ -255,18 +264,22 @@ it. Its members:
   - `ringCapacity`, the commands that can cross to the audio side at once, 1,024 by default: its command ring
     (decision 7);
   - `backlogCapacity`, the commands that can wait for a flush, 4,096 by default: its backlog (decisions 8, 33);
+  - `connectionCapacity`, the connections between its nodes at once, 4,096 by default, four for each node row
+    (decision 6);
   - `memory`, `AudioMemory.global()` by default.
-- **What a make takes:** the slot table, the command ring, the backlog, the way back, the audio side's array and the
-  state, drawn from `options.memory` once each and in that order, six allocations. The way back and the array each have
-  `nodeCapacity` places. The state is one `Shared`, made by `try new(allocator:)`, that holds the other five and the
-  audio side. All go back with the last hold.
+- **What a make takes:** eleven parts, drawn from `options.memory` once each and in this order: the slot table, the
+  command ring, the backlog, the way back, the program side's connections (the connections and a list head for each
+  node row, two allocations), then the audio side (its array of nodes, its connections, two allocations, and the
+  lifetime walk's marks), then the state. The way back, the array, the list heads and the marks each have
+  `nodeCapacity` places. The state is one `Shared`, made by `try new(allocator:)`, that holds the rest. All go back
+  with the last hold.
 - **What a make answers instead** (`audio::AudioError`), with nothing left allocated:
   - `NotSupported` for an option outside Web Audio's ranges, as Web Audio's `NotSupportedError`: 1 to 32 channels, a
-    length of at least one frame, a sample rate from 3,000 to 768,000 Hz. A node, ring or backlog capacity below one
-    is the same;
+    length of at least one frame, a sample rate from 3,000 to 768,000 Hz. A node, ring, backlog or connection capacity
+    below one is the same;
   - `OutOfMemory` when the memory has no room for a part. Every part taken before it goes back.
 - **What it answers:** `sampleRate()`, `length()` and `numberOfChannels()`, as it was made.
-- **The test seam:** nine `friend` grants to the tests program:
+- **The test seam:** ten `friend` grants to the tests program:
   - `audiotests::rowsHeldIn` reads its rows held;
   - `audiotests::releaseDueIn` takes its next release due straight from the table;
   - `audiotests::flushIn` flushes it;
@@ -274,11 +287,12 @@ it. Its members:
   - `audiotests::quantumIn` renders one quantum on its audio side;
   - `audiotests::pollIn` reads its way back;
   - `audiotests::audioHeldIn` reads the nodes its audio side holds, and `audiotests::refusedIn` the commands it refused;
-  - `audiotests::forgeIn` adds a command no call would send, a make or a release of any id, to its backlog.
+  - `audiotests::forgeIn` adds a command no call would send, a make or a release of any id, to its backlog, and
+    `audiotests::forgeConnectIn` a connection between any ids.
 
 ### `audio::GainNode`
 
-**The first node, and the pattern every node follows** (decisions 4, 34 and 35).
+**The first node, and the pattern every node follows** (decisions 4, 34 and 35). It implements `AudioNode`.
 - **Making one:** `GainNode.make(context:)` takes a row in the context's table, adds its make to the context's
   backlog, and returns `Result<GainNode, AudioError>`. Making a node allocates nothing. It refuses, and nothing
   changes:
@@ -290,8 +304,8 @@ it. Its members:
   until the program side reads the audio side's report that the node is freed, so a context whose rows are all held
   refuses a make even after a drop.
 - **Tested** (the `nodes` cases, 11 of them, each seen red against a stub or a mutation first):
-  - a context takes its six parts from the program's memory once, and making a node takes nothing; its state outlives
-    the context's handle while a node holds it, and everything goes back at the last drop;
+  - a context takes its eleven parts from the program's memory once, and making a node takes nothing; its state
+    outlives the context's handle while a node holds it, and everything goes back at the last drop;
   - it answers the channels, length and sample rate it was made with;
   - each of Web Audio's ranges, and each capacity below one, refused as `NotSupported`, each bound made, and nothing
     allocated;
@@ -348,16 +362,18 @@ program side must act on** (decisions 4, 5, 9, 32, 34 and 35). Its public caller
 context's device (AUD-11) and an offline render (AUD-9). An offline context's audio side runs on the program's thread,
 so a quantum is a call.
 - **The engine,** `audio::graph::Engine`, keeps each node it is told of in its own `SlotArray` of `EngineNode`s, of the
-  context's node capacity. It owns only that array. Each quantum it is handed the command ring and the way back, so the
-  same engine runs on a real-time context's audio thread or an offline render's.
+  context's node capacity, and the connections between them in `Connections` of its own. It owns only those and the
+  lifetime walk's marks. Each quantum it is handed the command ring and the way back, so the same engine runs on a
+  real-time context's audio thread or an offline render's.
 - **A quantum** drains the command ring at its top and applies every command published before it, in order, then
   publishes the reports it made on the way back with one store:
   - `Made` puts the node at its id's slot;
-  - `Release` follows Web Audio's lifetime rule (decision 4): the audio side keeps a node while it can still sound, and
-    frees it once it cannot. A gain with no input cannot, so it is freed at once, and its slot reported freed.
+  - `Connect` adds the connection;
+  - `Release` marks the node released, and makes the lifetime walk due (§ Connections).
 - **A command it cannot apply is refused and counted,** never applied to another node and never a trap: a make into a
-  slot that holds a node, or a release of a node it does not hold at that generation. No call can send one, so each
-  would be the package's bug, and the count is how it is seen.
+  slot that holds a node; a connection naming a node it does not hold at that generation, one it holds already, or one
+  past its declared connections; and a release of a node it does not hold at that generation, or has released. No
+  call can send one, so each would be the package's bug, and the count is how it is seen.
 - **The way back** is a `Ring` of `audio::graph::Event`, so far one kind, `Freed(node)`. Each later kind arrives with
   what sends it (decision 9): a sound's end, an error, a block handed back. **It always has room for a report:** its
   capacity is the node capacity, and a slot is reported freed at most once before the program side reads the report,
@@ -382,6 +398,96 @@ so a quantum is a call.
 
   The `nodes` cases cover the state's two new parts, six allocations in all, each in turn refused with what came before
   it given back.
+
+## Connections
+
+**A node's output connected to another node's input, and the lifetime rule it brings** (decisions 3, 4, 6, 8 and 34;
+Web Audio's `connect(destinationNode)`).
+
+### `audio::AudioNode`
+
+**A contract every node implements,** as Web Audio's `AudioNode` is the base of every node. kama's inheritance cannot
+carry it, since a derived type may add no public member and each node adds its own. Its members:
+- `connect(destination:)`, which takes any node;
+- `linkFor(key:)`, the node's context and id. Its key's type is in `audio::graph`, so only the package can call it.
+
+### `connect(destination:)`
+
+- **It connects the node's output to `destination`'s input,** as Web Audio's `connect(destinationNode)` does with its
+  `output` and `input` both 0. kama has no default arguments, and every node so far has one input and one output, so
+  the form that names them comes with the first node that has more.
+- **It answers `Result<Unit, AudioError>`** where Web Audio returns the destination: a refusal is an answer, never a
+  trap, so there is no chaining.
+- **It is recorded on the program side, and its command added to the backlog;** a flush sends it, and the audio side
+  adds the connection in the quantum it lands in (decision 32).
+- **A connection made twice is one,** and the second connect is taken and sends nothing, as Web Audio ignores "multiple
+  connections with the same termini". The reverse is another connection, and a node may connect to itself, or into a
+  cycle. The render will mute a cycle with no delay in it, as Web Audio's rendering algorithm does.
+- **What it refuses, changing nothing,** checked in this order:
+  - a node of another context, as `InvalidAccess`, Web Audio's `InvalidAccessError`. Contexts are told apart by their
+    state's address;
+  - a full backlog, as `TooManyCommands` (decision 8);
+  - every declared connection held, as `TooManyConnections` (decision 6). A connection already held is taken even then,
+    since it adds none.
+
+### The connections on each side
+
+`audio::graph::Connections` is a fixed pool of `connectionCapacity` connections, with a list of each node slot's
+outputs, drawn from the program's memory at the make. Each side holds one:
+- **the program side's** answers at the call whether a connection is held already and whether a declared one is free.
+  A freed node takes its connections with it when the way back is read, so they come back then;
+- **the audio side's** is what the lifetime walk follows, and a node it frees takes its connections with it at once.
+
+**A slot's list is the connections of the node in it, and they leave with it.** Only outputs are listed, and a
+connection records only its destination's id. Freeing a node takes its slot's whole list out before the slot can be
+taken again, and a node is freed only once nothing that can sound feeds it, so every node connected into it is freed in
+the same walk and takes its own list out. Every caller names a node it holds.
+
+### The lifetime rule
+
+**The audio side keeps a released node while a node that can sound feeds it, through any chain of connections**
+(decision 4; Web Audio's normative "actively processing" and its non-normative dynamic lifetime, where a node is
+deleted once nothing references it and then disconnects its outputs).
+- **What can sound, of itself:** so far, a node the program holds. A playing source and a tail still ringing join it
+  when they come.
+- **A node's own outputs keep nothing alive,** so a released node feeding a held one is freed at once.
+- **A released cycle that nothing feeds is freed whole,** though each of its nodes feeds another. A count of live
+  inputs alone would keep it forever, which is why the rule is a walk.
+- **The walk:** in a quantum that applied a release, the engine marks every node reached along the outputs from the
+  nodes that can sound, with an explicit stack in its marks' storage, so it neither recurses nor allocates; then it
+  frees every released node it did not reach, taking its connections out and reporting it on the way back. A quantum
+  that releases nothing does not walk.
+- **What it costs:** a pass over the slots and the connections. At 1,024 nodes and 4,096 connections a walk took 5.0 µs
+  natively on the M4 and 6.6 µs on wasm under node, a quarter of a percent of a 128-frame quantum at 48 kHz; at 4,096
+  nodes and 16,384 connections, 42 µs and 55 µs (`.scratch/aud1-mark/`, release builds, 2026-11-18, load average 4 to
+  7).
+- **Tested** (`tests/src/connect_tests.kama`, the `connect` cases, 16 of them, each seen red against a stub first, or,
+  for the last two, against the mutations they were written for):
+  - the options declare 4,096 connections by default;
+  - a connect adds its command behind the makes, and only a flush sends it;
+  - a connection made twice is one, also when repeated after a later connection from the same node, and the reverse
+    and a node's loop to itself are others;
+  - a node of another context is refused as `InvalidAccess`, both ways, and nothing is sent in either context;
+  - with every declared connection held, a new one is `TooManyConnections` and a held one taken;
+  - a full backlog is `TooManyCommands`, checked first, and the refusal takes no connection; with the backlog and the
+    connections full at once, the backlog answers, and once a flush empties it, the connections do;
+  - a released node fed by a held one is kept, and freed with its feeder;
+  - a chain of released nodes is kept while its head is held, and freed whole after it;
+  - a node's own outputs keep nothing alive;
+  - a released cycle nothing feeds is freed whole, and one fed by a held node is kept, then freed whole with its
+    feeder;
+  - a released node connected only to itself is freed;
+  - a freed node's connections go with it on both sides: the program side counts them until the way back is read, and
+    the audio side has room for the next;
+  - the audio side refuses and counts a connection naming a node at another generation, one it holds while it has room
+    for more, and one past its declared, keeping what it holds, and a second release of a node it has released and
+    still keeps;
+  - a held node feeding two released nodes keeps both, and every declared connection comes back on both sides once all
+    three are freed;
+  - a freed node's slot, taken again, starts with no connections.
+
+  The `nodes` cases cover the context's eleven parts, each in turn refused with what came before it given back, and a
+  connection capacity's range.
 
 ## Proved by mutation
 
@@ -451,3 +557,34 @@ case red, none by a hang, and kama refuses none.**
 - **The no-room case,** green against the stub, catches the array's no room answered as `BadCapacity`, added for it.
 - **A refused release reported all the same** was the one mutation a case was written for before the pass: the program
   side's table refuses a stale report, so only a report's room shows it, with one row.
+
+### Connections and the lifetime rule
+
+Each of 81 mutations of the connections (`src/graph/connections.kama`), the engine's connections and its lifetime walk
+(`src/graph/engine.kama`), connect on the program side and the state's new parts (`src/graph/graph.kama`), the option
+and the seam (`src/context.kama`), the contract's members (`src/gain.kama`) and the slot array's `set` and `idAt`
+(`src/rt/ring.kama`) runs through the whole gate (`.scratch/aud29/mutate_connect.py`), and each file is restored byte
+for byte after each. **78 turn a case red, 4 of them by a hang, and kama refuses none; the other 3 are equivalent.**
+- **The first pass caught 66 of 82.** Eleven of its misses showed a case too loose, and the case was sharpened, or
+  written:
+  - **`idAt` past the array or below 0:** the storage's index wraps slots 3 and −3 of an array of 3 onto slot 0, which
+    the case held nothing at;
+  - **the connections' free chain one short, a new connection not joined to its node's list, `has()` looking at the
+    first connection only, the walk following one output only, and `removeFrom` taking the first only:** no node had two
+    outputs, and no pool of more than one was filled. A fan-out case, with two declared connections, now holds a feeder
+    and two nodes it keeps, then two new connections once all three are freed; and a duplicate is repeated after a
+    later connection from the same node;
+  - **`removeFrom` leaving a slot's head on a connection it gave back:** no case reused a freed node's slot and connected
+    from it. A case now does, and the mutation loops the list on itself;
+  - **the engine adding a duplicate, and taking a second release:** the case forged its duplicate only into a full pool,
+    and no case released a released node. It now forges each while it would be taken;
+  - **the two limits checked in the other order:** no case had the backlog and the connections full at once.
+- **Two showed code that could not matter:** a connection's source, checked by `has()` and `removeFrom`, is always the
+  node in its slot, since a slot's list leaves with its node before the slot is taken again. The field is gone, and a
+  freed node's slot gives back its whole list.
+- **Three are equivalent, and dropped:**
+  - **`firstOut` without its range guard:** every caller names the slot of a node it holds. The guard stays, for a
+    caller that someday does not;
+  - **the walk in every quantum, and its flag never cleared:** without a release no node stops being able to sound, and a
+    connection only adds reach, so an extra walk frees nothing. The flag saves its cost, which the gate does not
+    measure.

@@ -4,11 +4,13 @@
 //
 // - **Its capacity is declared** (decision 6): `connectionCapacity` connections, and a list head for each of the
 //   context's node slots, each part taken once from the program's memory and never grown.
-// - **A connection runs from a node's output to a node's input,** each node named by its id. It sits in the list of
-//   connections out of its node's slot, and only that list is kept: a walk follows a node's outputs, and a freed
-//   node's connections go with it.
-// - **Freeing a node takes its connections out.** A node is freed only once nothing that can sound feeds it, so every
-//   node connected into it is freed in the same walk, and takes its own connections out.
+// - **A connection runs from a node's output to a node's input.** It sits in the list of its source's slot, and records
+//   only where it goes, by the destination's id: a walk follows a node's outputs, and only outputs are listed.
+// - **A slot's list is the connections of the node in it,** and they leave with it: freeing a node takes its slot's
+//   whole list out, before the slot can be taken again. A node is freed only once nothing that can sound feeds it, so
+//   every node connected into it is freed in the same walk, and takes its own list out. So every connection's
+//   destination is a node its source's side still holds.
+// - **A caller names a node it holds,** as the program side's handle and the engine's checked command do.
 
 import { audio::AudioMemory, audio::rt::CapacityError, audio::rt::slotOf, audio::store::Slots };
 
@@ -17,9 +19,8 @@ export { Connections, NO_CONNECTION };
 // The end of a list, and an empty slot's head.
 comptime int64 NO_CONNECTION = -1;
 
-// One connection, in the list of its node's: from `from`'s output to `to`'s input.
+// One connection, in the list of its source's slot: to `to`'s input.
 type value Edge {
-    public int64 from = 0;
     public int64 to = 0;
     public int64 next = -1;
 }
@@ -36,7 +37,6 @@ type resource Connections {
         int64 n = this.edges.count();
         int64 i = 0;
         while (i < n) {
-            this.edges[i].from = 0;
             this.edges[i].to = 0;
             this.edges[i].next = i + 1 < n ? i + 1 : NO_CONNECTION;
             i = i + 1;
@@ -71,7 +71,7 @@ type resource Connections {
     public const fn bool has(int64 from, int64 to) {
         int64 e = this.firstOut(slot: slotOf(id: from));
         while (e != NO_CONNECTION) {
-            if (this.edges[e].from == from && this.edges[e].to == to) { return true; }
+            if (this.edges[e].to == to) { return true; }
             e = this.edges[e].next;
         }
         return false;
@@ -84,7 +84,6 @@ type resource Connections {
         if (slot >= this.heads.count() || this.freeHead == NO_CONNECTION) { return false; }
         int64 e = this.freeHead;
         this.freeHead = this.edges[e].next;
-        this.edges[e].from = from;
         this.edges[e].to = to;
         this.edges[e].next = this.heads[slot];
         this.heads[slot] = e;
@@ -92,26 +91,21 @@ type resource Connections {
         return true;
     }
 
-    // Takes out every connection from `from`'s output, answering how many.
+    // Takes out every connection from `from`'s output, its slot's whole list, answering how many.
     public fn isize removeFrom(int64 from) {
         int64 slot = slotOf(id: from);
         if (slot >= this.heads.count()) { return 0; }
         isize removed = 0;
-        int64 before = NO_CONNECTION;
         int64 e = this.heads[slot];
         while (e != NO_CONNECTION) {
             int64 after = this.edges[e].next;
-            if (this.edges[e].from == from) {
-                if (before == NO_CONNECTION) { this.heads[slot] = after; } else { this.edges[before].next = after; }
-                this.edges[e].next = this.freeHead;
-                this.freeHead = e;
-                this.used = this.used - 1;
-                removed = removed + 1;
-            } else {
-                before = e;
-            }
+            this.edges[e].next = this.freeHead;
+            this.freeHead = e;
+            this.used = this.used - 1;
+            removed = removed + 1;
             e = after;
         }
+        this.heads[slot] = NO_CONNECTION;
         return removed;
     }
 

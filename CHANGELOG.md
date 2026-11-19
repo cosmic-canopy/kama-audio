@@ -5,6 +5,16 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `audio::AudioNode`, the contract every node implements, and `connect(destination:)`, Web Audio's
+  `connect(destinationNode)` (decisions 3, 4, 6 and 8): a connection made twice is one, a node of another context is
+  `AudioError::InvalidAccess`, a full backlog `TooManyCommands`, and every declared connection held the new
+  `TooManyConnections`, against `OfflineAudioContextOptions.connectionCapacity` (4,096 by default). The audio side keeps
+  a released node while a node that can sound feeds it, through any chain of connections, and frees a released cycle
+  that nothing feeds; a freed node's connections go with it on both sides (2026-11-18).
+- `audio::rt::SlotArray.set(id:, value:)`, which replaces a value at the generation it was put at, and `idAt(slot:)`,
+  the id a slot holds, for a walk over every value (2026-11-18).
+- A context draws its connections, on each side, and the lifetime walk's marks from the program's memory: eleven
+  allocations at a make (2026-11-18).
 - The audio side applies a context's commands, and the way back returns a released node's row (AUD-1, AUD-2 and AUD-3,
   decisions 4, 5, 9, 32, 34 and 35): a render quantum drains the command ring at its top and applies every command
   published before it, in order; a released gain, having no input, is freed at once and reported on the way back, a

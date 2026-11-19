@@ -301,6 +301,7 @@ fn string setReplaces(ref SlotArray<int64, GlobalAllocator> a) {
 }
 
 // Each slot answers the id it holds a value at, or 0 when it holds none; a slot past the array, or below 0, answers 0.
+// Slot 0 holds a value while those are asked, since the storage's index would wrap slots 3 and -3 onto it.
 fn string idAtNames(ref SlotArray<int64, GlobalAllocator> a) {
     int64 slot = 0;
     while (slot < 3) {
@@ -314,10 +315,13 @@ fn string idAtNames(ref SlotArray<int64, GlobalAllocator> a) {
     if (named != id) { return "slot 1 named ${named} where the id put there was ${id}"; }
     int64 other = a.idAt(slot: 0);
     if (other != 0) { return "an empty slot named ${other} beside a held one"; }
+    if (!a.put(id: idAt(slot: 0, generation: 1), value: 10)) { return "the put into slot 0 was refused"; }
     int64 past = a.idAt(slot: 3);
     if (past != 0) { return "the slot just past the array named ${past}"; }
     int64 below = a.idAt(slot: -1);
     if (below != 0) { return "slot -1 named ${below}"; }
+    int64 wrapped = a.idAt(slot: -3);
+    if (wrapped != 0) { return "slot -3 named ${wrapped}"; }
     if (!a.remove(id: id)) { return "the removal was refused"; }
     int64 gone = a.idAt(slot: 1);
     return gone == 0 ? "" : "a removed slot named ${gone}";

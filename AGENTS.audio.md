@@ -83,8 +83,20 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
       reported row in the table. A context now draws six parts;
     - 9 `audio side` cases (`tests/src/audio_side_tests.kama`) and 3 `nodes` cases sharpened to six parts, each seen
       red against a stub first, or, for the last two audio side cases, against the mutation each was written for.
+  - on 2026-11-18, **`connect()` and the lifetime rule** (AUD-1 and AUD-2; decisions 3, 4, 6, 8 and 34; SPEC.md
+    § Connections):
+    - `audio::store`, an internal module holding `Slots`, moved out of `src/rt/ring.kama` so `audio::graph`'s parts take
+      their storage the same way;
+    - `SlotArray.set(id:, value:)` and `idAt(slot:)`, for the walk;
+    - `audio::AudioNode`, the contract every node implements, with `connect(destination:)`; `AudioError::InvalidAccess`
+      and `TooManyConnections`; `OfflineAudioContextOptions.connectionCapacity`, 4,096 by default;
+    - `audio::graph::Connections` (`src/graph/connections.kama`), held by each side; the engine's lifetime walk, which
+      keeps a released node while a node that can sound feeds it and frees a released cycle nothing feeds. A context
+      draws eleven parts;
+    - 16 `connect` cases (`tests/src/connect_tests.kama`), 2 `slot array` cases and 4 `nodes` cases sharpened, each
+      seen red against a stub first, or, for the last two connect cases, against the mutations they were written for.
 
-  79 cases, green on every leg: native debug and release, wasm debug and release.
+  97 cases, green on every leg: native debug and release, wasm debug and release.
 - **Settled while building the table, reported to the owner to object to** (each within decisions 34 and 35):
   - the name `SlotTable`, and its calls: `take()`, `countUp(id:)`, `countDown(id:)`, `nextRelease()`, `free(id:)`,
     `countOf(id:)`, `length()`, `capacity()`, `retired()`;
@@ -149,6 +161,36 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
   - **the read of the way back is `ContextState.poll()`,** not yet public: `update()` (AUD-5) is its caller;
   - **five more seams to the tests program,** nine in all: `audiotests::quantumIn`, `pollIn`, `audioHeldIn`,
     `refusedIn` and `forgeIn`, the last adding a command no call would send, so a refusal can be tested.
+- **Settled while building `connect()`, reported to the owner to object to** (each within decisions 3, 4, 6, 8, 31 and
+  34, on Web Audio's text, read from its source on 2026-11-18):
+  - **`connect(destination:)` alone,** Web Audio's `connect(destinationNode)` with `output` and `input` both 0: kama has
+    no default arguments (a default is a parse error), and every node so far has one input and one output. The form
+    that names them, and `connect` to an `AudioParam`, each take a name of their own when they come, since kama has no
+    overloading;
+  - **it answers `Result<Unit, AudioError>`,** std's idiom for a call that can fail and returns nothing, where Web Audio
+    returns the destination for chaining: a refusal is an answer, never a trap;
+  - **`AudioNode`'s members are `connect(destination:)` and `linkFor(key:)`,** the latter keyed as `stateFor` is, so only
+    the package can call it;
+  - **the refusals, in order:** a node of another context is `AudioError::InvalidAccess`, Web Audio's
+    `InvalidAccessError`, contexts told apart by their state's address; a full backlog is `TooManyCommands`; every
+    declared connection held is the new `TooManyConnections`. A duplicate is taken and sends nothing, even with every
+    connection held, as Web Audio ignores "multiple connections with the same termini";
+  - **`connectionCapacity`, 4,096 by default,** four for each of the default 1,024 node rows, at least one or
+    `NotSupported`;
+  - **cycles are allowed,** as in Web Audio, whose rendering algorithm mutes a cycle with no `DelayNode`. The muting
+    comes with the render;
+  - **the lifetime rule is a walk, a mark from the nodes that can sound,** not a count of live inputs, which would keep a
+    released cycle forever: decision 4's "a node with a live input" read as Web Audio's dynamic lifetime does, a node
+    kept while something that sounds reaches it. It runs only in a quantum that applied a release, and costs 5.0 µs
+    natively and 6.6 µs on wasm at 1,024 nodes and 4,096 connections (`.scratch/aud1-mark/`), a quarter of a percent
+    of a quantum. An incremental form can replace it later with no change to the API;
+  - **`Connections` is internal, and each side holds one:** the program side's answers a duplicate and the limit at the
+    call and gives a freed node's connections back when the way back is read; the audio side's is what the walk
+    follows. A slot's list is the connections of the node in it, and leaves with it, so only outputs are listed and a
+    connection records only its destination: a freed node's inputs all come from nodes freed in the same walk;
+  - **`Slots` moved to an internal module, `audio::store`,** a fourth module beside decision 31's three and `audio::graph`;
+  - **`SlotArray` gains `set(id:, value:)` and `idAt(slot:)`;**
+  - **one more seam, ten in all:** `audiotests::forgeConnectIn`.
 - **Proved by mutation:**
   - the ring and the backlog (`.scratch/aud29/mutate_ring.py`, through the whole gate): 38 of 39 mutations of
     `src/rt/ring.kama` are caught, none by a hang.
@@ -174,6 +216,13 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
     a case too loose, now sharpened: the slot array's read past the array, which wraps onto slot 0, held nothing there;
     and no case had a command ring smaller than its rows, so the way back sized by the ring passed. The 52nd proves the
     no-room case, green against the stub.
+  - connect and the lifetime rule (`.scratch/aud29/mutate_connect.py`, through the whole gate): **78 of 81 caught,** 4 by
+    a hang, none refused by kama, and the other 3 equivalent. The first pass caught 66 of 82. Eleven misses showed a
+    case too loose, now sharpened or written: no node had two outputs, no pool of more than one was filled, no freed
+    slot was reused and connected from, the engine's duplicate and second release were forged only where they would be
+    refused anyway, and no case filled the backlog and the connections at once. Two showed the connections' source
+    field could not matter, and it is gone. The equivalents: `firstOut`'s range guard, whose callers name held slots,
+    and the walk in every quantum, which frees nothing more, only costs more.
 - **Decided on the way:**
   - on 2026-11-15, where a call scheduled ahead waits (32, in its node, as in Web Audio) and that a flush lands whole
     (33);
@@ -195,19 +244,20 @@ evidence in [RESEARCH.md](RESEARCH.md), measured where it could be. This reposit
   - std's `FixedArray` traps when its allocator has no room, as KAUD-7's collections do, so the slot array takes its
     storage through `Slots` too.
 - **Next:**
-  - **the rest of AUD-1's commands, each with its call:**
-    - `connect()` (the `AudioNode` contract). It makes Web Audio's lifetime rule real on the audio side: a released node
-      with a live input is kept until the input goes;
-    - a source's start with its frame, which keeps a released source until it ends;
-    - a parameter's events with `AudioParam`.
-
-    The late count is a timed call's rule (decision 32), so it lands with the first one, on the audio side's clock;
   - **the render itself:** an `OfflineAudioContext` rendering its declared length in the declared block (AUD-9), the
-    destination node, the samples, and the first golden. It is the first public caller of the flush, the quantum and
-    the way back's read;
+    `AudioDestinationNode`, the output's samples as an `AudioBuffer`, and the first golden. It is the first public
+    caller of the flush, the quantum and the way back's read, and it mutes a cycle with no delay. **Its questions are
+    the owner's, asked when it comes up:** how Web Audio's `startRendering()`, a promise, maps to kama (a call that
+    renders and answers the buffer, or a render stepped a block at a time, which FEATURES.md's "an open length rendered
+    in chunks" wants); and how an `AudioBuffer`'s samples are counted against a declared capacity (decision 6's sample
+    memory);
+  - **the rest of AUD-1's commands, each with its call:** `disconnect()` and its forms, each needing a name of its own
+    since kama has no overloading; a source's start with its frame, which keeps a released source until it ends; a
+    parameter's events with `AudioParam`. The late count is a timed call's rule (decision 32), so it lands with the
+    first one, on the audio side's clock;
   - then the context's options and memory (AUD-4) and `update()` (AUD-5).
-- **Read first:** § Decided (4, 6, 9 and 32 to 36 above all), SPEC.md § Contexts and nodes, § The commands and § The
-  audio side and the way back, ROADMAP_DETAIL.md § AUD-29, and the probes it starts from (`aud-probe-cmd` for the
+- **Read first:** § Decided (4, 6, 9 and 32 to 36 above all), SPEC.md § Contexts and nodes, § The commands, § The
+  audio side and the way back and § Connections, ROADMAP_DETAIL.md § AUD-29, and the probes it starts from (`aud-probe-cmd` for the
   commands and the way back, `aud-probe-routes` for slots and a block split at a frame).
 - **Each slice checks the owner's games for code it can take** (2026-11-18, after the owner asked why audio came so
   fast in them). `../friendly-fire-department/audio/` and `../the-mallow-man/audio/` each answer one game: a fixed set

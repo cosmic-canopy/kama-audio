@@ -50,5 +50,10 @@ type resource ConstantSourceNode implements AudioNode, Copyable<This>(bare: give
     // Connects this node's output to `destination`'s input (`AudioNode`'s contract).
     public fn Result<Unit, AudioError> connect(AudioNode destination) { return this.hold.connect(destination: destination); }
 
+    // Web Audio's `numberOfInputs` and `numberOfOutputs`: a source has no input, and one output.
+    public const fn int32 numberOfInputs() { return 0; }
+
+    public const fn int32 numberOfOutputs() { return 1; }
+
     public unsafe const fn NodeLink linkFor(ContextKey key) { return this.hold.link(); }
 }

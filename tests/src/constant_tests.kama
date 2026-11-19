@@ -12,11 +12,11 @@
 // - A start already past when its command lands begins at once, counted late (decision 32).
 // - A started source can sound (decision 4): released, it is kept and goes on sounding; one never started is freed.
 
-import { Tally, named, letGo, audioHeldIn, audio::OfflineAudioContext, audio::OfflineAudioContextOptions,
+import { Tally, named, letGo, audioHeldIn, flushSends, expectSent, expectNothingSent, audio::OfflineAudioContext, audio::OfflineAudioContextOptions,
          audio::AudioError, audio::AudioBuffer, audio::RenderRequest, audio::RenderStatus, audio::GainNode,
          audio::ConstantSourceNode, audio::ConstantSourceOptions, audio::AudioDestinationNode };
 
-export { constantTests, lateIn };
+export { constantTests, lateIn, contextOf, constantIn, takes, refuses, rendered, holds };
 
 // The package's seam: the starts the audio side applied late.
 fn int64 lateIn(ref OfflineAudioContext context) { return context.late(); }
@@ -395,6 +395,116 @@ unsafe fn string startedKept() {
     return holds(b: b, channel: 0, from: 0, to: 512, want: 0.5);
 }
 
+// A source has no input (Web Audio's numberOfInputs, 0): a connect to a constant, from a gain or the destination, is
+// IndexSize, Web Audio's IndexSizeError, and sends nothing; another context's node is InvalidAccess, checked first. A
+// gain and the destination have one input and one output, and a constant one output.
+fn string noInput() {
+    Optional<OfflineAudioContext> got = contextOf(channels: 1, length: 128);
+    OfflineAudioContext context = match (give got) { case Some(value: c): give c; case None: { return "the context was refused"; } };
+    Optional<OfflineAudioContext> otherGot = contextOf(channels: 1, length: 128);
+    OfflineAudioContext other = match (give otherGot) { case Some(value: c): give c; case None: { return "the other context was refused"; } };
+    Optional<ConstantSourceNode> rc = constantIn(context: context, offset: 1);
+    ConstantSourceNode c = match (give rc) { case Some(value: n): give n; case None: { return "the constant was refused"; } };
+    Result<GainNode, AudioError> rg = GainNode.make(context: context);
+    GainNode g = match (give rg) { case Ok(value: x): give x; case Err(error: e): { return "the gain was refused"; } };
+    Result<GainNode, AudioError> ro = GainNode.make(context: other);
+    GainNode o = match (give ro) { case Ok(value: x): give x; case Err(error: e): { return "the other gain was refused"; } };
+    AudioDestinationNode d = context.destination();
+    int32 ci = c.numberOfInputs();
+    int32 co = c.numberOfOutputs();
+    int32 gi = g.numberOfInputs();
+    int32 go = g.numberOfOutputs();
+    int32 di = d.numberOfInputs();
+    int32 dout = d.numberOfOutputs();
+    if (ci != 0 || co != 1) { return "a constant had ${ci} inputs and ${co} outputs where 0 and 1 were due"; }
+    if (gi != 1 || go != 1) { return "a gain had ${gi} inputs and ${go} outputs where 1 and 1 were due"; }
+    if (di != 1 || dout != 1) { return "the destination had ${di} inputs and ${dout} outputs where 1 and 1 were due"; }
+    string why = refuses(r: g.connect(destination: c), want: "IndexSize", what: "a gain's connect to a constant");
+    if (!why.isEmpty()) { return why; }
+    why = refuses(r: d.connect(destination: c), want: "IndexSize", what: "the destination's connect to a constant");
+    if (!why.isEmpty()) { return why; }
+    why = refuses(r: o.connect(destination: c), want: "InvalidAccess", what: "another context's gain to a constant");
+    if (!why.isEmpty()) { return why; }
+    return flushSends(context: context, want: 2);
+}
+
+// A node feeding two feeds both: a constant into the destination and into a gain that feeds it sums to twice its offset.
+unsafe fn string feedsTwo() {
+    Optional<OfflineAudioContext> got = contextOf(channels: 1, length: 200);
+    OfflineAudioContext context = match (give got) { case Some(value: c): give c; case None: { return "the context was refused"; } };
+    AudioDestinationNode d = context.destination();
+    Optional<ConstantSourceNode> rc = constantIn(context: context, offset: 0.75);
+    ConstantSourceNode c = match (give rc) { case Some(value: n): give n; case None: { return "the constant was refused"; } };
+    Result<GainNode, AudioError> rg = GainNode.make(context: context);
+    GainNode g = match (give rg) { case Ok(value: x): give x; case Err(error: e): { return "the gain was refused"; } };
+    string why = takes(r: c.connect(destination: d), what: "the constant to the destination");
+    if (!why.isEmpty()) { return why; }
+    why = takes(r: c.connect(destination: g), what: "the constant to the gain");
+    if (!why.isEmpty()) { return why; }
+    why = takes(r: g.connect(destination: d), what: "the gain to the destination");
+    if (!why.isEmpty()) { return why; }
+    why = takes(r: c.start(startTime: 0), what: "the start");
+    if (!why.isEmpty()) { return why; }
+    Optional<AudioBuffer> rb = rendered(context: context);
+    AudioBuffer b = match (give rb) { case Some(value: x): give x; case None: { return "the render was not ready"; } };
+    return holds(b: b, channel: 0, from: 0, to: 200, want: 1.5);
+}
+
+// A destination that a cycle takes in mid-render falls silent from the quantum the cycle lands in, though the constant
+// still feeds it.
+unsafe fn string mutedMidRender() {
+    OfflineAudioContextOptions o = OfflineAudioContextOptions.make(length: 512, sampleRate: 48000);
+    o.framesPerUpdate = 128;
+    o.nodeCapacity = 4;
+    Result<OfflineAudioContext, AudioError> made = OfflineAudioContext.make(options: o);
+    OfflineAudioContext context = match (give made) { case Ok(value: c): give c; case Err(error: e): { return "the context was refused"; } };
+    AudioDestinationNode d = context.destination();
+    Optional<ConstantSourceNode> rc = constantIn(context: context, offset: 0.5);
+    ConstantSourceNode c = match (give rc) { case Some(value: n): give n; case None: { return "the constant was refused"; } };
+    string why = takes(r: c.connect(destination: d), what: "the constant to the destination");
+    if (!why.isEmpty()) { return why; }
+    why = takes(r: c.start(startTime: 0), what: "the start");
+    if (!why.isEmpty()) { return why; }
+    Result<RenderRequest, AudioError> started = context.startRendering();
+    RenderRequest r = match (give started) { case Ok(value: q): give q; case Err(error: e): { return "the start was refused"; } };
+    context.update();
+    Result<GainNode, AudioError> rg = GainNode.make(context: context);
+    GainNode g = match (give rg) { case Ok(value: x): give x; case Err(error: e): { return "the gain was refused"; } };
+    why = takes(r: d.connect(destination: g), what: "the destination to the gain");
+    if (!why.isEmpty()) { return why; }
+    why = takes(r: g.connect(destination: d), what: "the gain back to the destination");
+    if (!why.isEmpty()) { return why; }
+    context.update();
+    context.update();
+    context.update();
+    RenderStatus s = r.poll();
+    AudioBuffer b = match (give s) {
+        case Ready(buffer: x): give x;
+        case Pending(framesRendered: n): { return "the render was pending at ${n}"; }
+        case Suspended(framesRendered: n): { return "the render was suspended at ${n}"; }
+    };
+    why = holds(b: b, channel: 0, from: 0, to: 128, want: 0.5);
+    if (!why.isEmpty()) { return "before the cycle landed: ${why}"; }
+    return holds(b: b, channel: 0, from: 128, to: 512, want: 0);
+}
+
+// A make sends its kind, and a start its frame: `made constant 0:1`, then `start 0:1 at 1000`.
+fn string sendsItsFrame() {
+    Optional<OfflineAudioContext> got = contextOf(channels: 1, length: 128);
+    OfflineAudioContext context = match (give got) { case Some(value: c): give c; case None: { return "the context was refused"; } };
+    Optional<ConstantSourceNode> rc = constantIn(context: context, offset: 1);
+    ConstantSourceNode c = match (give rc) { case Some(value: n): give n; case None: { return "the constant was refused"; } };
+    string why = takes(r: c.start(startTime: 1000.0 / 48000.0), what: "the start at frame 1,000");
+    if (!why.isEmpty()) { return why; }
+    why = flushSends(context: context, want: 2);
+    if (!why.isEmpty()) { return why; }
+    why = expectSent(context: context, want: "made constant 0:1");
+    if (!why.isEmpty()) { return why; }
+    why = expectSent(context: context, want: "start 0:1 at 1000");
+    if (!why.isEmpty()) { return why; }
+    return expectNothingSent(context: context);
+}
+
 unsafe fn void constantTests(ref Tally t) {
     t.verdict(name: "constant: the offset is 1 by default", why: defaults());
     t.verdict(name: "constant: a started constant renders its offset into the destination, through every quantum", why: renders());
@@ -408,4 +518,9 @@ unsafe fn void constantTests(ref Tally t) {
     t.verdict(name: "constant: a start already past begins at once, counted late", why: lateStart());
     t.verdict(name: "constant: a released constant that started is kept and sounds; one never started is freed",
               why: startedKept());
+    t.verdict(name: "constant: a source has no input, so a connect to it is IndexSize; another context's is InvalidAccess first",
+              why: noInput());
+    t.verdict(name: "constant: a node feeding two feeds both", why: feedsTwo());
+    t.verdict(name: "constant: a destination a cycle takes in mid-render falls silent", why: mutedMidRender());
+    t.verdict(name: "constant: a make sends its kind, and a start its frame", why: sendsItsFrame());
 }

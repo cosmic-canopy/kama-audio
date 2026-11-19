@@ -433,7 +433,9 @@ Web Audio's `connect(destinationNode)`).
 
 **A contract every node implements,** as Web Audio's `AudioNode` is the base of every node. kama's inheritance cannot
 carry it, since a derived type may add no public member and each node adds its own. Its members:
-- `connect(destination:)`, which takes any node;
+- `connect(destination:)`, which takes any node with an input;
+- `numberOfInputs()` and `numberOfOutputs()`, Web Audio's: a gain and the destination have one of each, and a source
+  no input and one output;
 - `linkFor(key:)`, the node's context and id. Its key's type is in `audio::graph`, so only the package can call it.
 
 ### `connect(destination:)`
@@ -451,6 +453,7 @@ carry it, since a derived type may add no public member and each node adds its o
 - **What it refuses, changing nothing,** checked in this order:
   - a node of another context, as `InvalidAccess`, Web Audio's `InvalidAccessError`. Contexts are told apart by their
     state's address;
+  - a node with no input, a source, as `IndexSize`, Web Audio's `IndexSizeError` for an input out of bounds;
   - a full backlog, as `TooManyCommands` (decision 8);
   - every declared connection held, as `TooManyConnections` (decision 6). A connection already held is taken even then,
     since it adds none.
@@ -713,7 +716,8 @@ Audio's `AudioDestinationNode`, its `destination` attribute, and its rendering a
   taken.
 - **A started source can sound** (decision 4): released, it is kept and goes on sounding, as long as the render runs
   while it has no stop; released before its start, it is freed.
-- **Tested** (`tests/src/constant_tests.kama`, the `constant` cases, 9 of them, each seen red against a stub first):
+- **Tested** (`tests/src/constant_tests.kama`, the `constant` cases, 13 of them, each seen red against a stub first,
+  or, for the last three, against the mutations they were written for):
   - the offset is 1 by default;
   - a started constant renders its offset into the destination through every quantum and the last partial one;
   - inputs sum, at the destination and at a gain that passes them (0.25 + 0.5 + 2 + 4);
@@ -724,7 +728,14 @@ Audio's `AudioDestinationNode`, its `destination` attribute, and its rendering a
   - start's refusals change nothing: a full backlog is `TooManyCommands` and the source is not started; −1 s, NaN and
     infinity are `Range`; a second start, also at −1 s, is `InvalidState`, and the first still plays;
   - a start already past begins at the quantum it lands in, counted late, and one ahead begins at its frame;
-  - a released constant that started is kept and sounds on; one never started is freed.
+  - a released constant that started is kept and sounds on; one never started is freed;
+  - a source has no input: a constant answers 0 inputs and 1 output, a gain and the destination 1 and 1, and a
+    connect to a constant, from a gain or the destination, is `IndexSize` and sends nothing, another context's node
+    being `InvalidAccess` first;
+  - a node feeding two feeds both: a constant into the destination and into a gain that feeds it sums to twice its
+    offset;
+  - a destination that a cycle takes in mid-render falls silent from the quantum the cycle lands in;
+  - a make sends its kind and a start its frame: `made constant 0:1`, then `start 0:1 at 1000`.
 
   The `nodes` cases cover the eighteen parts, `channelCapacity`'s default and range, and, with every part refused in
   turn, a budget that steps by 4 bytes, the rows' source states being a byte a row. A `render` case covers the bytes:
@@ -888,3 +899,36 @@ for byte after each. **The first pass caught 71 of 78, 3 by a hang, and kama ref
     `OutOfMemory`, so the guard is held by review.
 
 **72 of 77 caught, 3 by a hang; the other 5 equivalent.**
+
+### The render and the first source
+
+Each of 81 mutations of the slots' states and blocks, the render, the mixing rules and a source's start and lifetime
+on the audio side (`src/graph/engine.kama`), the commands, the program side's start, its source states and the
+capacity (`src/graph/graph.kama`), the option and the error (`src/context.kama`), the nodes' inputs and outputs
+(`src/constant.kama`, `src/gain.kama`, `src/destination.kama`) and decision 3's rule for a start
+(`src/graph/frames.kama`) runs through the whole gate (`.scratch/aud29/mutate_render2.py`), and each file is restored
+byte for byte after each. **The first pass caught 58 of 75, none by a hang, and kama refused none.** It caught the two
+mutations no earlier case could see: `blockAt` reading channel 0 for every channel (the constant's 5.1 up-mix sounds
+only in the centre), and `frameAt` taking a negative time (a start at −1 s is `Range`). Of its 17 misses:
+- **one showed a defect, now fixed test-first:** whether a constant keeps its channels could matter only if something
+  fed it, and something could: a connect to a source was taken, so a constant not playing passed its input on. A node
+  now answers Web Audio's `numberOfInputs()` and `numberOfOutputs()`, and a connect to one with no input is
+  `IndexSize`. The 8 mutations of that are caught;
+- **three showed a case too loose,** now written: no node fed two, no destination fell silent mid-render when a cycle
+  took it in, and no case read a start's command;
+- **two were redundant, now gone:** a slot's state set again at a node's make, and its channels reset each quantum, since
+  every field is written before it is read;
+- **eleven are equivalent for now:**
+  - seven are reached only by a node of more than one channel other than the destination, whose output reaches the
+    output only through a cycle, so the buffer player's stereo buffers bring their cases: a slot's blocks overlapping
+    the next's (`sampleAt` without the capacity), equal counts mixed crossed, a sum never mixed up to more channels, a
+    sum's channels not kept, the in-place mix-up doing nothing, the capacity's bound, and a constant's channels not
+    set (nothing feeds a source now);
+  - two only cost: a future start written as silence instead of flagged, and a muted node fed, which is out of the
+    order and never read;
+  - two are refusals the program side always makes first: a gain started, and a source started twice;
+- **and one is held by review:** the slots' states never written at the make. Every field the render reads is written
+  first but a slot's fixed channel count, and a wrong count only moves where a mix happens, which every linear rule
+  makes the same; `Slots`' rule is that a holder writes what it reads before it reads it.
+
+**69 of 81 caught, none by a hang; the other 12 equivalent or held by review.**

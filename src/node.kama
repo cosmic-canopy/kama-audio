@@ -11,8 +11,10 @@
 //   ignored"). A node may connect to itself, or into a cycle; the render mutes a cycle with no delay in it, as Web
 //   Audio's does.
 // - **What it refuses, changing nothing:** a node of another context, as `InvalidAccess` (Web Audio's
-//   `InvalidAccessError`); a full backlog, as `TooManyCommands`, checked first; and every declared connection held, as
-//   `TooManyConnections` (decision 6).
+//   `InvalidAccessError`); a node with no input, a source, as `IndexSize` (Web Audio's `IndexSizeError` for an input out
+//   of bounds); a full backlog, as `TooManyCommands`; and every declared connection held, as `TooManyConnections`
+//   (decision 6).
+// - **`numberOfInputs()` and `numberOfOutputs()`** are Web Audio's: a source has no input.
 // - **`linkFor(key:)`** is the node's context and id. Its key's type is in `audio::graph`, so only the package can
 //   call it.
 
@@ -22,6 +24,11 @@ export { AudioNode };
 
 type contract AudioNode for resource {
     fn Result<Unit, AudioError> connect(AudioNode destination);
+
+    // Web Audio's `numberOfInputs` and `numberOfOutputs`: a source has no input.
+    const fn int32 numberOfInputs();
+
+    const fn int32 numberOfOutputs();
 
     const fn NodeLink linkFor(ContextKey key);
 }

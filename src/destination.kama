@@ -38,6 +38,11 @@ type resource AudioDestinationNode implements AudioNode, Copyable<This>(bare: gi
         return this.state.connectFrom(from: this.state.destination(), destination: destination);
     }
 
+    // Web Audio's `numberOfInputs` and `numberOfOutputs`: one each.
+    public const fn int32 numberOfInputs() { return 1; }
+
+    public const fn int32 numberOfOutputs() { return 1; }
+
     public unsafe const fn NodeLink linkFor(ContextKey key) {
         return NodeLink.make(state: this.state.where(), id: this.state.destination());
     }

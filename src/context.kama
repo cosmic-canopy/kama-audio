@@ -33,7 +33,7 @@ type enum AudioError implements Error {
             case TooManyConnections: "every connection the context declared is held; a freed node's connections come back once the way back is read";
             case InvalidAccess: "the node belongs to another context: nodes connect only within their own, as in Web Audio";
             case InvalidState: "the render is not in a state for the call, as Web Audio's InvalidStateError: started already, not started, or a suspend's frame at or before the current time, at or past the end, or taken";
-            case IndexSize: "an index is outside what the buffer holds: a channel it does not have, or a frame below 0";
+            case IndexSize: "an index is out of bounds, as Web Audio's IndexSizeError: a channel a buffer does not have, a frame below 0, or the input of a node that has none";
             case TooManySuspends: "every suspend the context declared is scheduled; one is free again once the render reaches it";
             case Range: "a value is outside its range, as Web Audio's RangeError: a time negative, not finite, or past 2^51 frames";
         };

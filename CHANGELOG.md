@@ -5,6 +5,9 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `AudioNode.numberOfInputs()` and `numberOfOutputs()`, Web Audio's. Fixed: a connect to a source was taken, so a
+  `ConstantSourceNode` that was not playing passed its input on; it is `AudioError::IndexSize` now, Web Audio's
+  `IndexSizeError`, checked after another context's `InvalidAccess` (2026-11-19).
 - `audio::ConstantSourceNode`, Web Audio's, with `ConstantSourceOptions` (`offset`, 1 by default) and
   `start(startTime:)`, Web Audio's `start(when)` under the name of its other times, since kama reserves `when`: the
   render's first samples (decision 39). A start's refusals are `InvalidState` and the new `AudioError::Range`; a start

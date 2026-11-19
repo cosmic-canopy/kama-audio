@@ -248,7 +248,6 @@ type resource Engine {
         while (at < this.ordered) {
             int64 slot = slotOf(id: this.order[at]);
             this.outputs[slot].silent = true;
-            this.outputs[slot].channels = 1;
             at = at + 1;
         }
         at = 0;
@@ -367,7 +366,6 @@ type resource Engine {
         match (command) {
             case Made(node: id, kind: k): {
                 if (this.nodes.put(id: id, value: EngineNode.make(kind: k))) {
-                    this.outputs[slotOf(id: id)] = Output.make(fixed: 0);
                     this.changed = true;
                 } else {
                     this.refusedCount = this.refusedCount + 1;

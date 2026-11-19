@@ -233,12 +233,14 @@ type resource ContextState {
 
     // Connects the output of the node `from` names to `destination`'s input (`AudioNode.connect`): recorded on the
     // program side and its command sent. A connection already held is taken and sends nothing. `InvalidAccess` for a
-    // node of another context, `TooManyCommands` with the backlog full, then `TooManyConnections` with every declared
-    // one held, and a refusal changes nothing.
+    // node of another context, `IndexSize` for a node with no input (a source), as Web Audio's connect checks them,
+    // `TooManyCommands` with the backlog full, then `TooManyConnections` with every declared one held, and a refusal
+    // changes nothing.
     public unsafe fn Result<Unit, AudioError> connectFrom(int64 from, AudioNode destination) {
         ContextKey key = ContextKey.mint();
         NodeLink to = destination.linkFor(key: key);
         if (to.state != this.where()) { return Result::Err(error: AudioError::InvalidAccess); }
+        if (destination.numberOfInputs() < 1) { return Result::Err(error: AudioError::IndexSize); }
         if (this.links.has(from: from, to: to.id)) { return Result::Ok(value: Unit::Unit); }
         if (!this.canSend()) { return Result::Err(error: AudioError::TooManyCommands); }
         if (this.links.length() >= this.links.capacity()) { return Result::Err(error: AudioError::TooManyConnections); }

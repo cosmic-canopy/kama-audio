@@ -1,0 +1,134 @@
+// audio::graph::Connections, a context's connections between nodes (decisions 4, 6 and 34): each side holds one. The
+// program side's says at the call whether a connection is held already or the declared ones are all held; the audio
+// side's is what the lifetime rule walks.
+//
+// - **Its capacity is declared** (decision 6): `connectionCapacity` connections, and a list head for each of the
+//   context's node slots, each part taken once from the program's memory and never grown.
+// - **A connection runs from a node's output to a node's input,** each node named by its id. It sits in the list of
+//   connections out of its node's slot, and only that list is kept: a walk follows a node's outputs, and a freed
+//   node's connections go with it.
+// - **Freeing a node takes its connections out.** A node is freed only once nothing that can sound feeds it, so every
+//   node connected into it is freed in the same walk, and takes its own connections out.
+
+import { audio::AudioMemory, audio::rt::CapacityError, audio::rt::slotOf, audio::store::Slots };
+
+export { Connections, NO_CONNECTION };
+
+// The end of a list, and an empty slot's head.
+comptime int64 NO_CONNECTION = -1;
+
+// One connection, in the list of its node's: from `from`'s output to `to`'s input.
+type value Edge {
+    public int64 from = 0;
+    public int64 to = 0;
+    public int64 next = -1;
+}
+
+type resource Connections {
+    Slots<Edge, AudioMemory> edges;
+    Slots<int64, AudioMemory> heads;   // by slot: the first connection out of it, or NO_CONNECTION
+    int64 freeHead = -1;
+    int64 used = 0;
+
+    private ctor adopt(Slots<Edge, AudioMemory> edges, Slots<int64, AudioMemory> heads) {
+        this.edges = give edges;
+        this.heads = give heads;
+        int64 n = this.edges.count();
+        int64 i = 0;
+        while (i < n) {
+            this.edges[i].from = 0;
+            this.edges[i].to = 0;
+            this.edges[i].next = i + 1 < n ? i + 1 : NO_CONNECTION;
+            i = i + 1;
+        }
+        int64 slots = this.heads.count();
+        i = 0;
+        while (i < slots) {
+            this.heads[i] = NO_CONNECTION;
+            i = i + 1;
+        }
+        this.freeHead = 0;
+        this.used = 0;
+    }
+
+    // `connections` connections between the nodes of `nodes` slots, drawn from `memory`: the connections, then the
+    // list heads. `OutOfMemory` when either has no room, and the first goes back.
+    public ctor Result<Connections, CapacityError> withCapacity(AudioMemory memory, isize nodes, isize connections) {
+        Result<Slots<Edge, AudioMemory>, CapacityError> e = Slots::<Edge, AudioMemory>.take(allocator: memory, capacity: connections);
+        Slots<Edge, AudioMemory> edges = match (give e) {
+            case Ok(value: s): give s;
+            case Err(error: err): { return Result::Err(error: err); }
+        };
+        Result<Slots<int64, AudioMemory>, CapacityError> h = Slots::<int64, AudioMemory>.take(allocator: memory, capacity: nodes);
+        Slots<int64, AudioMemory> heads = match (give h) {
+            case Ok(value: s): give s;
+            case Err(error: err): { return Result::Err(error: err); }
+        };
+        return Result::Ok(value: Connections.adopt(edges: give edges, heads: give heads));
+    }
+
+    // Whether the connection from `from` to `to` is held.
+    public const fn bool has(int64 from, int64 to) {
+        int64 e = this.firstOut(slot: slotOf(id: from));
+        while (e != NO_CONNECTION) {
+            if (this.edges[e].from == from && this.edges[e].to == to) { return true; }
+            e = this.edges[e].next;
+        }
+        return false;
+    }
+
+    // Adds the connection from `from` to `to`. False when every declared connection is held, or `from` names no slot,
+    // and then nothing changes. It does not look for the connection first: `has` does.
+    public fn bool add(int64 from, int64 to) {
+        int64 slot = slotOf(id: from);
+        if (slot >= this.heads.count() || this.freeHead == NO_CONNECTION) { return false; }
+        int64 e = this.freeHead;
+        this.freeHead = this.edges[e].next;
+        this.edges[e].from = from;
+        this.edges[e].to = to;
+        this.edges[e].next = this.heads[slot];
+        this.heads[slot] = e;
+        this.used = this.used + 1;
+        return true;
+    }
+
+    // Takes out every connection from `from`'s output, answering how many.
+    public fn isize removeFrom(int64 from) {
+        int64 slot = slotOf(id: from);
+        if (slot >= this.heads.count()) { return 0; }
+        isize removed = 0;
+        int64 before = NO_CONNECTION;
+        int64 e = this.heads[slot];
+        while (e != NO_CONNECTION) {
+            int64 after = this.edges[e].next;
+            if (this.edges[e].from == from) {
+                if (before == NO_CONNECTION) { this.heads[slot] = after; } else { this.edges[before].next = after; }
+                this.edges[e].next = this.freeHead;
+                this.freeHead = e;
+                this.used = this.used - 1;
+                removed = removed + 1;
+            } else {
+                before = e;
+            }
+            e = after;
+        }
+        return removed;
+    }
+
+    // A walk over a node's outputs: the first connection out of `slot`, or NO_CONNECTION; the one after `edge` in its
+    // list; and the node `edge` goes to.
+    public const fn int64 firstOut(int64 slot) {
+        if (slot < 0 || slot >= this.heads.count()) { return NO_CONNECTION; }
+        return this.heads[slot];
+    }
+
+    public const fn int64 nextOut(int64 edge) { return this.edges[edge].next; }
+
+    public const fn int64 toOf(int64 edge) { return this.edges[edge].to; }
+
+    // How many connections are held.
+    public const fn isize length() { return cast<isize>(this.used); }
+
+    // How many it was made with.
+    public const fn isize capacity() { return cast<isize>(this.edges.count()); }
+}

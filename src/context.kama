@@ -8,9 +8,11 @@
 //   last of them is dropped, the context's own handle included. It is drawn from the program's memory (decision 36):
 //   the slot table, the command ring and the backlog, each of a declared capacity (decisions 6, 8 and 34), and the
 //   block that holds them, made by `try new`.
-// - **Every limit answers at the make,** never with a trap: an option outside what Web Audio allows is `NotSupported`,
-//   as Web Audio's `NotSupportedError`; memory with no room for a declared capacity is `OutOfMemory`; and a node made
-//   when every row is held is `TooManyNodes`.
+// - **Every limit answers at the call,** never with a trap: an option outside what Web Audio allows is `NotSupported`,
+//   as Web Audio's `NotSupportedError`; memory with no room for a declared capacity is `OutOfMemory`; a node made when
+//   every row is held is `TooManyNodes`; a call with the backlog full is `TooManyCommands`; a connection with every
+//   declared one held is `TooManyConnections`; and a connection to another context's node is `InvalidAccess`, as Web
+//   Audio's `InvalidAccessError`.
 
 import { audio::graph::ContextState, audio::graph::ContextKey, audio::graph::Command, audio::graph::NodeKind,
          audio::graph::stateFrom, AudioMemory, std::memory::Shared };
@@ -19,14 +21,16 @@ export { BaseAudioContext, OfflineAudioContext, OfflineAudioContextOptions, Audi
 
 // Why a context or a node was not made.
 type enum AudioError implements Error {
-    NotSupported, OutOfMemory, TooManyNodes, TooManyCommands;
+    NotSupported, OutOfMemory, TooManyNodes, TooManyCommands, TooManyConnections, InvalidAccess;
 
     public const fn string message() {
         return match (this) {
-            case NotSupported: "an option is outside what Web Audio allows: 1 to 32 channels, a length of at least one frame, a sample rate from 3,000 to 768,000 Hz, and at least one node";
+            case NotSupported: "an option is outside what Web Audio allows: 1 to 32 channels, a length of at least one frame, a sample rate from 3,000 to 768,000 Hz, and at least one of each declared capacity";
             case OutOfMemory: "the program's memory had no room for the context's declared capacities";
             case TooManyNodes: "every node row the context declared is held; a dropped node's row comes back once the audio side frees it";
             case TooManyCommands: "the context's backlog is full: every command it declared is waiting for the next flush";
+            case TooManyConnections: "every connection the context declared is held; a freed node's connections come back once the way back is read";
+            case InvalidAccess: "the node belongs to another context: nodes connect only within their own, as in Web Audio";
         };
     }
 }
@@ -47,6 +51,7 @@ type value OfflineAudioContextOptions {
     public isize nodeCapacity = 1024;        // the nodes it can hold at once: the slot table's rows (decision 34)
     public isize ringCapacity = 1024;        // the commands that can cross to the audio side at once (decision 7)
     public isize backlogCapacity = 4096;     // the commands that can wait for a flush (decisions 8 and 33)
+    public isize connectionCapacity = 4096;  // the connections between its nodes at once, four for each node row (decision 6)
     public AudioMemory memory = AudioMemory.global();
 
     public ctor make(int64 length, float32 sampleRate) {
@@ -77,6 +82,7 @@ type resource OfflineAudioContext implements BaseAudioContext {
     friend audiotests::audioHeldIn[audioHeld];
     friend audiotests::refusedIn[refused];
     friend audiotests::forgeIn[forge];
+    friend audiotests::forgeConnectIn[forgeConnect];
 
     private ctor adopt(Shared<ContextState, AudioMemory> state, int32 channels, int64 frames) {
         this.state = give state;
@@ -89,12 +95,13 @@ type resource OfflineAudioContext implements BaseAudioContext {
     public ctor Result<OfflineAudioContext, AudioError> make(OfflineAudioContextOptions options) {
         if (options.numberOfChannels < 1 || options.numberOfChannels > MOST_CHANNELS || options.length < 1
             || options.sampleRate < LOWEST_RATE || options.sampleRate > HIGHEST_RATE || options.nodeCapacity < 1
-            || options.ringCapacity < 1 || options.backlogCapacity < 1) {
+            || options.ringCapacity < 1 || options.backlogCapacity < 1 || options.connectionCapacity < 1) {
             return Result::Err(error: AudioError::NotSupported);
         }
         Result<Shared<ContextState, AudioMemory>, AudioError> state =
             stateFrom(memory: options.memory, nodeCapacity: options.nodeCapacity, ringCapacity: options.ringCapacity,
-                      backlogCapacity: options.backlogCapacity, sampleRate: options.sampleRate);
+                      backlogCapacity: options.backlogCapacity, connectionCapacity: options.connectionCapacity,
+                      sampleRate: options.sampleRate);
         return match (give state) {
             case Ok(value: s): Result::Ok(value: OfflineAudioContext.adopt(state: give s, channels: options.numberOfChannels,
                                                                             frames: options.length));
@@ -143,4 +150,7 @@ type resource OfflineAudioContext implements BaseAudioContext {
         if (made) { return this.state.send(command: Command::Made(node: node, kind: NodeKind::Gain)); }
         return this.state.send(command: Command::Release(node: node));
     }
+
+    // A connection no call would send, added to the backlog: from `from`'s output to `to`'s input, any ids at all.
+    private fn bool forgeConnect(int64 from, int64 to) { return this.state.send(command: Command::Connect(from: from, to: to)); }
 }

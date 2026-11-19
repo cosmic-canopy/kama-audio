@@ -16,7 +16,8 @@
 import { Tally, named, letGo, rowsHeldIn, idAt, CommandsCase, withCommands, gainIn, letGoOf, flushSends,
          audio::OfflineAudioContext, audio::AudioError, audio::GainNode };
 
-export { audioSideTests, quantumIn, pollIn, audioHeldIn, refusedIn, forgeIn };
+export { audioSideTests, quantumIn, pollIn, audioHeldIn, refusedIn, forgeIn, quantumApplies, audioHolds, pollFrees,
+         rowsHeld, refusedSoFar };
 
 // The package's seam into a context's audio side and its way back.
 fn isize quantumIn(ref OfflineAudioContext context) { return context.renderQuantum(); }

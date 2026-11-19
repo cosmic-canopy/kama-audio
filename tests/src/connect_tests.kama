@@ -1,0 +1,443 @@
+// connect: a node's output connected to another node's input, and the lifetime rule it brings (AUD-1 and AUD-2;
+// AGENTS.audio.md decisions 3, 4, 6, 8 and 34; Web Audio's `connect(destinationNode)`).
+// - `connect(destination:)` adds its command to the backlog, and a flush sends it. A connection made twice is one
+//   connection, and the second sends nothing (Web Audio: "Multiple connections with the same termini are ignored").
+//   A node may connect to itself, or into a cycle.
+// - A node of another context is refused as `InvalidAccess`, Web Audio's InvalidAccessError. A full backlog is
+//   `TooManyCommands`, checked first, and the context's declared connections all held is `TooManyConnections`
+//   (decisions 6 and 8). A refusal changes nothing.
+// - The audio side keeps a released node while it can still sound (decision 4): while a node the program holds feeds
+//   it, directly or through other released nodes. A node's own outputs keep nothing alive, and a released cycle that
+//   nothing feeds is freed whole.
+// - A freed node's connections go with it, on both sides, so the context's declared connections come back.
+
+import { Tally, named, letGo, idAt, quantumIn, pollIn, refusedIn, quantumApplies, audioHolds, pollFrees, rowsHeld,
+         refusedSoFar, flushSends, expectSent, expectNothingSent, audio::OfflineAudioContext,
+         audio::OfflineAudioContextOptions, audio::AudioError, audio::GainNode };
+
+export { connectTests, forgeConnectIn };
+
+// The package's seam: a connection no call would send, added to the backlog.
+fn bool forgeConnectIn(ref OfflineAudioContext context, int64 from, int64 to) {
+    return context.forgeConnect(from: from, to: to);
+}
+
+// ---- helpers ----------------------------------------------------------------------------------------------------------
+
+// "" when a connect was taken, or what it answered instead.
+fn string taken(Result<Unit, AudioError> r, const ref string what) {
+    return match (r) {
+        case Ok(value: u): "";
+        case Err(error: e): {
+            string n = named(e: e);
+            return "${what} answered ${n}";
+        }
+    };
+}
+
+// "" when a connect was refused with `want`, or what happened instead.
+fn string refusedAs(Result<Unit, AudioError> r, const ref string want, const ref string what) {
+    return match (r) {
+        case Ok(value: u): "${what} was taken where ${want} was due";
+        case Err(error: e): {
+            string n = named(e: e);
+            return n == want ? "" : "${what} answered ${n} where ${want} was due";
+        }
+    };
+}
+
+// The calls of a case, flushed and applied: `sent` commands published, and all of them applied.
+fn string lands(ref OfflineAudioContext context, isize sent) {
+    string why = flushSends(context: context, want: sent);
+    if (!why.isEmpty()) { return why; }
+    return quantumApplies(context: context, want: sent);
+}
+
+fnptr string LinksCase(ref OfflineAudioContext context);
+
+// Runs `body` on a fresh context of `nodes` rows, a backlog of `backlog`, `connections` declared connections and a ring
+// of 16, on the global heap.
+fn void withLinks(ref Tally t, const ref string name, isize nodes, isize backlog, isize connections, LinksCase body) {
+    OfflineAudioContextOptions o = OfflineAudioContextOptions.make(length: 128, sampleRate: 48000);
+    o.nodeCapacity = nodes;
+    o.ringCapacity = 16;
+    o.backlogCapacity = backlog;
+    o.connectionCapacity = connections;
+    Result<OfflineAudioContext, AudioError> made = OfflineAudioContext.make(options: o);
+    match (give made) {
+        case Ok(value: c0): {
+            OfflineAudioContext context = give c0;
+            string why = body(context: context);
+            t.verdict(name: name, why: why);
+        }
+        case Err(error: e): {
+            string m = e.message();
+            t.verdict(name: name, why: "the context was not made: ${m}");
+        }
+    };
+}
+
+// ---- the calls ----------------------------------------------------------------------------------------------------------
+
+// The options declare 4,096 connections by default, four for each of the 1,024 node rows.
+fn string defaults() {
+    OfflineAudioContextOptions o = OfflineAudioContextOptions.make(length: 128, sampleRate: 48000);
+    isize connections = o.connectionCapacity;
+    return connections == 4096 ? "" : "the default was ${connections} connections";
+}
+
+// A connect adds its command behind the makes, and only a flush sends it.
+fn string connectSends(ref OfflineAudioContext context) {
+    Result<GainNode, AudioError> ra = GainNode.make(context: context);
+    GainNode a = match (give ra) { case Ok(value: g): give g; case Err(error: e): { return "the first node was refused"; } };
+    Result<GainNode, AudioError> rb = GainNode.make(context: context);
+    GainNode b = match (give rb) { case Ok(value: g): give g; case Err(error: e): { return "the second node was refused"; } };
+    string why = taken(r: a.connect(destination: b), what: "the connect");
+    if (!why.isEmpty()) { return why; }
+    why = expectNothingSent(context: context);
+    if (!why.isEmpty()) { return "before the flush: ${why}"; }
+    why = flushSends(context: context, want: 3);
+    if (!why.isEmpty()) { return why; }
+    why = expectSent(context: context, want: "made gain 0:1");
+    if (!why.isEmpty()) { return why; }
+    why = expectSent(context: context, want: "made gain 1:1");
+    if (!why.isEmpty()) { return why; }
+    why = expectSent(context: context, want: "connect 0:1 to 1:1");
+    if (!why.isEmpty()) { return why; }
+    return expectNothingSent(context: context);
+}
+
+// A connection made twice is one: the second connect is taken and sends nothing. The reverse is another connection, and
+// so is a node's connection to itself.
+fn string duplicateIgnored(ref OfflineAudioContext context) {
+    Result<GainNode, AudioError> ra = GainNode.make(context: context);
+    GainNode a = match (give ra) { case Ok(value: g): give g; case Err(error: e): { return "the first node was refused"; } };
+    Result<GainNode, AudioError> rb = GainNode.make(context: context);
+    GainNode b = match (give rb) { case Ok(value: g): give g; case Err(error: e): { return "the second node was refused"; } };
+    string why = taken(r: a.connect(destination: b), what: "the first connect");
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: a.connect(destination: b), what: "the same connect again");
+    if (!why.isEmpty()) { return why; }
+    why = flushSends(context: context, want: 3);
+    if (!why.isEmpty()) { return "makes and one connection: ${why}"; }
+    why = taken(r: a.connect(destination: b), what: "the same connect after its flush");
+    if (!why.isEmpty()) { return why; }
+    why = flushSends(context: context, want: 0);
+    if (!why.isEmpty()) { return "a connection already sent was sent again: ${why}"; }
+    why = taken(r: b.connect(destination: a), what: "the reverse connect");
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: a.connect(destination: a), what: "a node's connect to itself");
+    if (!why.isEmpty()) { return why; }
+    why = flushSends(context: context, want: 2);
+    if (!why.isEmpty()) { return "the reverse and the loop: ${why}"; }
+    why = expectSent(context: context, want: "made gain 0:1");
+    if (!why.isEmpty()) { return why; }
+    why = expectSent(context: context, want: "made gain 1:1");
+    if (!why.isEmpty()) { return why; }
+    why = expectSent(context: context, want: "connect 0:1 to 1:1");
+    if (!why.isEmpty()) { return why; }
+    why = expectSent(context: context, want: "connect 1:1 to 0:1");
+    if (!why.isEmpty()) { return why; }
+    why = expectSent(context: context, want: "connect 0:1 to 0:1");
+    if (!why.isEmpty()) { return why; }
+    return expectNothingSent(context: context);
+}
+
+// A node of another context is refused as InvalidAccess, and nothing is sent in either context.
+fn string otherContext(ref OfflineAudioContext context) {
+    OfflineAudioContextOptions o = OfflineAudioContextOptions.make(length: 128, sampleRate: 48000);
+    o.nodeCapacity = 4;
+    o.ringCapacity = 16;
+    o.backlogCapacity = 16;
+    o.connectionCapacity = 4;
+    Result<OfflineAudioContext, AudioError> made = OfflineAudioContext.make(options: o);
+    OfflineAudioContext other = match (give made) {
+        case Ok(value: c): give c;
+        case Err(error: e): { return "the second context was not made"; }
+    };
+    Result<GainNode, AudioError> ra = GainNode.make(context: context);
+    GainNode a = match (give ra) { case Ok(value: g): give g; case Err(error: e): { return "the first node was refused"; } };
+    Result<GainNode, AudioError> rb = GainNode.make(context: other);
+    GainNode b = match (give rb) { case Ok(value: g): give g; case Err(error: e): { return "the second node was refused"; } };
+    string why = refusedAs(r: a.connect(destination: b), want: "InvalidAccess", what: "a connect into another context");
+    if (!why.isEmpty()) { return why; }
+    why = refusedAs(r: b.connect(destination: a), want: "InvalidAccess", what: "a connect back from the other context");
+    if (!why.isEmpty()) { return why; }
+    why = flushSends(context: context, want: 1);
+    if (!why.isEmpty()) { return "the first context: ${why}"; }
+    why = flushSends(context: other, want: 1);
+    if (!why.isEmpty()) { return "the other context: ${why}"; }
+    return "";
+}
+
+// With every declared connection held, a new connection is refused as TooManyConnections and nothing is sent; a
+// connection already held is still taken, since it adds none.
+fn string fullConnections(ref OfflineAudioContext context) {
+    Result<GainNode, AudioError> ra = GainNode.make(context: context);
+    GainNode a = match (give ra) { case Ok(value: g): give g; case Err(error: e): { return "the first node was refused"; } };
+    Result<GainNode, AudioError> rb = GainNode.make(context: context);
+    GainNode b = match (give rb) { case Ok(value: g): give g; case Err(error: e): { return "the second node was refused"; } };
+    string why = taken(r: a.connect(destination: b), what: "the one connection");
+    if (!why.isEmpty()) { return why; }
+    why = refusedAs(r: b.connect(destination: a), want: "TooManyConnections", what: "a second connection");
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: a.connect(destination: b), what: "the connection already held");
+    if (!why.isEmpty()) { return why; }
+    return flushSends(context: context, want: 3);
+}
+
+// A full backlog refuses a connect as TooManyCommands, checked before the connections, and the refusal takes no
+// connection: once a flush empties the backlog, the one declared connection is still there to take.
+fn string fullBacklog(ref OfflineAudioContext context) {
+    Result<GainNode, AudioError> ra = GainNode.make(context: context);
+    GainNode a = match (give ra) { case Ok(value: g): give g; case Err(error: e): { return "the first node was refused"; } };
+    Result<GainNode, AudioError> rb = GainNode.make(context: context);
+    GainNode b = match (give rb) { case Ok(value: g): give g; case Err(error: e): { return "the second node was refused"; } };
+    string why = refusedAs(r: a.connect(destination: b), want: "TooManyCommands", what: "a connect with the backlog full");
+    if (!why.isEmpty()) { return why; }
+    why = flushSends(context: context, want: 2);
+    if (!why.isEmpty()) { return why; }
+    why = expectSent(context: context, want: "made gain 0:1");
+    if (!why.isEmpty()) { return why; }
+    why = expectSent(context: context, want: "made gain 1:1");
+    if (!why.isEmpty()) { return why; }
+    why = expectNothingSent(context: context);
+    if (!why.isEmpty()) { return "the refused connect was sent: ${why}"; }
+    why = taken(r: a.connect(destination: b), what: "the connect once the backlog had room");
+    if (!why.isEmpty()) { return why; }
+    why = refusedAs(r: b.connect(destination: b), want: "TooManyConnections", what: "a second connection, with room in the backlog");
+    if (!why.isEmpty()) { return why; }
+    why = flushSends(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    return expectSent(context: context, want: "connect 0:1 to 1:1");
+}
+
+// ---- the lifetime rule ------------------------------------------------------------------------------------------------
+
+// A released node fed by a node the program holds is kept; once the feeder is released too, both are freed together.
+fn string liveInputKeeps(ref OfflineAudioContext context) {
+    Result<GainNode, AudioError> ra = GainNode.make(context: context);
+    GainNode a = match (give ra) { case Ok(value: g): give g; case Err(error: e): { return "the first node was refused"; } };
+    Result<GainNode, AudioError> rb = GainNode.make(context: context);
+    GainNode b = match (give rb) { case Ok(value: g): give g; case Err(error: e): { return "the second node was refused"; } };
+    string why = taken(r: a.connect(destination: b), what: "the connect");
+    if (!why.isEmpty()) { return why; }
+    letGo(node: give b);
+    why = lands(context: context, sent: 4);
+    if (!why.isEmpty()) { return why; }
+    why = audioHolds(context: context, want: 2);
+    if (!why.isEmpty()) { return "a released node with a held input: ${why}"; }
+    why = pollFrees(context: context, want: 0);
+    if (!why.isEmpty()) { return "a released node with a held input: ${why}"; }
+    letGo(node: give a);
+    why = lands(context: context, sent: 1);
+    if (!why.isEmpty()) { return why; }
+    why = audioHolds(context: context, want: 0);
+    if (!why.isEmpty()) { return "once its input was released: ${why}"; }
+    why = pollFrees(context: context, want: 2);
+    if (!why.isEmpty()) { return why; }
+    return rowsHeld(context: context, want: 0);
+}
+
+// A chain of released nodes is kept while its head is held, and freed whole once the head is released.
+fn string chainKept(ref OfflineAudioContext context) {
+    Result<GainNode, AudioError> ra = GainNode.make(context: context);
+    GainNode a = match (give ra) { case Ok(value: g): give g; case Err(error: e): { return "the first node was refused"; } };
+    Result<GainNode, AudioError> rb = GainNode.make(context: context);
+    GainNode b = match (give rb) { case Ok(value: g): give g; case Err(error: e): { return "the second node was refused"; } };
+    Result<GainNode, AudioError> rc = GainNode.make(context: context);
+    GainNode c = match (give rc) { case Ok(value: g): give g; case Err(error: e): { return "the third node was refused"; } };
+    string why = taken(r: a.connect(destination: b), what: "a to b");
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: b.connect(destination: c), what: "b to c");
+    if (!why.isEmpty()) { return why; }
+    letGo(node: give c);
+    letGo(node: give b);
+    why = lands(context: context, sent: 7);
+    if (!why.isEmpty()) { return why; }
+    why = audioHolds(context: context, want: 3);
+    if (!why.isEmpty()) { return "a chain fed by a held head: ${why}"; }
+    letGo(node: give a);
+    why = lands(context: context, sent: 1);
+    if (!why.isEmpty()) { return why; }
+    why = audioHolds(context: context, want: 0);
+    if (!why.isEmpty()) { return "once the head was released: ${why}"; }
+    return pollFrees(context: context, want: 3);
+}
+
+// A node's own outputs keep nothing alive: a released node feeding a held one is freed at once.
+fn string outputKeepsNothing(ref OfflineAudioContext context) {
+    Result<GainNode, AudioError> ra = GainNode.make(context: context);
+    GainNode a = match (give ra) { case Ok(value: g): give g; case Err(error: e): { return "the first node was refused"; } };
+    Result<GainNode, AudioError> rb = GainNode.make(context: context);
+    GainNode b = match (give rb) { case Ok(value: g): give g; case Err(error: e): { return "the second node was refused"; } };
+    string why = taken(r: a.connect(destination: b), what: "the connect");
+    if (!why.isEmpty()) { return why; }
+    letGo(node: give a);
+    why = lands(context: context, sent: 4);
+    if (!why.isEmpty()) { return why; }
+    why = audioHolds(context: context, want: 1);
+    if (!why.isEmpty()) { return "a released node feeding a held one: ${why}"; }
+    why = pollFrees(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    return rowsHeld(context: context, want: 1);
+}
+
+// A released cycle that nothing feeds is freed whole, though each of its nodes feeds the other.
+fn string releasedCycleFreed(ref OfflineAudioContext context) {
+    Result<GainNode, AudioError> ra = GainNode.make(context: context);
+    GainNode a = match (give ra) { case Ok(value: g): give g; case Err(error: e): { return "the first node was refused"; } };
+    Result<GainNode, AudioError> rb = GainNode.make(context: context);
+    GainNode b = match (give rb) { case Ok(value: g): give g; case Err(error: e): { return "the second node was refused"; } };
+    string why = taken(r: a.connect(destination: b), what: "a to b");
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: b.connect(destination: a), what: "b to a");
+    if (!why.isEmpty()) { return why; }
+    letGo(node: give a);
+    letGo(node: give b);
+    why = lands(context: context, sent: 6);
+    if (!why.isEmpty()) { return why; }
+    why = audioHolds(context: context, want: 0);
+    if (!why.isEmpty()) { return "a released cycle: ${why}"; }
+    why = pollFrees(context: context, want: 2);
+    if (!why.isEmpty()) { return why; }
+    return rowsHeld(context: context, want: 0);
+}
+
+// A released cycle fed by a held node is kept, and freed whole with its feeder.
+fn string cycleFedKept(ref OfflineAudioContext context) {
+    Result<GainNode, AudioError> rx = GainNode.make(context: context);
+    GainNode x = match (give rx) { case Ok(value: g): give g; case Err(error: e): { return "the feeder was refused"; } };
+    Result<GainNode, AudioError> ra = GainNode.make(context: context);
+    GainNode a = match (give ra) { case Ok(value: g): give g; case Err(error: e): { return "the first node was refused"; } };
+    Result<GainNode, AudioError> rb = GainNode.make(context: context);
+    GainNode b = match (give rb) { case Ok(value: g): give g; case Err(error: e): { return "the second node was refused"; } };
+    string why = taken(r: x.connect(destination: a), what: "the feeder to a");
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: a.connect(destination: b), what: "a to b");
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: b.connect(destination: a), what: "b to a");
+    if (!why.isEmpty()) { return why; }
+    letGo(node: give a);
+    letGo(node: give b);
+    why = lands(context: context, sent: 8);
+    if (!why.isEmpty()) { return why; }
+    why = audioHolds(context: context, want: 3);
+    if (!why.isEmpty()) { return "a released cycle with a held feeder: ${why}"; }
+    letGo(node: give x);
+    why = lands(context: context, sent: 1);
+    if (!why.isEmpty()) { return why; }
+    why = audioHolds(context: context, want: 0);
+    if (!why.isEmpty()) { return "once the feeder was released: ${why}"; }
+    return pollFrees(context: context, want: 3);
+}
+
+// A released node connected only to itself is freed: its own output does not feed it.
+fn string selfLoopFreed(ref OfflineAudioContext context) {
+    Result<GainNode, AudioError> ra = GainNode.make(context: context);
+    GainNode a = match (give ra) { case Ok(value: g): give g; case Err(error: e): { return "the node was refused"; } };
+    string why = taken(r: a.connect(destination: a), what: "the loop");
+    if (!why.isEmpty()) { return why; }
+    letGo(node: give a);
+    why = lands(context: context, sent: 3);
+    if (!why.isEmpty()) { return why; }
+    why = audioHolds(context: context, want: 0);
+    if (!why.isEmpty()) { return why; }
+    return pollFrees(context: context, want: 1);
+}
+
+// A freed node's connections go with it on both sides: until the way back is read the program side still counts them,
+// and once it is, the declared connection is taken again, and the audio side has room for it.
+fn string connectionsComeBack(ref OfflineAudioContext context) {
+    Result<GainNode, AudioError> ra = GainNode.make(context: context);
+    GainNode a = match (give ra) { case Ok(value: g): give g; case Err(error: e): { return "the first node was refused"; } };
+    Result<GainNode, AudioError> rb = GainNode.make(context: context);
+    GainNode b = match (give rb) { case Ok(value: g): give g; case Err(error: e): { return "the second node was refused"; } };
+    Result<GainNode, AudioError> rc = GainNode.make(context: context);
+    GainNode c = match (give rc) { case Ok(value: g): give g; case Err(error: e): { return "the third node was refused"; } };
+    string why = taken(r: a.connect(destination: b), what: "the one connection");
+    if (!why.isEmpty()) { return why; }
+    letGo(node: give a);
+    letGo(node: give b);
+    why = lands(context: context, sent: 6);
+    if (!why.isEmpty()) { return why; }
+    why = audioHolds(context: context, want: 1);
+    if (!why.isEmpty()) { return why; }
+    why = refusedAs(r: c.connect(destination: c), want: "TooManyConnections", what: "a connect before the way back was read");
+    if (!why.isEmpty()) { return why; }
+    why = pollFrees(context: context, want: 2);
+    if (!why.isEmpty()) { return why; }
+    why = taken(r: c.connect(destination: c), what: "a connect once the way back was read");
+    if (!why.isEmpty()) { return why; }
+    why = lands(context: context, sent: 1);
+    if (!why.isEmpty()) { return why; }
+    return refusedSoFar(context: context, want: 0);
+}
+
+// The audio side refuses a connection it cannot hold, counts it, and keeps what it holds: one naming a node it does not
+// hold at that generation, a connection it already holds, and one past its declared connections.
+fn string audioRefuses(ref OfflineAudioContext context) {
+    Result<GainNode, AudioError> ra = GainNode.make(context: context);
+    GainNode a = match (give ra) { case Ok(value: g): give g; case Err(error: e): { return "the first node was refused"; } };
+    Result<GainNode, AudioError> rb = GainNode.make(context: context);
+    GainNode b = match (give rb) { case Ok(value: g): give g; case Err(error: e): { return "the second node was refused"; } };
+    string why = lands(context: context, sent: 2);
+    if (!why.isEmpty()) { return why; }
+    if (!forgeConnectIn(context: context, from: idAt(slot: 0, generation: 2), to: idAt(slot: 1, generation: 1))) {
+        return "the backlog refused a forged connection";
+    }
+    if (!forgeConnectIn(context: context, from: idAt(slot: 0, generation: 1), to: idAt(slot: 1, generation: 2))) {
+        return "the backlog refused a forged connection";
+    }
+    why = lands(context: context, sent: 2);
+    if (!why.isEmpty()) { return why; }
+    why = refusedSoFar(context: context, want: 2);
+    if (!why.isEmpty()) { return "connections naming a node at another generation: ${why}"; }
+    why = taken(r: a.connect(destination: b), what: "the one connection");
+    if (!why.isEmpty()) { return why; }
+    if (!forgeConnectIn(context: context, from: idAt(slot: 0, generation: 1), to: idAt(slot: 1, generation: 1))) {
+        return "the backlog refused a forged connection";
+    }
+    if (!forgeConnectIn(context: context, from: idAt(slot: 1, generation: 1), to: idAt(slot: 0, generation: 1))) {
+        return "the backlog refused a forged connection";
+    }
+    why = lands(context: context, sent: 3);
+    if (!why.isEmpty()) { return why; }
+    why = refusedSoFar(context: context, want: 4);
+    if (!why.isEmpty()) { return "a connection held twice, and one past the declared: ${why}"; }
+    // The connection it holds is a's: b, released, is kept by it.
+    letGo(node: give b);
+    why = lands(context: context, sent: 1);
+    if (!why.isEmpty()) { return why; }
+    return audioHolds(context: context, want: 2);
+}
+
+fn void connectTests(ref Tally t) {
+    t.verdict(name: "connect: the options declare 4,096 connections by default", why: defaults());
+    withLinks(t: t, name: "connect: a connect adds its command behind the makes, and only a flush sends it", nodes: 4,
+              backlog: 16, connections: 4, body: connectSends);
+    withLinks(t: t, name: "connect: a connection made twice is one, and the reverse and a node's loop to itself are others",
+              nodes: 4, backlog: 16, connections: 4, body: duplicateIgnored);
+    withLinks(t: t, name: "connect: a node of another context is refused as InvalidAccess, and nothing is sent", nodes: 4,
+              backlog: 16, connections: 4, body: otherContext);
+    withLinks(t: t, name: "connect: with every declared connection held, a new one is TooManyConnections, a held one taken",
+              nodes: 4, backlog: 16, connections: 1, body: fullConnections);
+    withLinks(t: t, name: "connect: a full backlog is TooManyCommands, checked first, and the refusal takes no connection",
+              nodes: 4, backlog: 2, connections: 1, body: fullBacklog);
+    withLinks(t: t, name: "connect: a released node fed by a held one is kept, and freed with its feeder", nodes: 4,
+              backlog: 16, connections: 4, body: liveInputKeeps);
+    withLinks(t: t, name: "connect: a chain of released nodes is kept while its head is held, and freed whole after it",
+              nodes: 4, backlog: 16, connections: 4, body: chainKept);
+    withLinks(t: t, name: "connect: a node's own outputs keep nothing alive", nodes: 4, backlog: 16, connections: 4,
+              body: outputKeepsNothing);
+    withLinks(t: t, name: "connect: a released cycle nothing feeds is freed whole", nodes: 4, backlog: 16, connections: 4,
+              body: releasedCycleFreed);
+    withLinks(t: t, name: "connect: a released cycle fed by a held node is kept, and freed whole with its feeder", nodes: 4,
+              backlog: 16, connections: 4, body: cycleFedKept);
+    withLinks(t: t, name: "connect: a released node connected only to itself is freed", nodes: 4, backlog: 16,
+              connections: 4, body: selfLoopFreed);
+    withLinks(t: t, name: "connect: a freed node's connections go with it on both sides, once the way back is read",
+              nodes: 4, backlog: 16, connections: 1, body: connectionsComeBack);
+    withLinks(t: t, name: "connect: the audio side refuses and counts a connection it cannot hold, keeping what it holds",
+              nodes: 2, backlog: 16, connections: 1, body: audioRefuses);
+}

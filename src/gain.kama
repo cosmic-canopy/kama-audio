@@ -4,11 +4,12 @@
 // the row up and a `give` moves the handle; each drop counts it down, and the last marks the row, whose release the
 // flush sends. The audio side keeps the node while it can still sound, then frees the row.
 
-import { audio::graph::NodeHold, audio::graph::NodeKind, BaseAudioContext, AudioError };
+import { audio::graph::NodeHold, audio::graph::NodeKind, audio::graph::NodeLink, audio::graph::ContextKey, AudioNode,
+         BaseAudioContext, AudioError };
 
 export { GainNode };
 
-type resource GainNode implements Copyable<This>(bare: give) {
+type resource GainNode implements AudioNode, Copyable<This>(bare: give) {
     NodeHold hold;
 
     private ctor adopt(NodeHold hold) { this.hold = give hold; }
@@ -24,4 +25,9 @@ type resource GainNode implements Copyable<This>(bare: give) {
     }
 
     public ctor copy(ref GainNode source) { this.hold = copy source.hold; }
+
+    // Connects this node's output to `destination`'s input (`AudioNode`'s contract).
+    public fn Result<Unit, AudioError> connect(AudioNode destination) { return this.hold.connect(destination: destination); }
+
+    public unsafe const fn NodeLink linkFor(ContextKey key) { return this.hold.link(); }
 }

@@ -14,11 +14,11 @@
 // - **`Command`** is what a call sends the audio side (decisions 7, 32 and 33): a flat, typed value naming its node by
 //   the id of its row, never by a pointer.
 
-import { audio::AudioMemory, audio::AudioError, audio::BaseAudioContext, audio::rt::SlotTable, audio::rt::SlotArray,
+import { audio::AudioMemory, audio::AudioError, audio::BaseAudioContext, audio::AudioNode, audio::rt::SlotTable,
          audio::rt::Ring, audio::rt::Backlog, audio::rt::CapacityError, audio::rt::slotOf, audio::rt::generationOf,
-         std::memory::Shared, Engine, EngineNode, Event };
+         std::memory::Shared, Engine, Event, Connections, engineFrom };
 
-export { ContextState, NodeHold, ContextKey, Command, NodeKind, stateFrom };
+export { ContextState, NodeHold, ContextKey, NodeLink, Command, NodeKind, stateFrom };
 
 // The kind of node a `Made` command makes.
 type enum NodeKind {
@@ -31,10 +31,11 @@ type enum NodeKind {
 // audio side applies each kind by name. A node is named by its row's id, its slot and generation (decision 34).
 type enum Command {
     Made(int64 node, NodeKind kind),
+    Connect(int64 from, int64 to),
     Release(int64 node);
 
-    // The command as text, for a test's or a log's reading: `made gain 0:1`, `release 0:1`, each node as its slot and
-    // generation.
+    // The command as text, for a test's or a log's reading: `made gain 0:1`, `connect 0:1 to 1:1`, `release 0:1`, each
+    // node as its slot and generation.
     public const fn string describe() {
         return match (this) {
             case Made(node: n, kind: k): {
@@ -42,6 +43,13 @@ type enum Command {
                 int64 slot = slotOf(id: n);
                 int64 generation = generationOf(id: n);
                 return "made ${what} ${slot}:${generation}";
+            }
+            case Connect(from: f, to: t): {
+                int64 fromSlot = slotOf(id: f);
+                int64 fromGeneration = generationOf(id: f);
+                int64 toSlot = slotOf(id: t);
+                int64 toGeneration = generationOf(id: t);
+                return "connect ${fromSlot}:${fromGeneration} to ${toSlot}:${toGeneration}";
             }
             case Release(node: n): {
                 int64 slot = slotOf(id: n);
@@ -57,19 +65,34 @@ type resource ContextState {
     Backlog<Command, AudioMemory> waiting;
     Ring<Command, AudioMemory> commands;
     Ring<Event, AudioMemory> events;
+    Connections links;
     Engine engine;
     float32 rate = 0;
 
     public ctor make(SlotTable<AudioMemory> nodes, Ring<Command, AudioMemory> commands,
-                     Backlog<Command, AudioMemory> waiting, Ring<Event, AudioMemory> events, Engine engine,
-                     float32 sampleRate) {
+                     Backlog<Command, AudioMemory> waiting, Ring<Event, AudioMemory> events, Connections links,
+                     Engine engine, float32 sampleRate) {
         this.nodes = give nodes;
         this.commands = give commands;
         this.waiting = give waiting;
         this.events = give events;
+        this.links = give links;
         this.engine = give engine;
         this.rate = sampleRate;
     }
+
+    // Where this state is: what tells one context from another.
+    public unsafe const fn UnsafeConstPtr<ContextState> where() { return addr(of: this); }
+
+    // Whether the connection from `from` to `to` is held on the program side: made, and not yet gone with a node the
+    // way back reported freed.
+    public const fn bool connected(int64 from, int64 to) { return this.links.has(from: from, to: to); }
+
+    // Whether a declared connection is free.
+    public const fn bool canConnect() { return this.links.length() < this.links.capacity(); }
+
+    // Records the connection from `from` to `to` on the program side. False when every declared one is held.
+    public fn bool link(int64 from, int64 to) { return this.links.add(from: from, to: to); }
 
     public const fn float32 sampleRate() { return this.rate; }
 
@@ -129,8 +152,9 @@ type resource ContextState {
     public fn isize renderQuantum() { return this.engine.renderQuantum(commands: this.commands, events: this.events); }
 
     // The way back read (decision 9): each report the audio side published, in the order it made them. A node freed
-    // gives its row back to the table, which reuses it at the next generation (decision 34). Answers how many rows came
-    // back.
+    // takes its connections with it, and gives its row back to the table, which reuses it at the next generation
+    // (decision 34). Every node connected into it was freed in the same walk, so their reports take those connections.
+    // Answers how many rows came back.
     public fn isize poll() {
         isize freed = 0;
         bool more = true;
@@ -140,6 +164,7 @@ type resource ContextState {
                 case Some(value: e): {
                     match (e) {
                         case Freed(node: id): {
+                            isize gone = this.links.removeFrom(from: id);
                             if (this.nodes.free(id: id)) { freed = freed + 1; }
                         }
                     };
@@ -158,12 +183,13 @@ type resource ContextState {
 }
 
 // A context's state drawn from `memory` (decision 36), each part only once the one before it fit: its slot table of
-// `nodeCapacity` rows, its command ring of `ringCapacity`, its backlog of `backlogCapacity`, the way back and the audio
-// side's array, each of `nodeCapacity` (decision 9: a report for every row at once), then the block that holds them.
-// A part with no room is `OutOfMemory`, and every part taken before it goes back when this returns.
+// `nodeCapacity` rows, its command ring of `ringCapacity`, its backlog of `backlogCapacity`, the way back of
+// `nodeCapacity` (decision 9: a report for every row at once), its connections (`connectionCapacity`, and a list head
+// for each row), the audio side (`engineFrom`), then the block that holds them. A part with no room is
+// `OutOfMemory`, and every part taken before it goes back when this returns.
 fn Result<Shared<ContextState, AudioMemory>, AudioError> stateFrom(AudioMemory memory, isize nodeCapacity,
                                                                    isize ringCapacity, isize backlogCapacity,
-                                                                   float32 sampleRate) {
+                                                                   isize connectionCapacity, float32 sampleRate) {
     Result<SlotTable<AudioMemory>, CapacityError> table =
         SlotTable::<AudioMemory>.withCapacityAndAllocator(allocator: memory, capacity: nodeCapacity);
     SlotTable<AudioMemory> nodes = match (give table) {
@@ -188,22 +214,39 @@ fn Result<Shared<ContextState, AudioMemory>, AudioError> stateFrom(AudioMemory m
         case Ok(value: r): give r;
         case Err(error: e): { return Result::Err(error: AudioError::OutOfMemory); }
     };
-    Result<SlotArray<EngineNode, AudioMemory>, CapacityError> array =
-        SlotArray::<EngineNode, AudioMemory>.withCapacityAndAllocator(allocator: memory, capacity: nodeCapacity);
-    SlotArray<EngineNode, AudioMemory> audioNodes = match (give array) {
-        case Ok(value: a): give a;
+    Result<Connections, CapacityError> made =
+        Connections.withCapacity(memory: memory, nodes: nodeCapacity, connections: connectionCapacity);
+    Connections links = match (give made) {
+        case Ok(value: l): give l;
         case Err(error: e): { return Result::Err(error: AudioError::OutOfMemory); }
     };
+    Result<Engine, AudioError> audio = engineFrom(memory: memory, nodeCapacity: nodeCapacity,
+                                                  connectionCapacity: connectionCapacity);
     // The engine is bound before the `try new`, never built in its argument list: a box with no room drops what it was
     // given from a local, and leaks a temporary built there (KAMA_GAPS.md KAUD-10).
-    Engine engine = Engine.make(nodes: give audioNodes);
+    Engine engine = match (give audio) {
+        case Ok(value: a): give a;
+        case Err(error: e): { return Result::Err(error: e); }
+    };
     Optional<Shared<ContextState, AudioMemory>> state =
         try new(allocator: memory) ContextState.make(nodes: give nodes, commands: give commands, waiting: give waiting,
-                                                     events: give events, engine: give engine, sampleRate: sampleRate);
+                                                     events: give events, links: give links, engine: give engine,
+                                                     sampleRate: sampleRate);
     return match (give state) {
         case Some(value: s): Result::Ok(value: give s);
         case None: Result::Err(error: AudioError::OutOfMemory);
     };
+}
+
+// What a node's `linkFor` answers: its context's state, by address, and its id. Only the package reads it.
+type value NodeLink {
+    public UnsafeConstPtr<ContextState> state = null;
+    public int64 id = 0;
+
+    public unsafe ctor make(UnsafeConstPtr<ContextState> state, int64 id) {
+        this.state = state;
+        this.id = id;
+    }
 }
 
 type value ContextKey {
@@ -244,6 +287,26 @@ type resource NodeHold implements Copyable<This>(bare: give) {
 
     // The id of the node's row: its slot and generation (decision 34).
     public const fn int64 id() { return this.row; }
+
+    // The node's context and id, as `AudioNode.linkFor` answers them.
+    public unsafe const fn NodeLink link() { return NodeLink.make(state: this.state.where(), id: this.row); }
+
+    // Connects this node's output to `destination`'s input (`AudioNode.connect`): recorded on the program side and its
+    // command sent. A connection already held is taken and sends nothing. `InvalidAccess` for a node of another
+    // context, `TooManyCommands` with the backlog full, then `TooManyConnections` with every declared one held, and a
+    // refusal changes nothing.
+    public unsafe fn Result<Unit, AudioError> connect(AudioNode destination) {
+        ContextKey key = ContextKey.mint();
+        NodeLink to = destination.linkFor(key: key);
+        UnsafeConstPtr<ContextState> mine = this.state.where();
+        if (to.state != mine) { return Result::Err(error: AudioError::InvalidAccess); }
+        if (this.state.connected(from: this.row, to: to.id)) { return Result::Ok(value: Unit::Unit); }
+        if (!this.state.canSend()) { return Result::Err(error: AudioError::TooManyCommands); }
+        if (!this.state.canConnect()) { return Result::Err(error: AudioError::TooManyConnections); }
+        bool linked = this.state.link(from: this.row, to: to.id);
+        bool sent = this.state.send(command: Command::Connect(from: this.row, to: to.id));
+        return Result::Ok(value: Unit::Unit);
+    }
 
     ~NodeHold() { bool counted = this.state.countDown(id: this.row); }
 }

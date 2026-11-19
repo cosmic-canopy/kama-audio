@@ -1,0 +1,27 @@
+// audio::AudioNode, Web Audio's `AudioNode` (decision 3), as a contract: kama's inheritance cannot carry it, since a
+// derived type may add no public member and each node adds its own, as `GainNode` adds `gain`. Every node implements
+// it, and `connect` takes any of them.
+//
+// - **`connect(destination:)`** connects the node's output to `destination`'s input, as Web Audio's
+//   `connect(destinationNode)` does with its `output` and `input` both 0. kama has no default arguments, and every node
+//   so far has one input and one output, so the form that names them comes with the first node that has more.
+//   It answers `Result<Unit, AudioError>` where Web Audio returns the destination: a refusal is an answer, never a
+//   trap, so there is no chaining.
+// - **A connection made twice is one,** and the second sends nothing ("Multiple connections with the same termini are
+//   ignored"). A node may connect to itself, or into a cycle; the render mutes a cycle with no delay in it, as Web
+//   Audio's does.
+// - **What it refuses, changing nothing:** a node of another context, as `InvalidAccess` (Web Audio's
+//   `InvalidAccessError`); a full backlog, as `TooManyCommands`, checked first; and every declared connection held, as
+//   `TooManyConnections` (decision 6).
+// - **`linkFor(key:)`** is the node's context and id. Its key's type is in `audio::graph`, so only the package can
+//   call it.
+
+import { audio::graph::NodeLink, audio::graph::ContextKey, AudioError };
+
+export { AudioNode };
+
+type contract AudioNode for resource {
+    fn Result<Unit, AudioError> connect(AudioNode destination);
+
+    const fn NodeLink linkFor(ContextKey key);
+}

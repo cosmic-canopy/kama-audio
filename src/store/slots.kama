@@ -4,7 +4,8 @@
 // - **Taken once, at a make, on the program's side,** from the allocator a part is handed, as `capacity` elements, and
 //   given back to it at the drop. Never grown, so the audio thread never allocates (decision 5).
 // - **A make with no room answers `OutOfMemory`,** and a capacity below one `BadCapacity`, never a trap: std's
-//   collections cannot serve here, since each traps when its allocator has no room (KAMA_GAPS.md KAUD-7).
+//   collections cannot serve here, since each traps when its allocator has no room (KAMA_GAPS.md KAUD-7). A capacity
+//   whose bytes no `usize` can hold has no room either, and the allocator is not asked.
 // - **Its elements are not built:** each holder writes what it reads before it reads it.
 // - The ring, the backlog, the slot table and the slot array hold one each, and so do the parts of `audio::graph`.
 
@@ -26,6 +27,9 @@ type resource Slots<T: value, A: Allocator> {
 
     public unsafe ctor Result<Slots<T, A>, CapacityError> take(A allocator, isize capacity) {
         if (capacity < 1) { return Result::Err(error: CapacityError::BadCapacity); }
+        // A size no usize can hold is no room, never a size that wrapped (2^62 elements of 24 bytes is 0 bytes).
+        usize most = truncate<usize>(cast<int64>(-1)) / sizeof(T);
+        if (cast<usize>(capacity) > most) { return Result::Err(error: CapacityError::OutOfMemory); }
         usize bytes = cast<usize>(capacity) * sizeof(T);
         Optional<UnsafePtr> got = allocator.allocate(bytes: bytes, align: alignof(T));
         return match (got) {

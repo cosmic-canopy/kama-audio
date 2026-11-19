@@ -289,6 +289,22 @@ fn int64 stageInBatches(ref Crossing c, int64 next) {
     return next + 1;
 }
 
+// A capacity whose bytes no usize can hold is refused as OutOfMemory before the allocator is asked, never a trap on the
+// size's overflow: 2^62 elements of 24 bytes on a 64-bit target, 2^30 on wasm32. Nothing a program passes ends it.
+unsafe fn void tooManyBytes(ref Tally t) {
+    InlineArray<int64>#(5) cells = [0; (5)];
+    Counting a = Counting.make(cells: addr(of: cells[0]), room: true);
+    isize big = 1;
+    isize bits = cast<isize>(sizeof(isize)) * 8 - 2;
+    big = big << bits;
+    Result<Ring<Probe, Counting>, CapacityError> made = Ring::<Probe, Counting>.withCapacityAndAllocator(allocator: a, capacity: big);
+    bool refused = match (made) { case Ok(value: r): false; case Err(error: e): e == CapacityError::OutOfMemory; };
+    string why = refused ? "" : "a ring whose bytes overflow a usize was not refused as OutOfMemory";
+    if (why.isEmpty() && cells[0] != 0) { why = "the allocator was asked for a size that had overflowed"; }
+    t.verdict(name: "command-ring: a capacity whose bytes no usize can hold is OutOfMemory, before the allocator is asked",
+              why: why);
+}
+
 unsafe fn void ringTests(ref Tally t) {
     withRing(t: t, name: "command-ring: a fresh ring is empty, at its declared capacity", capacity: 4, body: freshIsEmpty);
     withRing(t: t, name: "command-ring: what is pushed is popped in order", capacity: 8, body: inOrder);
@@ -297,6 +313,7 @@ unsafe fn void ringTests(ref Tally t) {
     badCapacity(t: t);
     fromTheAllocator(t: t);
     noRoom(t: t);
+    tooManyBytes(t: t);
     withRing(t: t, name: "command-ring: a staged item is not popped until it is published, then in order", capacity: 8,
              body: stagedUnseen);
     withRing(t: t, name: "command-ring: what is staged counts against the capacity, and staging past it is refused",
